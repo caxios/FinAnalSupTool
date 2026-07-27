@@ -1,0 +1,734 @@
+/* Import Inter font — must be first statement per CSS spec */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/*
+ * index.css
+ * ─────────
+ * Global styles for the Financial Analysis Support Tool.
+ *
+ * Design system:
+ *   - Dark-first theme with charcoal base and slate panels
+ *   - Electric blue / teal accent gradient for interactive elements
+ *   - Inter font for clean, data-dense readability
+ *   - Glassmorphism surfaces with backdrop blur
+ *   - Smooth 200ms transitions for all interactive states
+ *
+ * This file is organized into sections:
+ *   1. CSS Variables (design tokens)
+ *   2. Reset & Base
+ *   3. App Layout
+ *   4. Header
+ *   5. Split Screen
+ *   6. Panes (shared)
+ *   7. Tabs
+ *   8. Financial Table (Upper Pane)
+ *   9. Text Viewer (Lower Pane)
+ *  10. Period Selector
+ *  11. Upload Modal
+ *  12. Buttons
+ *  13. Status Messages
+ */
+
+/* ═══════════════════════════════════════════════════════════════
+   1. CSS Variables — Design Tokens
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Base backgrounds */
+  --bg-primary: #0f1117;           /* Main app background */
+  --bg-secondary: #1a1d27;         /* Panel/card backgrounds */
+  --bg-surface: rgba(30, 34, 46, 0.8);   /* Elevated surfaces */
+  --bg-hover: rgba(59, 130, 246, 0.08);  /* Hover highlight */
+
+  /* Accent colors */
+  --accent-blue: #3b82f6;          /* Primary interactive color */
+  --accent-teal: #06b6d4;          /* Secondary accent */
+  --accent-gradient: linear-gradient(135deg, #3b82f6, #06b6d4);
+
+  /* Text colors */
+  --text-primary: #e2e8f0;         /* Main text */
+  --text-secondary: #94a3b8;       /* Subdued text */
+  --text-muted: #475569;           /* Very subdued (placeholders, nulls) */
+
+  /* Borders */
+  --border-subtle: rgba(148, 163, 184, 0.1);  /* Subtle dividers */
+  --border-active: rgba(59, 130, 246, 0.4);   /* Active/focus borders */
+
+  /* Glassmorphism */
+  --glass-bg: rgba(30, 34, 46, 0.6);
+  --glass-blur: blur(12px);
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 200ms ease;
+
+  /* Layout sizing */
+  --header-height: 56px;
+  --tab-height: 40px;
+
+  /* Status colors */
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-error: #ef4444;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   2. Reset & Base
+   ═══════════════════════════════════════════════════════════════ */
+
+
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;    /* Prevent page-level scroll — each pane scrolls independently */
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   3. App Layout
+   ═══════════════════════════════════════════════════════════════ */
+
+/* The app fills the full viewport:
+   - Header at the top (fixed height)
+   - Split container fills remaining space */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   4. Header
+   ═══════════════════════════════════════════════════════════════ */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--header-height);
+  padding: 0 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;      /* Don't let the header shrink */
+}
+
+.app-title {
+  font-size: 18px;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Subtle text showing how many filings are loaded */
+.filing-count {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  background: var(--bg-surface);
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   5. Split Screen
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Container for the upper pane + handle + lower pane.
+   Uses flexbox column to stack them vertically. */
+.split-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;             /* Fill all remaining space below the header */
+  overflow: hidden;
+}
+
+/* Prevent text selection while dragging the split handle */
+.split-dragging {
+  user-select: none;
+  cursor: row-resize;
+}
+
+/* The draggable divider between upper and lower panes */
+.split-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 8px;
+  cursor: row-resize;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  transition: background var(--transition-fast);
+}
+
+.split-handle:hover {
+  background: rgba(59, 130, 246, 0.15);
+}
+
+/* The visible bar inside the handle */
+.split-handle-bar {
+  width: 48px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  transition: background var(--transition-fast), width var(--transition-fast);
+}
+
+.split-handle:hover .split-handle-bar {
+  background: var(--accent-blue);
+  width: 64px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   6. Panes (shared styles for Upper and Lower)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Each pane fills its allocated height and has its own scroll */
+.pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Pane header: contains title, tabs, and controls */
+.pane-header {
+  padding: 12px 20px 0;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+/* Row layout for title + controls (used in Lower Pane) */
+.pane-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.pane-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+/* When inside a header-top row, remove bottom margin */
+.pane-header-top .pane-title {
+  margin-bottom: 0;
+}
+
+/* Pane body: scrollable content area */
+.pane-body {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   7. Tabs
+   ═══════════════════════════════════════════════════════════════ */
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;    /* Allow horizontal scroll if too many tabs */
+}
+
+/* Individual tab button */
+.tab {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  white-space: nowrap;
+  font-family: inherit;
+}
+
+.tab:hover {
+  color: var(--text-primary);
+}
+
+/* Active tab — blue underline indicator */
+.tab-active {
+  color: var(--accent-blue);
+  border-bottom-color: var(--accent-blue);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   8. Financial Table (Upper Pane)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Scrollable wrapper for the table */
+.table-wrapper {
+  overflow: auto;
+  height: 100%;
+  padding: 0;
+}
+
+.fin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+/* Sticky header row — stays visible during vertical scroll */
+.fin-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+/* Sticky first column (Line Item names) — stays during horizontal scroll */
+.fin-table thead th:first-child,
+.fin-table tbody td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-secondary);
+  font-weight: 500;
+}
+
+/* Corner cell (top-left) needs highest z-index to stay on top */
+.fin-table thead th:first-child {
+  z-index: 3;
+}
+
+.fin-table tbody td {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+/* Alternating row backgrounds for readability */
+.fin-table tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.fin-table tbody tr:nth-child(even) td:first-child {
+  background: var(--bg-secondary);
+}
+
+/* Hover highlight */
+.fin-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+/* Null/missing values shown as muted dashes */
+.cell-null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   9. Text Viewer (Lower Pane)
+   ═══════════════════════════════════════════════════════════════ */
+
+.text-viewer {
+  padding: 20px;
+  height: 100%;
+  overflow: auto;
+}
+
+.text-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent-blue);
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* The actual text content — preserves line breaks from the PDF */
+.text-content {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-wrap;      /* Preserve line breaks and wrap long lines */
+  word-wrap: break-word;
+  font-family: 'Inter', sans-serif;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   10. Period Selector (Lower Pane dropdown)
+   ═══════════════════════════════════════════════════════════════ */
+
+.period-select {
+  padding: 6px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+  outline: none;
+}
+
+.period-select:hover,
+.period-select:focus {
+  border-color: var(--accent-blue);
+}
+
+/* Style the dropdown options */
+.period-select option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   11. Upload Modal
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Full-screen overlay backdrop */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: var(--glass-blur);
+}
+
+/* Modal content box */
+.modal-content {
+  width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  padding: 24px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.3);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.modal-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+/* Close button (X) */
+.btn-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.btn-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* Drag & drop zone */
+.drop-zone {
+  border: 2px dashed var(--border-subtle);
+  border-radius: 8px;
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color var(--transition-normal), background var(--transition-normal);
+  margin-bottom: 16px;
+}
+
+.drop-zone:hover {
+  border-color: var(--accent-blue);
+  background: var(--bg-hover);
+}
+
+/* Active state when files are being dragged over */
+.drop-zone-active {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.drop-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.drop-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* File list (before upload) */
+.file-list {
+  margin-bottom: 16px;
+}
+
+.file-list h3 {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  color: var(--text-secondary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Remove file button */
+.btn-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  transition: color var(--transition-fast);
+}
+
+.btn-remove:hover {
+  color: var(--color-error);
+}
+
+/* Upload results */
+.upload-results h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.result-item {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border-left: 3px solid;
+}
+
+.result-success { border-left-color: var(--color-success); background: rgba(34, 197, 94, 0.05); }
+.result-partial { border-left-color: var(--color-warning); background: rgba(234, 179, 8, 0.05); }
+.result-failed  { border-left-color: var(--color-error);   background: rgba(239, 68, 68, 0.05); }
+
+.result-filename {
+  font-weight: 500;
+  flex: 1;
+}
+
+.result-status {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.result-success .result-status { color: var(--color-success); }
+.result-partial .result-status { color: var(--color-warning); }
+.result-failed  .result-status { color: var(--color-error); }
+
+.result-period {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  background: var(--bg-surface);
+  border-radius: 4px;
+}
+
+.result-message {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   12. Buttons
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Upload button in the header */
+.btn-upload {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: white;
+  background: var(--accent-gradient);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.btn-upload:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+/* Primary action button (used in modals) */
+.btn-primary {
+  display: block;
+  width: 100%;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  color: white;
+  background: var(--accent-gradient);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-top: 12px;
+  transition: opacity var(--transition-fast);
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   13. Status Messages (loading, error, empty)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Generic status message centered in a pane */
+.pane-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 40px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.pane-error {
+  color: var(--color-error);
+}
+
+.pane-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.error-message {
+  color: var(--color-error);
+  font-size: 13px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   14. Scrollbar Styling
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Custom scrollbars that match the dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
