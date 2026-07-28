@@ -25,11 +25,13 @@ Configured to allow requests from React dev servers (ports 3000, 5173, 5174).
 from __future__ import annotations
 
 import logging
+import io
 import tempfile
 import shutil
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 
@@ -44,7 +46,17 @@ from pdf_utils import (
     extract_all_sections,
     extract_tables,
     merge_tables_across_periods,
+    chars_to_pages,
+    extract_section_pages,
+    _find_section_span,
     SECTION_LABELS,
+    SECTION_MAP_10K,
+    SECTION_MAP_10Q,
+)
+from edgar_xbrl import (
+    build_xbrl_statement_tables,
+    build_ratios_table,
+    parse_period_end,
 )
 
 
@@ -109,23 +121,89 @@ _filing_meta: dict[str, dict] = {}
 
 # Cached merged tables — rebuilt after every upload so GET /financials
 # can return the result instantly without re-computing.
-# Structure: {"balance_sheet": merged_df, "income_statement": merged_df, ...}
+# Structure: {"balance_sheet": merged_df, "income_statement": merged_df,
+#             "cash_flow": merged_df, "ratios": merged_df}
 _merged_tables: dict[str, pd.DataFrame] = {}
+
+# Raw numeric metrics per period, used to compute historical financial ratios.
+# Populated only for filings whose data came from XBRL (the ratios need exact
+# numbers, and reuse the facts already fetched for the statement tables).
+# Structure: {"2025-Q2-10-Q": {"revenue": 2.0e9, "total_assets": ..., ...}}
+_metrics_store: dict[str, dict] = {}
+
+# Stores the page offset map for each filing period.
+# Used to reverse-map section character spans back to PDF page numbers.
+# Structure: {"2023-10K": [(page_num, char_start, char_end), ...]}
+_page_map_store: dict[str, list[tuple[int, int, int]]] = {}
+
+
+def _derive_period_key(
+    form_type: str, period_end, fallback: str
+) -> str:
+    """
+    Build a unique, human-readable period key from the period-end date.
+
+    Used only when XBRL doesn't supply an authoritative fiscal label
+    (e.g. "Q2 FY2026"). The key MUST be unique per filing so that Q1/Q2/Q3
+    of the same year don't collapse onto one shared key and overwrite each
+    other in the in-memory stores.
+
+      - 10-K → "FY2025"
+      - 10-Q → "Aug 2025"  (month + year — unique per quarter)
+      - unknown period → the provided fallback (usually the filename stem)
+    """
+    if period_end is None:
+        return fallback
+    if form_type == "10-K":
+        return f"FY{period_end.year}"
+    return period_end.strftime("%b %Y")
+
+
+def _order_period_columns(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """
+    Reorder a merged table's period columns chronologically (oldest → newest).
+
+    The first column ("Line Item" or "Ratio") is kept in place; the remaining
+    period columns are sorted by each period's stored `sort_date`. Periods
+    without a parseable date sort to the end (by name) so nothing is dropped.
+    """
+    if df is None or df.empty or len(df.columns) <= 1:
+        return df
+
+    first_col = df.columns[0]
+    period_cols = [c for c in df.columns if c != first_col]
+
+    def sort_key(pk: str):
+        sort_date = _filing_meta.get(pk, {}).get("sort_date")
+        # (0, date) dated periods first in chronological order;
+        # (1, name) undated periods after, ordered by key for stability.
+        return (0, sort_date) if sort_date else (1, str(pk))
+
+    ordered = sorted(period_cols, key=sort_key)
+    return df[[first_col] + ordered]
 
 
 def _rebuild_merged_tables() -> None:
     """
     Rebuild the cross-period merged tables from _table_store.
-    
+
     Called after every upload to ensure GET /financials returns
     up-to-date data that includes the newly uploaded filings.
     """
     global _merged_tables
-    if _table_store:
-        _merged_tables = merge_tables_across_periods(_table_store)
-    else:
-        _merged_tables = {}
-    logger.info(f"Rebuilt merged tables for {len(_table_store)} period(s)")
+    merged = merge_tables_across_periods(_table_store) if _table_store else {}
+    # Historical ratios table — computed from the raw per-period metrics.
+    # Shares the same shape as the statement tables so GET /financials and the
+    # frontend renderer treat "ratios" like any other statement type.
+    merged["ratios"] = build_ratios_table(_metrics_store)
+    # Order period columns as a chronological time series (not upload order).
+    for key in list(merged.keys()):
+        merged[key] = _order_period_columns(merged[key])
+    _merged_tables = merged
+    logger.info(
+        f"Rebuilt merged tables for {len(_table_store)} period(s), "
+        f"ratios for {len(_metrics_store)} period(s)"
+    )
 
 
 # =============================================================================
@@ -190,7 +268,6 @@ async def upload_filings(files: list[UploadFile] = File(...)):
             continue
 
         form_type = meta.get("form_type")
-        period_key = meta.get("period_key")
 
         # Can't proceed without knowing the form type
         if not form_type:
@@ -202,27 +279,77 @@ async def upload_filings(files: list[UploadFile] = File(...)):
             ))
             continue
 
-        # If period detection failed, use the filename as a fallback key
-        if not period_key:
-            period_key = Path(filename).stem
-            logger.warning(
-                f"Could not detect period for {filename}, using '{period_key}'"
-            )
+        # Parse the period-end date — the basis for both a unique, sortable
+        # period key and (later) matching XBRL facts to this filing.
+        period_end = parse_period_end(meta.get("period"))
+        # Provisional key used only if we can't derive anything better.
+        provisional_key = meta.get("period_key") or Path(filename).stem
 
         # ── Step 3: Extract financial tables ──────────────────
+        # XBRL-first: try SEC EDGAR's machine-readable XBRL data, which gives
+        # exact, standardized numbers with no PDF-table guesswork. Fall back
+        # to pdfplumber only if the company can't be identified or EDGAR fails.
+        detected_cik: int | None = None
+        xbrl_metrics: dict | None = None
+        xbrl_label: str | None = None
         try:
-            classified_tables = extract_tables(dest)
-            _table_store[period_key] = classified_tables
-            table_count = sum(len(v) for v in classified_tables.values())
-            logger.info(f"  Tables extracted: {table_count}")
+            (xbrl_tables, detected_cik, xbrl_metrics, xbrl_label) = (
+                await build_xbrl_statement_tables(
+                    dest,
+                    filename=filename,
+                    form_type=form_type,
+                    period_str=meta.get("period"),
+                )
+            )
         except Exception as e:
-            logger.error(f"Table extraction failed for {filename}: {e}")
-            classified_tables = {}
+            logger.error(f"XBRL extraction failed for {filename}: {e}")
+            xbrl_tables = None
+
+        # Finalize the period key. Prefer XBRL's authoritative fiscal label
+        # (e.g. "Q2 FY2026"); otherwise derive a unique, sortable key from the
+        # period-end date. This MUST be unique per filing — otherwise Q1/Q2/Q3
+        # of the same year would share one key and silently overwrite each
+        # other (the bug where same-year uploads were "skipped").
+        period_key = xbrl_label or _derive_period_key(
+            form_type, period_end, provisional_key
+        )
+
+        classified_tables: dict = {}
+        data_source = "pdfplumber"
+
+        if xbrl_tables is not None:
+            classified_tables = xbrl_tables
+            data_source = "xbrl"
+            _table_store[period_key] = classified_tables
+            # Store the raw metrics so the Financial Ratios tab can be built.
+            if xbrl_metrics is not None:
+                _metrics_store[period_key] = xbrl_metrics
+            table_count = sum(len(v) for v in classified_tables.values())
+            logger.info(
+                f"  [{period_key}] tables from XBRL (CIK {detected_cik}): "
+                f"{table_count} statement table(s)"
+            )
+        else:
+            # No XBRL for this period — drop any stale ratio metrics so a
+            # re-upload that falls back to pdfplumber doesn't show old ratios.
+            _metrics_store.pop(period_key, None)
+            # Fallback: parse tables out of the PDF with pdfplumber.
+            try:
+                classified_tables = extract_tables(dest)
+                _table_store[period_key] = classified_tables
+                table_count = sum(len(v) for v in classified_tables.values())
+                logger.info(
+                    f"  [{period_key}] tables extracted (pdfplumber): {table_count}"
+                )
+            except Exception as e:
+                logger.error(f"Table extraction failed for {filename}: {e}")
+                classified_tables = {}
 
         # ── Step 4: Extract text sections ─────────────────────
         try:
-            sections = extract_all_sections(dest, form_type=form_type)
+            sections, page_offsets = extract_all_sections(dest, form_type=form_type)
             _text_store[period_key] = sections
+            _page_map_store[period_key] = page_offsets
             found = [k for k, v in sections.items() if v is not None]
             logger.info(f"  Text sections extracted: {found}")
         except Exception as e:
@@ -230,11 +357,17 @@ async def upload_filings(files: list[UploadFile] = File(...)):
             sections = {}
 
         # ── Step 5: Store filing metadata ─────────────────────
+        # Persist the detected CIK, table source, and a `sort_date` so the
+        # merged tables can be ordered chronologically. Subsequent uploads for
+        # the same company reuse the cached XBRL facts (edgar_xbrl._facts_cache).
         _filing_meta[period_key] = {
             "filename": filename,
             "form_type": form_type,
             "period": meta.get("period"),
             "period_key": period_key,
+            "cik": detected_cik,
+            "data_source": data_source,
+            "sort_date": period_end.isoformat() if period_end else None,
         }
 
         # ── Determine overall processing status ──────────────
@@ -280,7 +413,7 @@ async def upload_filings(files: list[UploadFile] = File(...)):
 async def get_financials(
     statement_type: str = Query(
         "balance_sheet",
-        description="One of: balance_sheet, income_statement, cash_flow",
+        description="One of: balance_sheet, income_statement, cash_flow, ratios",
     ),
 ):
     """
@@ -290,9 +423,12 @@ async def get_financials(
     filing periods using a pandas outer join.  Columns represent
     filing periods; rows are line items.  Unmatched items across
     periods appear as null (outer-join semantics).
+
+    "ratios" is a synthetic statement: historical financial ratios
+    computed from the raw XBRL metrics of each period.
     """
     # Validate the statement_type parameter
-    valid_types = ["balance_sheet", "income_statement", "cash_flow"]
+    valid_types = ["balance_sheet", "income_statement", "cash_flow", "ratios"]
     if statement_type not in valid_types:
         raise HTTPException(
             status_code=400,
@@ -311,6 +447,13 @@ async def get_financials(
     df = _merged_tables.get(statement_type)
 
     if df is None or df.empty:
+        if statement_type == "ratios":
+            raise HTTPException(
+                status_code=404,
+                detail="No financial ratios available. Ratios are computed from "
+                       "SEC XBRL data, which was not available for the uploaded "
+                       "filings (the company could not be matched to an EDGAR CIK).",
+            )
         raise HTTPException(
             status_code=404,
             detail=f"No '{statement_type}' tables were found in the uploaded filings. "
@@ -416,6 +559,122 @@ async def list_periods():
             for key, meta in _filing_meta.items()
         ]
     }
+
+
+# =============================================================================
+# ENDPOINT: GET /filing-pdf
+# =============================================================================
+
+@app.get("/filing-pdf")
+async def get_filing_pdf(
+    period: str = Query(..., description="Filing period key, e.g. '2023-10K'"),
+    section: str = Query(..., description="Section key: 'mda', 'footnotes', etc."),
+):
+    """
+    Return a PDF containing only the pages for a specific section of a filing.
+
+    This endpoint:
+      1. Looks up the section's character span in the stored full text
+      2. Maps the char span to PDF page numbers using the page offset map
+      3. Extracts those pages into a new mini-PDF
+      4. Streams the PDF back to the client
+
+    The frontend embeds this in an iframe for native PDF viewing.
+    """
+    # Validate period exists
+    if period not in _filing_meta:
+        available = list(_filing_meta.keys()) if _filing_meta else []
+        raise HTTPException(
+            status_code=404,
+            detail=f"Period '{period}' not found. Available: {available}",
+        )
+
+    # Validate section key
+    valid_sections = list(SECTION_LABELS.keys())
+    if section not in valid_sections:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid section '{section}'. Must be one of: {valid_sections}",
+        )
+
+    # Check that we have page offset data for this period
+    if period not in _page_map_store:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No page map data for period '{period}'. Re-upload the filing.",
+        )
+
+    # Get the full text and page offsets
+    sections = _text_store.get(period, {})
+    page_offsets = _page_map_store[period]
+    meta = _filing_meta[period]
+    form_type = meta.get("form_type", "10-K")
+
+    # Re-extract the full text to find the section's character span.
+    # We need the original full_text to locate the section boundaries.
+    # Since we already stored page_offsets, we can reconstruct the text
+    # position by re-running the section finder on the stored text.
+    # But we don't store full_text — so we re-extract it from the PDF.
+    pdf_path = _upload_dir / meta["filename"]
+    if not pdf_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"PDF file for period '{period}' no longer exists on disk.",
+        )
+
+    # Re-extract full text to find section char boundaries
+    from pdf_utils import pdf_to_text
+    full_text, _ = pdf_to_text(pdf_path)
+
+    # Find the section's character span using the same regex logic
+    section_map = SECTION_MAP_10K if form_type == "10-K" else SECTION_MAP_10Q
+    config = section_map.get(section)
+    if config is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Section '{section}' not available for {form_type} filings.",
+        )
+
+    span = _find_section_span(
+        full_text,
+        start_patterns=config["start_patterns"],
+        end_patterns=config["end_patterns"],
+        exclude_patterns=config.get("exclude", []),
+    )
+
+    if span is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Section '{section}' was not found in the {period} filing.",
+        )
+
+    char_start, char_end = span
+
+    # Map character span to page numbers
+    page_range = chars_to_pages(char_start, char_end, page_offsets)
+    if page_range is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Could not map section '{section}' to PDF pages.",
+        )
+
+    start_page, end_page = page_range
+    logger.info(
+        f"Section '{section}' for {period}: chars {char_start}-{char_end} "
+        f"→ pages {start_page}-{end_page}"
+    )
+
+    # Extract the pages into a new PDF
+    pdf_bytes = extract_section_pages(pdf_path, start_page, end_page)
+
+    # Stream the PDF back to the client
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{period}_{section}.pdf"',
+        },
+    )
 
 
 # =============================================================================

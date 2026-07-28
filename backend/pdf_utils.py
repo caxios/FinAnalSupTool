@@ -183,7 +183,9 @@ SECTION_LABELS: dict[str, str] = {
 # SECTION 2: PDF → Plain Text Conversion (PyMuPDF)
 # =============================================================================
 
-def pdf_to_text(pdf_path: str | Path, skip_pages: int = 5) -> str:
+def pdf_to_text(
+    pdf_path: str | Path, skip_pages: int = 5,
+) -> tuple[str, list[tuple[int, int, int]]]:
     """
     Convert a PDF file to plain text using PyMuPDF.
 
@@ -200,22 +202,34 @@ def pdf_to_text(pdf_path: str | Path, skip_pages: int = 5) -> str:
         skip_pages:  Number of leading pages to skip (default: 5).
 
     Returns:
-        Concatenated plain text from page (skip_pages) to the last page.
-        Each page's text is separated by double newlines.
+        A tuple of:
+          - full_text: Concatenated plain text from page (skip_pages) onward.
+          - page_offsets: List of (page_num, char_start, char_end) tuples that
+            map each page's text to its character range in full_text.  This
+            allows reverse-mapping a character position back to a page number.
     """
     doc = fitz.open(str(pdf_path))
-    parts: list[str] = []
 
     total_pages = len(doc)
     # Don't skip more pages than the document has
     start_page = min(skip_pages, total_pages)
 
+    parts: list[str] = []
+    page_offsets: list[tuple[int, int, int]] = []  # (page_num, char_start, char_end)
+    current_offset = 0
+
     for page_num in range(start_page, total_pages):
         page = doc[page_num]
         text = page.get_text("text")  # Extract as plain text (not HTML/XML)
+        page_start = current_offset
+
         if text:
             parts.append(text)
+            current_offset += len(text)
         parts.append("\n\n")  # Double newline to mark page boundaries
+        current_offset += 2    # len("\n\n")
+
+        page_offsets.append((page_num, page_start, current_offset))
 
     doc.close()
 
@@ -225,7 +239,7 @@ def pdf_to_text(pdf_path: str | Path, skip_pages: int = 5) -> str:
         f"{total_pages} pages total, skipped first {start_page}, "
         f"{len(full_text):,} chars extracted"
     )
-    return full_text
+    return full_text, page_offsets
 
 
 # =============================================================================
@@ -361,7 +375,7 @@ def extract_all_sections(
     pdf_path: str | Path,
     form_type: str = "10-K",
     skip_pages: int = 5,
-) -> dict[str, str | None]:
+) -> tuple[dict[str, str | None], list[tuple[int, int, int]]]:
     """
     Extract ALL target sections from a single filing PDF.
 
@@ -375,11 +389,12 @@ def extract_all_sections(
         skip_pages:  Pages to skip for ToC avoidance.
 
     Returns:
-        Dict mapping section_key → extracted text (or None if not found).
-        Example: {"mda": "Management's Discussion...", "footnotes": None, ...}
+        A tuple of:
+          - sections: Dict mapping section_key → extracted text (or None).
+          - page_offsets: Page offset map from pdf_to_text for reverse-mapping.
     """
     # Step 1: Convert entire PDF to plain text (skip ToC pages)
-    full_text = pdf_to_text(pdf_path, skip_pages=skip_pages)
+    full_text, page_offsets = pdf_to_text(pdf_path, skip_pages=skip_pages)
 
     # Step 2: Determine which sections to extract based on form type
     section_map = SECTION_MAP_10K if form_type == "10-K" else SECTION_MAP_10Q
@@ -393,7 +408,85 @@ def extract_all_sections(
     found = [k for k, v in sections.items() if v is not None]
     logger.info(f"Sections extracted from {Path(pdf_path).name}: {found}")
 
-    return sections
+    return sections, page_offsets
+
+
+def chars_to_pages(
+    char_start: int,
+    char_end: int,
+    page_offsets: list[tuple[int, int, int]],
+) -> tuple[int, int] | None:
+    """
+    Map a character span in the full text back to a (start_page, end_page) range.
+
+    Uses the page offset map produced by pdf_to_text() to determine which
+    PDF pages contain the characters from char_start to char_end.
+
+    Args:
+        char_start:    Start character index in the full text.
+        char_end:      End character index in the full text.
+        page_offsets:  List of (page_num, char_start, char_end) from pdf_to_text.
+
+    Returns:
+        (first_page, last_page) tuple (0-indexed PDF page numbers),
+        or None if no overlap is found.
+    """
+    first_page: int | None = None
+    last_page: int | None = None
+
+    for page_num, p_start, p_end in page_offsets:
+        # Check if this page overlaps with the character span
+        if p_end > char_start and p_start < char_end:
+            if first_page is None:
+                first_page = page_num
+            last_page = page_num
+
+    if first_page is None or last_page is None:
+        return None
+
+    return (first_page, last_page)
+
+
+def extract_section_pages(
+    pdf_path: str | Path,
+    start_page: int,
+    end_page: int,
+) -> bytes:
+    """
+    Extract a range of pages from a PDF into a new standalone PDF.
+
+    Uses PyMuPDF to create a new document containing only the specified
+    pages, and returns it as raw PDF bytes suitable for streaming to a client.
+
+    Args:
+        pdf_path:    Path to the original PDF file.
+        start_page:  First page to include (0-indexed).
+        end_page:    Last page to include (0-indexed, inclusive).
+
+    Returns:
+        Raw bytes of the new PDF containing only the requested pages.
+    """
+    src_doc = fitz.open(str(pdf_path))
+    new_doc = fitz.open()  # Create a new empty document
+
+    # Clamp page range to valid bounds
+    start_page = max(0, start_page)
+    end_page = min(end_page, len(src_doc) - 1)
+
+    # Copy pages from source to new document
+    new_doc.insert_pdf(src_doc, from_page=start_page, to_page=end_page)
+
+    # Get the raw PDF bytes
+    pdf_bytes = new_doc.tobytes()
+
+    new_doc.close()
+    src_doc.close()
+
+    logger.info(
+        f"Extracted pages {start_page}-{end_page} from {Path(pdf_path).name} "
+        f"({end_page - start_page + 1} pages, {len(pdf_bytes):,} bytes)"
+    )
+    return pdf_bytes
 
 
 # =============================================================================
@@ -646,8 +739,27 @@ def merge_tables_across_periods(
                 continue
 
             # If a period has multiple tables of the same type,
-            # concatenate them into one (e.g., two balance sheet pages)
-            combined = pd.concat(tables, ignore_index=True)
+            # concatenate them into one (e.g., two balance sheet pages).
+            # First, deduplicate column names within each table —
+            # pdfplumber can produce tables with duplicate headers
+            # (e.g., two columns both named "2024"), and pd.concat
+            # requires uniquely-valued column indices.
+            deduped_tables = []
+            for tbl in tables:
+                cols = list(tbl.columns)
+                seen: dict[str, int] = {}
+                new_cols: list[str] = []
+                for c in cols:
+                    if c in seen:
+                        seen[c] += 1
+                        new_cols.append(f"{c}_{seen[c]}")
+                    else:
+                        seen[c] = 0
+                        new_cols.append(c)
+                tbl.columns = new_cols
+                deduped_tables.append(tbl)
+
+            combined = pd.concat(deduped_tables, ignore_index=True)
 
             if combined.empty or combined.shape[1] < 2:
                 continue

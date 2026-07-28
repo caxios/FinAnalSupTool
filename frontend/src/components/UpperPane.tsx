@@ -3,16 +3,20 @@
  * ─────────────
  * The top half of the split-screen layout — Quantitative Viewer.
  *
- * Displays financial table data in three tabs:
+ * Displays financial table data in four tabs:
  *   1. Balance Sheet
  *   2. Income Statement
  *   3. Cash Flow
+ *   4. Financial Ratios (historical — computed from the statements' XBRL data)
  *
  * Each tab fetches merged table data from GET /financials and
  * renders it in a scrollable HTML table with:
  *   - Sticky header row (stays visible while scrolling vertically)
  *   - Sticky first column (Line Item names stay visible while scrolling horizontally)
  *   - Null values displayed as "—" with muted styling
+ *
+ * The currently displayed table can be exported to CSV (opens directly
+ * in Excel) via the Download button in the pane header.
  */
 
 import { useState, useEffect } from "react";
@@ -24,7 +28,40 @@ const TABS = [
   { key: "balance_sheet", label: "Balance Sheet" },
   { key: "income_statement", label: "Income Statement" },
   { key: "cash_flow", label: "Cash Flow" },
+  { key: "ratios", label: "Financial Ratios" },
 ] as const;
+
+/**
+ * Serialize a financial table to CSV text.
+ *
+ * Every field is wrapped in double quotes (and internal quotes doubled)
+ * because the values contain commas — e.g. "20,586.3" — which would
+ * otherwise break column alignment. A UTF-8 BOM is prepended so Excel
+ * renders the "—"/currency characters correctly.
+ */
+function toCsv(data: FinancialTableResponse): string {
+  const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const headerLine = data.columns.map(esc).join(",");
+  const bodyLines = data.rows.map((row) =>
+    data.columns.map((col) => esc(row[col] ?? "")).join(",")
+  );
+  return "﻿" + [headerLine, ...bodyLines].join("\r\n");
+}
+
+/** Trigger a client-side download of the current table as a .csv file. */
+function downloadCsv(data: FinancialTableResponse): void {
+  const blob = new Blob([toCsv(data)], {
+    type: "text/csv;charset=utf-8;",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${data.statement_type}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
 
 interface UpperPaneProps {
   /** Incremented after upload to trigger data refresh */
@@ -72,9 +109,19 @@ export default function UpperPane({ refreshKey }: UpperPaneProps) {
 
   return (
     <div className="pane upper-pane">
-      {/* Pane header with title and tabs */}
+      {/* Pane header with title, download button, and tabs */}
       <div className="pane-header">
-        <h2 className="pane-title">Quantitative Data</h2>
+        <div className="pane-header-top">
+          <h2 className="pane-title">Quantitative Data</h2>
+          <button
+            className="download-btn"
+            onClick={() => data && downloadCsv(data)}
+            disabled={!data || data.rows.length === 0}
+            title="Download the current table as a CSV file (opens in Excel)"
+          >
+            ↓ Download CSV
+          </button>
+        </div>
         <div className="tab-bar">
           {TABS.map((tab) => (
             <button

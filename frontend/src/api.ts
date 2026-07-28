@@ -120,3 +120,16 @@ export async function getFilingText(
 export async function getPeriods(): Promise<PeriodsResponse> {
   return fetchJson<PeriodsResponse>(`${API_BASE}/periods`);
 }
+
+/**
+ * Build the URL for fetching a section's PDF pages.
+ *
+ * This returns a URL string (not a fetch call) because the frontend
+ * loads it directly in an <iframe src="...">.
+ *
+ * @param period  - Filing period key, e.g., "2023-10K"
+ * @param section - Section key: "mda", "footnotes", etc.
+ */
+export function getFilingPdfUrl(period: string, section: string): string {
+  return `${API_BASE}/filing-pdf?period=${encodeURIComponent(period)}&section=${encodeURIComponent(section)}`;
+}
