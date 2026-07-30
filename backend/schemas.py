@@ -137,6 +137,40 @@ class FilingTextResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Chat Endpoint Models (POST /chat)
+# ─────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    """One turn in the conversation history."""
+
+    # "user" for the person, "assistant" (or "model") for prior AI answers
+    role: str = Field(description="'user' or 'assistant'")
+    content: str = Field(description="The message text")
+
+
+class ChatRequest(BaseModel):
+    """
+    Request body for POST /chat.
+
+    `history` carries prior turns so the assistant has conversational context;
+    the backend re-assembles the filing-data context on every call, so newly
+    uploaded filings are always available without resending them.
+    """
+
+    question: str = Field(description="The user's current question")
+    history: list[ChatMessage] = Field(
+        default_factory=list,
+        description="Prior conversation turns (oldest first), excluding the current question",
+    )
+
+
+class ChatResponse(BaseModel):
+    """Response from POST /chat — the assistant's answer."""
+
+    answer: str = Field(description="The assistant's Markdown answer")
+
+
+# ─────────────────────────────────────────────────────────────
 # Error Model
 # ─────────────────────────────────────────────────────────────
 

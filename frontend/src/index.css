@@ -161,12 +161,23 @@ body {
    5. Split Screen
    ═══════════════════════════════════════════════════════════════ */
 
+/* Body row: split-screen (left) + AI assistant panel (right).
+   Fills all vertical space below the header. */
+.app-body {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;       /* Allow children to shrink and scroll */
+  overflow: hidden;
+}
+
 /* Container for the upper pane + handle + lower pane.
    Uses flexbox column to stack them vertically. */
 .split-container {
   display: flex;
   flex-direction: column;
-  flex: 1;             /* Fill all remaining space below the header */
+  flex: 1;             /* Fill remaining horizontal space beside the chat panel */
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -817,4 +828,275 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   14. AI Assistant (Chat Panel)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Docked side panel to the right of the split view */
+.chat-panel {
+  width: 400px;
+  max-width: 90vw;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.chat-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Small gradient dot used in the title and the FAB */
+.chat-title-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-gradient);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
+}
+
+.chat-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.chat-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* Scrollable message list */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Message bubbles */
+.chat-msg {
+  max-width: 92%;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.chat-msg-user {
+  align-self: flex-end;
+  background: var(--accent-blue);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-msg-assistant {
+  align-self: flex-start;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+.chat-thinking {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* Markdown rendering inside assistant messages */
+.chat-md {
+  white-space: normal;
+}
+
+.chat-md-p {
+  margin: 0 0 8px;
+}
+
+.chat-md-p:last-child {
+  margin-bottom: 0;
+}
+
+.chat-md-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.chat-md-list li {
+  margin-bottom: 4px;
+}
+
+.chat-md strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.chat-md code {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 12px;
+  background: rgba(148, 163, 184, 0.15);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Empty-state with starter prompts */
+.chat-empty {
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chat-empty-lead {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.chat-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-suggestion {
+  text-align: left;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.chat-suggestion:hover:not(:disabled) {
+  border-color: var(--accent-blue);
+  background: var(--bg-hover);
+}
+
+.chat-suggestion:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-error {
+  align-self: stretch;
+  font-size: 12.5px;
+  color: var(--color-error);
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+/* Input row */
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.chat-input {
+  flex: 1;
+  resize: none;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 10px;
+  transition: border-color var(--transition-fast);
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.chat-input:disabled {
+  opacity: 0.6;
+}
+
+.chat-send {
+  align-self: flex-end;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-blue);
+  border: none;
+  border-radius: 8px;
+  padding: 9px 16px;
+  cursor: pointer;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+}
+
+.chat-send:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.chat-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Floating action button (shown when the panel is collapsed) */
+.chat-fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-gradient);
+  border: none;
+  border-radius: 24px;
+  padding: 11px 20px;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.chat-fab:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 26px rgba(59, 130, 246, 0.55);
 }

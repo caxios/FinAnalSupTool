@@ -66,3 +66,18 @@ export interface PeriodInfo {
 export interface PeriodsResponse {
   periods: PeriodInfo[];
 }
+
+// =============================================================================
+// Chat Endpoint Types (POST /chat)
+// =============================================================================
+
+/** One turn in the AI assistant conversation. */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** Response from POST /chat — the assistant's answer. */
+export interface ChatResponse {
+  answer: string;
+}

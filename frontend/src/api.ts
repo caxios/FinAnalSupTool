@@ -16,6 +16,8 @@ import type {
   FinancialTableResponse,
   FilingTextResponse,
   PeriodsResponse,
+  ChatMessage,
+  ChatResponse,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -132,4 +134,22 @@ export async function getPeriods(): Promise<PeriodsResponse> {
  */
 export function getFilingPdfUrl(period: string, section: string): string {
   return `${API_BASE}/filing-pdf?period=${encodeURIComponent(period)}&section=${encodeURIComponent(section)}`;
+}
+
+/**
+ * Ask the AI assistant a question about the uploaded filings.
+ *
+ * @param question - The user's current question
+ * @param history  - Prior conversation turns (oldest first), excluding the
+ *                    current question. Gives the assistant follow-up context.
+ */
+export async function askChat(
+  question: string,
+  history: ChatMessage[]
+): Promise<ChatResponse> {
+  return fetchJson<ChatResponse>(`${API_BASE}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, history }),
+  });
 }

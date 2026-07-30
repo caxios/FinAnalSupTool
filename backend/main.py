@@ -40,6 +40,8 @@ from schemas import (
     FilingMeta,
     FinancialTableResponse,
     FilingTextResponse,
+    ChatRequest,
+    ChatResponse,
 )
 from pdf_utils import (
     detect_filing_metadata,
@@ -58,6 +60,7 @@ from edgar_xbrl import (
     build_ratios_table,
     parse_period_end,
 )
+from gemini_chat import build_context, ask_gemini, gemini_api_key
 
 
 # =============================================================================
@@ -675,6 +678,55 @@ async def get_filing_pdf(
             "Content-Disposition": f'inline; filename="{period}_{section}.pdf"',
         },
     )
+
+
+# =============================================================================
+# ENDPOINT: POST /chat
+# =============================================================================
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Answer a natural-language question about the uploaded filings using Gemini.
+
+    The assistant is grounded strictly in the app's own data — the merged
+    financial statements + ratios and the extracted filing text sections. It
+    does not fetch anything new from SEC EDGAR. The full data context is
+    re-assembled on each call, so freshly uploaded filings are always in scope.
+    """
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    # Fail fast with a clear message if the key isn't configured.
+    if not gemini_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="The AI assistant is not configured: GEMINI_API_KEY is not "
+                   "set on the backend. Set it in the server environment and "
+                   "restart to enable chat.",
+        )
+
+    # Short-circuit when there's nothing to talk about yet.
+    if not _filing_meta:
+        return ChatResponse(
+            answer="No filings have been uploaded yet. Upload one or more SEC "
+                   "10-K / 10-Q PDFs, then ask me about the financials, ratios, "
+                   "or filing text.",
+        )
+
+    # Assemble the grounding context from the current in-memory data.
+    context = build_context(_merged_tables, _text_store, _filing_meta)
+
+    history = [{"role": m.role, "content": m.content} for m in request.history]
+
+    try:
+        answer = await ask_gemini(question, history, context)
+    except RuntimeError as e:
+        # Configuration / API errors from the Gemini layer.
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return ChatResponse(answer=answer)
 
 
 # =============================================================================

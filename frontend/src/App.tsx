@@ -22,6 +22,7 @@ import { getPeriods } from "./api";
 import Header from "./components/Header";
 import UpperPane from "./components/UpperPane";
 import LowerPane from "./components/LowerPane";
+import ChatPanel from "./components/ChatPanel";
 
 export default function App() {
   // List of available filing periods (fetched from backend)
@@ -37,6 +38,9 @@ export default function App() {
 
   // Whether the user is currently dragging the split handle
   const [isDragging, setIsDragging] = useState(false);
+
+  // Whether the AI assistant side panel is open
+  const [chatOpen, setChatOpen] = useState(false);
 
   // Ref for the container to calculate mouse position relative to it
   const containerRef = useRef<HTMLDivElement>(null);
@@ -115,29 +119,47 @@ export default function App() {
         onUploadComplete={handleUploadComplete}
       />
 
-      {/* Split-screen container */}
-      <div
-        ref={containerRef}
-        className={`split-container ${isDragging ? "split-dragging" : ""}`}
-      >
-        {/* Upper pane — height controlled by splitRatio */}
-        <div style={{ height: `${splitRatio}%` }}>
-          <UpperPane refreshKey={refreshKey} />
-        </div>
-
-        {/* Draggable divider handle */}
+      {/* Body: split-screen on the left, AI assistant panel on the right */}
+      <div className="app-body">
+        {/* Split-screen container */}
         <div
-          className="split-handle"
-          onMouseDown={handleMouseDown}
+          ref={containerRef}
+          className={`split-container ${isDragging ? "split-dragging" : ""}`}
         >
-          <div className="split-handle-bar" />
+          {/* Upper pane — height controlled by splitRatio */}
+          <div style={{ height: `${splitRatio}%` }}>
+            <UpperPane refreshKey={refreshKey} />
+          </div>
+
+          {/* Draggable divider handle */}
+          <div
+            className="split-handle"
+            onMouseDown={handleMouseDown}
+          >
+            <div className="split-handle-bar" />
+          </div>
+
+          {/* Lower pane — takes remaining height */}
+          <div style={{ height: `${100 - splitRatio}%` }}>
+            <LowerPane periods={periods} />
+          </div>
         </div>
 
-        {/* Lower pane — takes remaining height */}
-        <div style={{ height: `${100 - splitRatio}%` }}>
-          <LowerPane periods={periods} />
-        </div>
+        {/* AI assistant side panel (collapsible) */}
+        <ChatPanel isOpen={chatOpen} onClose={() => setChatOpen(false)} />
       </div>
+
+      {/* Floating toggle — shown when the assistant panel is collapsed */}
+      {!chatOpen && (
+        <button
+          className="chat-fab"
+          onClick={() => setChatOpen(true)}
+          title="Ask the AI assistant"
+        >
+          <span className="chat-title-dot" />
+          Ask AI
+        </button>
+      )}
     </div>
   );
 }
