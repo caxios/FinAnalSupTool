@@ -30,6 +30,15 @@ import tempfile
 import shutil
 from pathlib import Path
 
+# Load backend/.env (if present) so API keys — GEMINI_API_KEY, TAVILY_API_KEY,
+# YOUTUBE_API_KEY, etc. — can live in a file instead of shell exports. Optional:
+# if python-dotenv isn't installed, we silently fall back to the real env.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except Exception:
+    pass
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +51,16 @@ from schemas import (
     FilingTextResponse,
     ChatRequest,
     ChatResponse,
+    CompanyInfo,
+    CompanyResponse,
+    NewsArticleModel,
+    NewsResponse,
+    VideoModel,
+    VideoResponse,
+    TranscriptResponse,
+    EarningsResponse,
+    SentimentIndicatorModel,
+    SentimentResponse,
 )
 from pdf_utils import (
     detect_filing_metadata,
@@ -60,7 +79,16 @@ from edgar_xbrl import (
     build_ratios_table,
     parse_period_end,
 )
-from gemini_chat import build_context, ask_gemini, gemini_api_key
+from edgar_xbrl import resolve_company_identity
+from gemini_chat import (
+    build_context,
+    ask_gemini,
+    gemini_api_key,
+    gemini_generate,
+)
+import news_provider
+import youtube_provider
+from market_sentiment import compute_market_sentiment
 
 
 # =============================================================================
@@ -138,6 +166,13 @@ _metrics_store: dict[str, dict] = {}
 # Used to reverse-map section character spans back to PDF page numbers.
 # Structure: {"2023-10K": [(page_num, char_start, char_end), ...]}
 _page_map_store: dict[str, list[tuple[int, int, int]]] = {}
+
+# Caches the most recent media/macro data fetched by Views 2 & 3, so the AI
+# assistant's context (build_context) can reference it — this is what makes the
+# assistant "see" all views. Cleared on restart, like every other store.
+# Keys: "company_news", "company_videos", "macro_news", "macro_videos",
+#       "sentiment"; plus "transcripts" (video_id → {title, text/summary}).
+_media_cache: dict = {"transcripts": {}}
 
 
 def _derive_period_key(
@@ -363,12 +398,24 @@ async def upload_filings(files: list[UploadFile] = File(...)):
         # Persist the detected CIK, table source, and a `sort_date` so the
         # merged tables can be ordered chronologically. Subsequent uploads for
         # the same company reuse the cached XBRL facts (edgar_xbrl._facts_cache).
+        # Also resolve the company name/ticker (from data already fetched) so
+        # the Company Media view (View 2) knows which company to look up.
+        entity_name: str | None = None
+        ticker: str | None = None
+        if detected_cik is not None:
+            try:
+                entity_name, ticker = await resolve_company_identity(detected_cik)
+            except Exception as e:
+                logger.warning(f"Company identity resolution failed: {e}")
+
         _filing_meta[period_key] = {
             "filename": filename,
             "form_type": form_type,
             "period": meta.get("period"),
             "period_key": period_key,
             "cik": detected_cik,
+            "entity_name": entity_name,
+            "ticker": ticker,
             "data_source": data_source,
             "sort_date": period_end.isoformat() if period_end else None,
         }
@@ -565,6 +612,314 @@ async def list_periods():
 
 
 # =============================================================================
+# Company / Media / Macro — helpers
+# =============================================================================
+
+def _derive_companies() -> CompanyResponse:
+    """Group uploaded filings by CIK to identify the company/companies."""
+    groups: dict[int, dict] = {}
+    for meta in _filing_meta.values():
+        cik = meta.get("cik")
+        if cik is None:
+            continue
+        g = groups.setdefault(cik, {"name": None, "ticker": None, "count": 0})
+        g["count"] += 1
+        if meta.get("entity_name"):
+            g["name"] = meta["entity_name"]
+        if meta.get("ticker"):
+            g["ticker"] = meta["ticker"]
+
+    companies = [
+        CompanyInfo(cik=cik, name=g["name"], ticker=g["ticker"], filing_count=g["count"])
+        for cik, g in groups.items()
+    ]
+    companies.sort(key=lambda c: c.filing_count, reverse=True)
+    return CompanyResponse(
+        primary=companies[0] if companies else None,
+        companies=companies,
+    )
+
+
+def _primary_company() -> CompanyInfo | None:
+    return _derive_companies().primary
+
+
+def _news_models(articles) -> list[NewsArticleModel]:
+    return [
+        NewsArticleModel(
+            title=a.title, url=a.url, source=a.source,
+            snippet=a.snippet, published=a.published,
+        )
+        for a in articles
+    ]
+
+
+def _video_models(videos) -> list[VideoModel]:
+    return [
+        VideoModel(
+            video_id=v.video_id, title=v.title, channel=v.channel,
+            url=v.url, embed_url=v.embed_url, thumbnail=v.thumbnail,
+            published=v.published, description=v.description,
+        )
+        for v in videos
+    ]
+
+
+def _build_media_context() -> str:
+    """
+    Turn the cached media/macro data (from Views 2 & 3) into a Markdown block
+    for the AI assistant, so it can answer across all views. Only includes what
+    the user has actually fetched this session.
+    """
+    parts: list[str] = []
+
+    cn: NewsResponse | None = _media_cache.get("company_news")
+    if cn and cn.articles:
+        parts.append("# Company News (recent, from web search)")
+        for a in cn.articles[:10]:
+            parts.append(f"- [{a.source}] {a.title} — {a.snippet[:200]}")
+        parts.append("")
+
+    mn: NewsResponse | None = _media_cache.get("macro_news")
+    if mn and mn.articles:
+        parts.append("# Macro / Market News (recent)")
+        for a in mn.articles[:10]:
+            parts.append(f"- [{a.source}] {a.title} — {a.snippet[:200]}")
+        parts.append("")
+
+    sent: SentimentResponse | None = _media_cache.get("sentiment")
+    if sent and sent.configured and sent.summary:
+        parts.append(
+            f"# Market Sentiment: {sent.label} "
+            f"({sent.score if sent.score is not None else 'n/a'}/100)"
+        )
+        parts.append(sent.summary)
+        for ind in sent.indicators:
+            parts.append(f"- {ind.theme} ({ind.direction}): {ind.note}")
+        parts.append("")
+
+    for scope_key in ("company_videos", "macro_videos"):
+        vr: VideoResponse | None = _media_cache.get(scope_key)
+        if vr and vr.videos:
+            label = "Company" if scope_key == "company_videos" else "Macro"
+            parts.append(f"# {label} Analysis Videos")
+            for v in vr.videos[:8]:
+                parts.append(f"- {v.title} — {v.channel}")
+            parts.append("")
+
+    transcripts: dict = _media_cache.get("transcripts", {})
+    if transcripts:
+        parts.append("# Video Transcript Summaries")
+        for vid, info in list(transcripts.items())[:5]:
+            summ = info.get("summary") or (info.get("text", "")[:400])
+            if summ:
+                parts.append(f"- ({vid}) {summ}")
+        parts.append("")
+
+    return "\n".join(parts)
+
+
+# =============================================================================
+# ENDPOINT: GET /company
+# =============================================================================
+
+@app.get("/company", response_model=CompanyResponse)
+async def get_company():
+    """Return the company/companies derived from the uploaded filings."""
+    return _derive_companies()
+
+
+# =============================================================================
+# ENDPOINT: GET /media/news  (company-specific)
+# =============================================================================
+
+@app.get("/media/news", response_model=NewsResponse)
+async def media_news():
+    """Recent news for the uploaded company (Tavily, finance domains)."""
+    primary = _primary_company()
+    if primary is None or not (primary.name or primary.ticker):
+        return NewsResponse(
+            configured=bool(news_provider.tavily_api_key()),
+            scope="company",
+            message="No company detected yet. Upload a 10-K/10-Q first.",
+        )
+    result = await news_provider.search_company_news(
+        primary.name or primary.ticker or "", primary.ticker
+    )
+    resp = NewsResponse(
+        configured=result.configured, scope="company", company=primary,
+        articles=_news_models(result.articles), message=result.message,
+    )
+    _media_cache["company_news"] = resp
+    return resp
+
+
+# =============================================================================
+# ENDPOINT: GET /media/videos  (company-specific)
+# =============================================================================
+
+@app.get("/media/videos", response_model=VideoResponse)
+async def media_videos():
+    """YouTube analysis videos for the uploaded company."""
+    primary = _primary_company()
+    if primary is None or not (primary.name or primary.ticker):
+        return VideoResponse(
+            configured=bool(youtube_provider.youtube_api_key()),
+            scope="company",
+            message="No company detected yet. Upload a 10-K/10-Q first.",
+        )
+    result = await youtube_provider.search_company_videos(
+        primary.name or primary.ticker or "", primary.ticker
+    )
+    resp = VideoResponse(
+        configured=result.configured, scope="company",
+        videos=_video_models(result.videos), message=result.message,
+    )
+    _media_cache["company_videos"] = resp
+    return resp
+
+
+# =============================================================================
+# ENDPOINT: GET /media/transcript
+# =============================================================================
+
+@app.get("/media/transcript", response_model=TranscriptResponse)
+async def media_transcript(
+    video_id: str = Query(..., description="YouTube video id"),
+    summarize: bool = Query(True, description="Also return a Gemini summary"),
+):
+    """Fetch a video's transcript (no key) and optionally summarize it."""
+    tr = youtube_provider.get_transcript(video_id)
+    if not tr.available:
+        return TranscriptResponse(
+            available=False, video_id=video_id, message=tr.message
+        )
+
+    summary: str | None = None
+    if summarize and gemini_api_key():
+        try:
+            summary = await gemini_generate(
+                "You summarize YouTube finance/analysis video transcripts into "
+                "4-6 concise, factual bullet points.",
+                tr.text[:16000],
+            )
+        except RuntimeError:
+            summary = None
+
+    _media_cache["transcripts"][video_id] = {
+        "summary": summary, "text": tr.text[:4000],
+    }
+    return TranscriptResponse(
+        available=True, video_id=video_id, text=tr.text, summary=summary
+    )
+
+
+# =============================================================================
+# ENDPOINT: GET /media/earnings  (best-effort)
+# =============================================================================
+
+@app.get("/media/earnings", response_model=EarningsResponse)
+async def media_earnings():
+    """
+    Best-effort earnings material: an earnings-call video (YouTube) plus a
+    Gemini summary of recent earnings news (Tavily). No dedicated earnings-
+    transcript provider is wired in.
+    """
+    primary = _primary_company()
+    if primary is None or not (primary.name or primary.ticker):
+        return EarningsResponse(
+            configured=bool(
+                youtube_provider.youtube_api_key() or news_provider.tavily_api_key()
+            ),
+            message="No company detected yet. Upload a 10-K/10-Q first.",
+        )
+
+    label = primary.name or primary.ticker or ""
+    vids = await youtube_provider.search_videos(
+        f"{label} earnings call latest quarter", max_results=1
+    )
+    video = _video_models(vids.videos)[0] if (vids.configured and vids.videos) else None
+
+    news = await news_provider.search_company_news(
+        f"{label} earnings results", primary.ticker, max_results=5
+    )
+    summary: str | None = None
+    if news.configured and news.articles and gemini_api_key():
+        payload = "\n".join(
+            f"- {a.title}: {a.snippet[:200]}" for a in news.articles
+        )
+        try:
+            summary = await gemini_generate(
+                "Summarize this company's latest earnings highlights from these "
+                "news headlines in 3-5 concise bullets.",
+                payload,
+            )
+        except RuntimeError:
+            summary = None
+
+    configured = vids.configured or news.configured
+    msg = None if configured else (
+        "Set YOUTUBE_API_KEY and/or TAVILY_API_KEY to see earnings material."
+    )
+    return EarningsResponse(
+        configured=configured, company=primary, video=video,
+        summary=summary, articles=_news_models(news.articles), message=msg,
+    )
+
+
+# =============================================================================
+# ENDPOINT: GET /macro/news
+# =============================================================================
+
+@app.get("/macro/news", response_model=NewsResponse)
+async def macro_news():
+    """Aggregated macro/market news (Tavily, finance domains)."""
+    result = await news_provider.search_macro_news()
+    resp = NewsResponse(
+        configured=result.configured, scope="macro",
+        articles=_news_models(result.articles), message=result.message,
+    )
+    _media_cache["macro_news"] = resp
+    return resp
+
+
+# =============================================================================
+# ENDPOINT: GET /macro/videos
+# =============================================================================
+
+@app.get("/macro/videos", response_model=VideoResponse)
+async def macro_videos():
+    """Macro/economic YouTube videos (curated channels if configured)."""
+    result = await youtube_provider.search_macro_videos()
+    resp = VideoResponse(
+        configured=result.configured, scope="macro",
+        videos=_video_models(result.videos), message=result.message,
+    )
+    _media_cache["macro_videos"] = resp
+    return resp
+
+
+# =============================================================================
+# ENDPOINT: GET /macro/sentiment
+# =============================================================================
+
+@app.get("/macro/sentiment", response_model=SentimentResponse)
+async def macro_sentiment():
+    """Gemini-synthesized market sentiment from aggregated macro headlines."""
+    r = await compute_market_sentiment()
+    resp = SentimentResponse(
+        configured=r.configured, label=r.label, score=r.score, summary=r.summary,
+        indicators=[
+            SentimentIndicatorModel(theme=i.theme, direction=i.direction, note=i.note)
+            for i in r.indicators
+        ],
+        headline_count=r.headline_count, message=r.message,
+    )
+    _media_cache["sentiment"] = resp
+    return resp
+
+
+# =============================================================================
 # ENDPOINT: GET /filing-pdf
 # =============================================================================
 
@@ -707,16 +1062,22 @@ async def chat(request: ChatRequest):
                    "restart to enable chat.",
         )
 
-    # Short-circuit when there's nothing to talk about yet.
-    if not _filing_meta:
-        return ChatResponse(
-            answer="No filings have been uploaded yet. Upload one or more SEC "
-                   "10-K / 10-Q PDFs, then ask me about the financials, ratios, "
-                   "or filing text.",
-        )
+    # Assemble the grounding context from the current in-memory data, including
+    # any media/macro data the user has fetched (so the AI sees all views).
+    media_context = _build_media_context()
+    context = build_context(
+        _merged_tables, _text_store, _filing_meta,
+        extra_context=media_context,
+    )
 
-    # Assemble the grounding context from the current in-memory data.
-    context = build_context(_merged_tables, _text_store, _filing_meta)
+    # Short-circuit only when there's truly nothing to talk about — no filings
+    # AND no media/macro data has been fetched (the Macro view needs no upload).
+    if not _filing_meta and not media_context.strip():
+        return ChatResponse(
+            answer="No data yet. Upload SEC 10-K / 10-Q PDFs on the Dashboard, "
+                   "or open the Company Media / Macro Sentiment views to pull in "
+                   "news and market data — then ask me about any of it.",
+        )
 
     history = [{"role": m.role, "content": m.content} for m in request.history]
 

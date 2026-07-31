@@ -268,6 +268,32 @@ async def fetch_company_facts(cik: int) -> dict | None:
     return facts
 
 
+async def resolve_company_identity(cik: int) -> tuple[str | None, str | None]:
+    """
+    Resolve a company's display name and ticker from a CIK, reusing data the
+    app has already fetched (cached company facts + the SEC ticker map). No
+    extra network round-trip beyond the one-time ticker-map load.
+
+    Returns (entity_name, ticker); either may be None if unavailable.
+    """
+    name: str | None = None
+    facts = _facts_cache.get(cik)
+    if facts:
+        name = facts.get("entityName")
+
+    ticker: str | None = None
+    try:
+        ticker_map, _ = await fetch_ticker_to_cik_map()
+        for t, c in ticker_map.items():
+            if c == cik:
+                ticker = t
+                break
+    except Exception as e:
+        logger.warning(f"Ticker lookup for CIK {cik} failed: {e}")
+
+    return name, ticker
+
+
 # =============================================================================
 # SECTION 4: Curated Concept Mappings
 # =============================================================================

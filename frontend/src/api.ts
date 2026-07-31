@@ -18,6 +18,12 @@ import type {
   PeriodsResponse,
   ChatMessage,
   ChatResponse,
+  CompanyResponse,
+  NewsResponse,
+  VideoResponse,
+  TranscriptResponse,
+  EarningsResponse,
+  SentimentResponse,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -152,4 +158,53 @@ export async function askChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, history }),
   });
+}
+
+// =============================================================================
+// Company / Media / Macro
+// =============================================================================
+
+/** The company/companies derived from uploaded filings. */
+export async function getCompany(): Promise<CompanyResponse> {
+  return fetchJson<CompanyResponse>(`${API_BASE}/company`);
+}
+
+/** Company-specific news feed (View 2). */
+export async function getCompanyNews(): Promise<NewsResponse> {
+  return fetchJson<NewsResponse>(`${API_BASE}/media/news`);
+}
+
+/** Company-specific analysis videos (View 2). */
+export async function getCompanyVideos(): Promise<VideoResponse> {
+  return fetchJson<VideoResponse>(`${API_BASE}/media/videos`);
+}
+
+/** Fetch (and optionally summarize) a YouTube video transcript. */
+export async function getTranscript(
+  videoId: string,
+  summarize = true
+): Promise<TranscriptResponse> {
+  return fetchJson<TranscriptResponse>(
+    `${API_BASE}/media/transcript?video_id=${encodeURIComponent(videoId)}&summarize=${summarize}`
+  );
+}
+
+/** Best-effort earnings material for the company (View 2). */
+export async function getEarnings(): Promise<EarningsResponse> {
+  return fetchJson<EarningsResponse>(`${API_BASE}/media/earnings`);
+}
+
+/** Aggregated macro/market news (View 3). */
+export async function getMacroNews(): Promise<NewsResponse> {
+  return fetchJson<NewsResponse>(`${API_BASE}/macro/news`);
+}
+
+/** Macro/economic videos (View 3). */
+export async function getMacroVideos(): Promise<VideoResponse> {
+  return fetchJson<VideoResponse>(`${API_BASE}/macro/videos`);
+}
+
+/** Market sentiment synthesis (View 3). */
+export async function getMarketSentiment(): Promise<SentimentResponse> {
+  return fetchJson<SentimentResponse>(`${API_BASE}/macro/sentiment`);
 }

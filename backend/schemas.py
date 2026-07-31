@@ -171,6 +171,101 @@ class ChatResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Company Endpoint Models (GET /company)
+# ─────────────────────────────────────────────────────────────
+
+class CompanyInfo(BaseModel):
+    """A company derived from the uploaded filings."""
+    cik: int | None = None
+    name: str | None = None
+    ticker: str | None = None
+    filing_count: int = 0
+
+
+class CompanyResponse(BaseModel):
+    """Response from GET /company — companies behind the uploaded filings."""
+    primary: CompanyInfo | None = Field(
+        None, description="The company with the most uploaded filings"
+    )
+    companies: list[CompanyInfo] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────
+# Media Endpoint Models (GET /media/*, GET /macro/*)
+# ─────────────────────────────────────────────────────────────
+
+class NewsArticleModel(BaseModel):
+    title: str
+    url: str
+    source: str
+    snippet: str = ""
+    published: str | None = None
+
+
+class NewsResponse(BaseModel):
+    """News feed (company or macro). `configured=False` → show a connect-key card."""
+    configured: bool
+    scope: str = Field(description="'company' or 'macro'")
+    company: CompanyInfo | None = None
+    articles: list[NewsArticleModel] = Field(default_factory=list)
+    message: str | None = None
+
+
+class VideoModel(BaseModel):
+    video_id: str
+    title: str
+    channel: str
+    url: str
+    embed_url: str
+    thumbnail: str | None = None
+    published: str | None = None
+    description: str = ""
+
+
+class VideoResponse(BaseModel):
+    configured: bool
+    scope: str = Field(description="'company' or 'macro'")
+    videos: list[VideoModel] = Field(default_factory=list)
+    message: str | None = None
+
+
+class TranscriptResponse(BaseModel):
+    available: bool
+    video_id: str
+    text: str = ""
+    summary: str | None = Field(
+        None, description="Optional Gemini summary of the transcript"
+    )
+    message: str | None = None
+
+
+class EarningsResponse(BaseModel):
+    """Best-effort earnings-call material: a video + a summarized article."""
+    configured: bool
+    company: CompanyInfo | None = None
+    video: VideoModel | None = None
+    summary: str | None = None
+    articles: list[NewsArticleModel] = Field(default_factory=list)
+    message: str | None = None
+
+
+class SentimentIndicatorModel(BaseModel):
+    theme: str
+    direction: str  # bullish | neutral | bearish
+    note: str
+
+
+class SentimentResponse(BaseModel):
+    configured: bool
+    label: str = "unknown"
+    score: int | None = None
+    summary: str = ""
+    indicators: list[SentimentIndicatorModel] = Field(default_factory=list)
+    headline_count: int = 0
+    message: str | None = None
+
+
+# ─────────────────────────────────────────────────────────────
 # Error Model
 # ─────────────────────────────────────────────────────────────
 

@@ -102,10 +102,12 @@ def build_context(
     merged_tables: dict[str, pd.DataFrame],
     text_store: dict[str, dict],
     filing_meta: dict[str, dict],
+    extra_context: str | None = None,
 ) -> str:
     """
-    Assemble the full data context (financials + ratios + filing text) that
-    the assistant is allowed to reason over.
+    Assemble the full data context that the assistant is allowed to reason over:
+    financials + ratios + filing text, plus any `extra_context` (the latest
+    media/macro data cached from Views 2 & 3, pre-formatted as Markdown).
 
     Returns a single Markdown string. Empty stores yield a short notice.
     """
@@ -160,7 +162,13 @@ def build_context(
             parts.append(text)
             parts.append("")
 
-    if not has_numbers and not has_text:
+    # ── Media / macro context (from Views 2 & 3, if the user has visited them) ──
+    has_extra = bool(extra_context and extra_context.strip())
+    if has_extra:
+        parts.append(extra_context.strip())
+        parts.append("")
+
+    if not has_numbers and not has_text and not has_extra:
         return "(No filing data has been uploaded yet.)"
 
     return "\n".join(parts)
@@ -172,14 +180,19 @@ def build_context(
 
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are a financial analysis assistant embedded in a tool that parses SEC \
-filings (10-K / 10-Q). Answer the user's questions about the companies and \
-periods below using ONLY the data provided in this prompt.
+filings (10-K / 10-Q) and also gathers company news, analysis videos, and \
+market-sentiment data. Answer the user's questions using ONLY the data \
+provided in this prompt (financial statements, ratios, filing text, and any \
+news / video transcripts / market-sentiment sections present below).
 
 Rules:
 - Base every claim on the DATA section. Do not invent numbers or use outside \
 knowledge about the company's actuals.
+- For news/sentiment, attribute to the source and note it reflects that \
+outlet's reporting, not verified fact.
 - If the data needed to answer isn't present, say so plainly and tell the \
-user which filing/period to upload.
+user which filing to upload or which view (Company Media / Macro Sentiment) \
+to open so it gets fetched.
 - Quantify where possible: cite the specific line item, period, and value. \
 When useful, compute changes/growth from the numbers given.
 - Financial statement values are in USD millions unless the label says \
@@ -220,34 +233,33 @@ def _to_gemini_contents(
     return contents
 
 
-async def ask_gemini(
-    question: str,
-    history: list[dict],
-    context: str,
+async def _gemini_call(
+    system_instruction: str,
+    contents: list[dict],
+    *,
+    temperature: float = 0.3,
+    max_output_tokens: int = 2048,
 ) -> str:
     """
-    Send the question (with data context + prior turns) to Gemini and return
-    the answer text.
+    Low-level Gemini generateContent call shared by the chat assistant and the
+    one-shot helpers (transcript summaries, sentiment synthesis).
 
-    Raises:
-        RuntimeError with a user-friendly message on configuration or API
-        errors (the endpoint surfaces this as an HTTP error detail).
+    Raises RuntimeError with a user-friendly message on any failure.
     """
     api_key = gemini_api_key()
     if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY is not set on the server. Add it to the backend "
-            "environment and restart to enable the assistant."
+            "environment and restart to enable AI features."
         )
 
-    model = _model_name()
-    url = _GEMINI_URL.format(model=model)
+    url = _GEMINI_URL.format(model=_model_name())
     body = {
-        "system_instruction": {"parts": [{"text": _build_system_prompt(context)}]},
-        "contents": _to_gemini_contents(history, question),
+        "system_instruction": {"parts": [{"text": system_instruction}]},
+        "contents": contents,
         "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 2048,
+            "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
         },
     }
 
@@ -266,7 +278,6 @@ async def ask_gemini(
         raise RuntimeError(f"Could not reach the Gemini API: {e}")
 
     if resp.status_code != 200:
-        # Surface Gemini's error message when available.
         detail = resp.text
         try:
             detail = resp.json().get("error", {}).get("message", detail)
@@ -278,7 +289,6 @@ async def ask_gemini(
     data = resp.json()
     candidates = data.get("candidates", [])
     if not candidates:
-        # e.g. blocked by safety filters
         feedback = data.get("promptFeedback", {})
         raise RuntimeError(
             f"Gemini returned no answer. {feedback or 'Try rephrasing your question.'}"
@@ -287,6 +297,40 @@ async def ask_gemini(
     parts = candidates[0].get("content", {}).get("parts", [])
     answer = "".join(p.get("text", "") for p in parts).strip()
     if not answer:
-        raise RuntimeError("Gemini returned an empty answer. Try rephrasing.")
-
+        raise RuntimeError("Gemini returned an empty answer.")
     return answer
+
+
+async def ask_gemini(
+    question: str,
+    history: list[dict],
+    context: str,
+) -> str:
+    """
+    Chat: send the question (with data context + prior turns) to Gemini.
+
+    Raises RuntimeError on configuration/API errors (endpoint surfaces as HTTP).
+    """
+    return await _gemini_call(
+        _build_system_prompt(context),
+        _to_gemini_contents(history, question),
+    )
+
+
+async def gemini_generate(
+    system: str,
+    user: str,
+    *,
+    temperature: float = 0.3,
+    max_output_tokens: int = 1024,
+) -> str:
+    """
+    One-shot generation helper (no chat history). Used for transcript
+    summaries and market-sentiment synthesis.
+    """
+    return await _gemini_call(
+        system,
+        [{"role": "user", "parts": [{"text": user}]}],
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+    )

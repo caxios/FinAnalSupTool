@@ -81,3 +81,90 @@ export interface ChatMessage {
 export interface ChatResponse {
   answer: string;
 }
+
+// =============================================================================
+// Company Types (GET /company)
+// =============================================================================
+
+export interface CompanyInfo {
+  cik: number | null;
+  name: string | null;
+  ticker: string | null;
+  filing_count: number;
+}
+
+export interface CompanyResponse {
+  primary: CompanyInfo | null;
+  companies: CompanyInfo[];
+}
+
+// =============================================================================
+// Media / Macro Types (GET /media/*, GET /macro/*)
+// =============================================================================
+
+export interface NewsArticle {
+  title: string;
+  url: string;
+  source: string;
+  snippet: string;
+  published: string | null;
+}
+
+export interface NewsResponse {
+  configured: boolean;
+  scope: "company" | "macro";
+  company: CompanyInfo | null;
+  articles: NewsArticle[];
+  message: string | null;
+}
+
+export interface Video {
+  video_id: string;
+  title: string;
+  channel: string;
+  url: string;
+  embed_url: string;
+  thumbnail: string | null;
+  published: string | null;
+  description: string;
+}
+
+export interface VideoResponse {
+  configured: boolean;
+  scope: "company" | "macro";
+  videos: Video[];
+  message: string | null;
+}
+
+export interface TranscriptResponse {
+  available: boolean;
+  video_id: string;
+  text: string;
+  summary: string | null;
+  message: string | null;
+}
+
+export interface EarningsResponse {
+  configured: boolean;
+  company: CompanyInfo | null;
+  video: Video | null;
+  summary: string | null;
+  articles: NewsArticle[];
+  message: string | null;
+}
+
+export interface SentimentIndicator {
+  theme: string;
+  direction: "bullish" | "neutral" | "bearish" | string;
+  note: string;
+}
+
+export interface SentimentResponse {
+  configured: boolean;
+  label: string;
+  score: number | null;
+  summary: string;
+  indicators: SentimentIndicator[];
+  headline_count: number;
+  message: string | null;
+}

@@ -5,3 +5,5 @@ pdfplumber
 PyMuPDF
 pandas
 httpx
+youtube-transcript-api
+python-dotenv
