@@ -10,6 +10,20 @@ import type { VideoResponse, Video, TranscriptResponse } from "../../types";
 import { getTranscript } from "../../api";
 import MediaNotice from "./MediaNotice";
 
+/** Trigger a download of the transcript text as a .txt file. */
+function downloadTranscript(video: Video, text: string) {
+  const safe = video.title.replace(/[^\w.-]+/g, "_").slice(0, 60) || video.video_id;
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${safe}-transcript.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 interface VideoListProps {
   data: VideoResponse | null;
   loading: boolean;
@@ -32,7 +46,7 @@ function VideoCard({ video }: { video: Video }) {
     setLoading(true);
     setErr(null);
     try {
-      setTranscript(await getTranscript(video.video_id, true));
+      setTranscript(await getTranscript(video.video_id));
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load transcript.");
     } finally {
@@ -71,23 +85,21 @@ function VideoCard({ video }: { video: Video }) {
             {err && <div className="transcript-status transcript-error">{err}</div>}
             {transcript && !transcript.available && (
               <div className="transcript-status">
-                {transcript.message ?? "No transcript available."}
+                {transcript.message ?? "No transcript available for this video."}
               </div>
             )}
             {transcript && transcript.available && (
               <>
-                {transcript.summary && (
-                  <div className="transcript-summary">
-                    <div className="transcript-label">AI Summary</div>
-                    <div className="transcript-summary-text">
-                      {transcript.summary}
-                    </div>
-                  </div>
-                )}
-                <details className="transcript-full">
-                  <summary>Full transcript</summary>
-                  <p className="transcript-text">{transcript.text}</p>
-                </details>
+                <div className="transcript-toolbar">
+                  <span className="transcript-label">Full transcript</span>
+                  <button
+                    className="transcript-download"
+                    onClick={() => downloadTranscript(video, transcript.text)}
+                  >
+                    ↓ Download .txt
+                  </button>
+                </div>
+                <p className="transcript-text">{transcript.text}</p>
               </>
             )}
           </div>

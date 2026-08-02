@@ -10,6 +10,9 @@
 .env.*
 !.env.example
 
+# ── Per-user runtime data ──
+backend/channels.json
+
 # ── Python ──
 __pycache__/
 *.py[cod]

@@ -29,6 +29,7 @@ import io
 import tempfile
 import shutil
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 # Load backend/.env (if present) so API keys — GEMINI_API_KEY, TAVILY_API_KEY,
 # YOUTUBE_API_KEY, etc. — can live in a file instead of shell exports. Optional:
@@ -61,6 +62,9 @@ from schemas import (
     EarningsResponse,
     SentimentIndicatorModel,
     SentimentResponse,
+    ChannelModel,
+    ChannelsResponse,
+    AddChannelRequest,
 )
 from pdf_utils import (
     detect_filing_metadata,
@@ -88,6 +92,7 @@ from gemini_chat import (
 )
 import news_provider
 import youtube_provider
+import channel_store
 from market_sentiment import compute_market_sentiment
 
 
@@ -644,6 +649,62 @@ def _primary_company() -> CompanyInfo | None:
     return _derive_companies().primary
 
 
+def _news_range_kwargs(
+    days: int | None, start: str | None, end: str | None
+) -> dict:
+    """
+    Normalize a range selection into news-provider kwargs.
+
+    A custom window (start/end, YYYY-MM-DD) takes precedence over the relative
+    `days` look-back used by the preset ranges (1D/1W/1M/3M/6M/1Y).
+    """
+    if start or end:
+        return {"days": None, "start_date": start, "end_date": end}
+    return {"days": days, "start_date": None, "end_date": None}
+
+
+def _video_time_bounds(
+    days: int | None, start: str | None, end: str | None
+) -> tuple[str | None, str | None]:
+    """Translate a range selection into YouTube publishedAfter/Before (RFC-3339)."""
+    if start or end:
+        after = f"{start}T00:00:00Z" if start else None
+        before = f"{end}T23:59:59Z" if end else None
+        return after, before
+    if days:
+        after = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        return after, None
+    return None, None
+
+
+async def _videos_from_channels(
+    query: str,
+    channel_ids: list[str],
+    after: str | None,
+    before: str | None,
+    per_channel: int = 4,
+):
+    """
+    Merge videos across several saved channels (newest first).
+
+    Returns a youtube_provider.VideoResult; surfaces a not-configured result
+    immediately if the API key is missing.
+    """
+    combined = youtube_provider.VideoResult(configured=True, videos=[])
+    for cid in channel_ids[:6]:
+        r = await youtube_provider.search_videos(
+            query, channel_id=cid, max_results=per_channel,
+            published_after=after, published_before=before,
+        )
+        if not r.configured:
+            return r
+        combined.videos.extend(r.videos)
+    combined.videos.sort(key=lambda v: v.published or "", reverse=True)
+    return combined
+
+
 def _news_models(articles) -> list[NewsArticleModel]:
     return [
         NewsArticleModel(
@@ -709,11 +770,11 @@ def _build_media_context() -> str:
 
     transcripts: dict = _media_cache.get("transcripts", {})
     if transcripts:
-        parts.append("# Video Transcript Summaries")
+        parts.append("# Video Transcript Excerpts")
         for vid, info in list(transcripts.items())[:5]:
-            summ = info.get("summary") or (info.get("text", "")[:400])
-            if summ:
-                parts.append(f"- ({vid}) {summ}")
+            excerpt = info.get("text", "")[:400]
+            if excerpt:
+                parts.append(f"- ({vid}) {excerpt}")
         parts.append("")
 
     return "\n".join(parts)
@@ -734,7 +795,12 @@ async def get_company():
 # =============================================================================
 
 @app.get("/media/news", response_model=NewsResponse)
-async def media_news():
+async def media_news(
+    days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
+    start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
+    end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
+    max_results: int = Query(30, ge=1, le=30, description="Max articles (<=30)"),
+):
     """Recent news for the uploaded company (Tavily, finance domains)."""
     primary = _primary_company()
     if primary is None or not (primary.name or primary.ticker):
@@ -744,7 +810,8 @@ async def media_news():
             message="No company detected yet. Upload a 10-K/10-Q first.",
         )
     result = await news_provider.search_company_news(
-        primary.name or primary.ticker or "", primary.ticker
+        primary.name or primary.ticker or "", primary.ticker,
+        max_results=max_results, **_news_range_kwargs(days, start, end),
     )
     resp = NewsResponse(
         configured=result.configured, scope="company", company=primary,
@@ -759,8 +826,20 @@ async def media_news():
 # =============================================================================
 
 @app.get("/media/videos", response_model=VideoResponse)
-async def media_videos():
-    """YouTube analysis videos for the uploaded company."""
+async def media_videos(
+    channel_id: str | None = Query(None, description="Saved channel id, or omit/'all'"),
+    days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
+    start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
+    end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
+    max_results: int = Query(9, ge=1, le=25, description="Max videos"),
+):
+    """
+    YouTube analysis videos for the uploaded company.
+
+    - `channel_id` set → videos from that channel matching the company.
+    - omitted / "all" → merged across saved channels (company-filtered); if no
+      channels are saved, falls back to a keyword search by company name.
+    """
     primary = _primary_company()
     if primary is None or not (primary.name or primary.ticker):
         return VideoResponse(
@@ -768,9 +847,24 @@ async def media_videos():
             scope="company",
             message="No company detected yet. Upload a 10-K/10-Q first.",
         )
-    result = await youtube_provider.search_company_videos(
-        primary.name or primary.ticker or "", primary.ticker
-    )
+    label = primary.name or primary.ticker or ""
+    after, before = _video_time_bounds(days, start, end)
+
+    if channel_id and channel_id != "all":
+        result = await youtube_provider.search_videos(
+            label, channel_id=channel_id, max_results=max_results,
+            published_after=after, published_before=before,
+        )
+    else:
+        saved = channel_store.channel_ids()
+        if saved:
+            result = await _videos_from_channels(label, saved, after, before)
+        else:
+            result = await youtube_provider.search_company_videos(
+                label, primary.ticker, max_results=max_results,
+                published_after=after, published_before=before,
+            )
+
     resp = VideoResponse(
         configured=result.configured, scope="company",
         videos=_video_models(result.videos), message=result.message,
@@ -786,32 +880,81 @@ async def media_videos():
 @app.get("/media/transcript", response_model=TranscriptResponse)
 async def media_transcript(
     video_id: str = Query(..., description="YouTube video id"),
-    summarize: bool = Query(True, description="Also return a Gemini summary"),
 ):
-    """Fetch a video's transcript (no key) and optionally summarize it."""
+    """Fetch a video's full transcript (no key needed; captions permitting)."""
     tr = youtube_provider.get_transcript(video_id)
     if not tr.available:
         return TranscriptResponse(
             available=False, video_id=video_id, message=tr.message
         )
 
-    summary: str | None = None
-    if summarize and gemini_api_key():
-        try:
-            summary = await gemini_generate(
-                "You summarize YouTube finance/analysis video transcripts into "
-                "4-6 concise, factual bullet points.",
-                tr.text[:16000],
-            )
-        except RuntimeError:
-            summary = None
-
-    _media_cache["transcripts"][video_id] = {
-        "summary": summary, "text": tr.text[:4000],
-    }
+    # Cache a slice of the transcript text so the AI assistant can reference it.
+    _media_cache["transcripts"][video_id] = {"text": tr.text[:4000]}
     return TranscriptResponse(
-        available=True, video_id=video_id, text=tr.text, summary=summary
+        available=True, video_id=video_id, text=tr.text, summary=None
     )
+
+
+# =============================================================================
+# ENDPOINTS: /channels  (curated YouTube channel list)
+# =============================================================================
+
+def _channel_models() -> list[ChannelModel]:
+    return [
+        ChannelModel(
+            channel_id=c["channel_id"], title=c.get("title", c["channel_id"]),
+            handle=c.get("handle"),
+        )
+        for c in channel_store.list_channels()
+    ]
+
+
+@app.get("/channels", response_model=ChannelsResponse)
+async def get_channels():
+    """List the user's saved YouTube channels."""
+    return ChannelsResponse(configured=True, channels=_channel_models())
+
+
+@app.post("/channels", response_model=ChannelsResponse)
+async def add_channel(request: AddChannelRequest):
+    """
+    Add a channel by URL, @handle, UC… id, or name. Resolves it to a
+    channel_id + title via the YouTube API (an explicit UC id works even
+    without a key), then persists the list.
+    """
+    raw = request.input.strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Channel input cannot be empty.")
+
+    result = await youtube_provider.resolve_channel(raw)
+    if not result.ok or result.channel is None:
+        raise HTTPException(
+            status_code=422,
+            detail=result.message or "Could not resolve that channel.",
+        )
+
+    ch = result.channel
+    channel_store.add_channel(
+        {"channel_id": ch.channel_id, "title": ch.title, "handle": ch.handle}
+    )
+    return ChannelsResponse(configured=True, channels=_channel_models())
+
+
+@app.delete("/channels/{channel_id}", response_model=ChannelsResponse)
+async def delete_channel(channel_id: str):
+    """Remove a saved channel."""
+    channel_store.remove_channel(channel_id)
+    return ChannelsResponse(configured=True, channels=_channel_models())
+
+
+@app.patch("/channels/{channel_id}", response_model=ChannelsResponse)
+async def rename_channel(channel_id: str, request: AddChannelRequest):
+    """Rename a saved channel's display title (reuses the `input` field)."""
+    title = request.input.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title cannot be empty.")
+    channel_store.rename_channel(channel_id, title)
+    return ChannelsResponse(configured=True, channels=_channel_models())
 
 
 # =============================================================================
@@ -819,11 +962,14 @@ async def media_transcript(
 # =============================================================================
 
 @app.get("/media/earnings", response_model=EarningsResponse)
-async def media_earnings():
+async def media_earnings(
+    year: int = Query(..., description="Calendar/fiscal year, e.g. 2026"),
+    quarter: int = Query(..., ge=1, le=4, description="Quarter 1-4"),
+):
     """
-    Best-effort earnings material: an earnings-call video (YouTube) plus a
-    Gemini summary of recent earnings news (Tavily). No dedicated earnings-
-    transcript provider is wired in.
+    Best-effort earnings material for a chosen quarter (e.g. 2026 Q1):
+    earnings-call videos (YouTube) plus a Gemini summary of earnings news
+    (Tavily). No dedicated earnings-transcript provider is wired in.
     """
     primary = _primary_company()
     if primary is None or not (primary.name or primary.ticker):
@@ -831,17 +977,19 @@ async def media_earnings():
             configured=bool(
                 youtube_provider.youtube_api_key() or news_provider.tavily_api_key()
             ),
+            year=year, quarter=quarter,
             message="No company detected yet. Upload a 10-K/10-Q first.",
         )
 
     label = primary.name or primary.ticker or ""
-    vids = await youtube_provider.search_videos(
-        f"{label} earnings call latest quarter", max_results=1
-    )
-    video = _video_models(vids.videos)[0] if (vids.configured and vids.videos) else None
+    term = f"{label} Q{quarter} {year} earnings call"
+
+    vids = await youtube_provider.search_videos(term, max_results=3)
+    videos = _video_models(vids.videos) if vids.configured else []
 
     news = await news_provider.search_company_news(
-        f"{label} earnings results", primary.ticker, max_results=5
+        f"{label} Q{quarter} {year} earnings results", primary.ticker,
+        max_results=6, days=None, start_date=None, end_date=None,
     )
     summary: str | None = None
     if news.configured and news.articles and gemini_api_key():
@@ -850,8 +998,8 @@ async def media_earnings():
         )
         try:
             summary = await gemini_generate(
-                "Summarize this company's latest earnings highlights from these "
-                "news headlines in 3-5 concise bullets.",
+                f"Summarize {label}'s Q{quarter} {year} earnings highlights from "
+                f"these news headlines in 3-5 concise bullets.",
                 payload,
             )
         except RuntimeError:
@@ -862,8 +1010,9 @@ async def media_earnings():
         "Set YOUTUBE_API_KEY and/or TAVILY_API_KEY to see earnings material."
     )
     return EarningsResponse(
-        configured=configured, company=primary, video=video,
-        summary=summary, articles=_news_models(news.articles), message=msg,
+        configured=configured, company=primary, year=year, quarter=quarter,
+        videos=videos, summary=summary,
+        articles=_news_models(news.articles), message=msg,
     )
 
 
@@ -872,9 +1021,16 @@ async def media_earnings():
 # =============================================================================
 
 @app.get("/macro/news", response_model=NewsResponse)
-async def macro_news():
+async def macro_news(
+    days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
+    start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
+    end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
+    max_results: int = Query(30, ge=1, le=30, description="Max articles (<=30)"),
+):
     """Aggregated macro/market news (Tavily, finance domains)."""
-    result = await news_provider.search_macro_news()
+    result = await news_provider.search_macro_news(
+        max_results=max_results, **_news_range_kwargs(days, start, end)
+    )
     resp = NewsResponse(
         configured=result.configured, scope="macro",
         articles=_news_models(result.articles), message=result.message,
@@ -888,9 +1044,37 @@ async def macro_news():
 # =============================================================================
 
 @app.get("/macro/videos", response_model=VideoResponse)
-async def macro_videos():
-    """Macro/economic YouTube videos (curated channels if configured)."""
-    result = await youtube_provider.search_macro_videos()
+async def macro_videos(
+    channel_id: str | None = Query(None, description="Saved channel id, or omit/'all'"),
+    days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
+    start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
+    end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
+    max_results: int = Query(9, ge=1, le=25, description="Max videos"),
+):
+    """
+    Macro/economic YouTube videos.
+
+    - `channel_id` set → that channel's newest videos.
+    - omitted / "all" → merged newest across saved channels; if none saved,
+      falls back to a broad macro keyword search.
+    """
+    after, before = _video_time_bounds(days, start, end)
+
+    if channel_id and channel_id != "all":
+        result = await youtube_provider.search_videos(
+            channel_id=channel_id, max_results=max_results,
+            published_after=after, published_before=before,
+        )
+    else:
+        saved = channel_store.channel_ids()
+        if saved:
+            # Empty query → browse each channel's latest uploads.
+            result = await _videos_from_channels("", saved, after, before)
+        else:
+            result = await youtube_provider.search_macro_videos(
+                max_results=max_results, published_after=after, published_before=before
+            )
+
     resp = VideoResponse(
         configured=result.configured, scope="macro",
         videos=_video_models(result.videos), message=result.message,

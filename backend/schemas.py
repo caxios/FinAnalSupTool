@@ -240,13 +240,34 @@ class TranscriptResponse(BaseModel):
 
 
 class EarningsResponse(BaseModel):
-    """Best-effort earnings-call material: a video + a summarized article."""
+    """Best-effort earnings-call material for a chosen fiscal quarter."""
     configured: bool
     company: CompanyInfo | None = None
-    video: VideoModel | None = None
+    year: int | None = None
+    quarter: int | None = None
+    videos: list[VideoModel] = Field(default_factory=list)
     summary: str | None = None
     articles: list[NewsArticleModel] = Field(default_factory=list)
     message: str | None = None
+
+
+# ── YouTube channel management (GET/POST/DELETE /channels) ──
+
+class ChannelModel(BaseModel):
+    channel_id: str
+    title: str
+    handle: str | None = None
+
+
+class ChannelsResponse(BaseModel):
+    configured: bool = True
+    channels: list[ChannelModel] = Field(default_factory=list)
+    message: str | None = None
+
+
+class AddChannelRequest(BaseModel):
+    """Add a channel by URL, @handle, UC… id, or name."""
+    input: str = Field(description="Channel URL, @handle, UC id, or name")
 
 
 class SentimentIndicatorModel(BaseModel):

@@ -147,9 +147,23 @@ export interface TranscriptResponse {
 export interface EarningsResponse {
   configured: boolean;
   company: CompanyInfo | null;
-  video: Video | null;
+  year: number | null;
+  quarter: number | null;
+  videos: Video[];
   summary: string | null;
   articles: NewsArticle[];
+  message: string | null;
+}
+
+export interface ChannelInfo {
+  channel_id: string;
+  title: string;
+  handle: string | null;
+}
+
+export interface ChannelsResponse {
+  configured: boolean;
+  channels: ChannelInfo[];
   message: string | null;
 }
 
@@ -167,4 +181,15 @@ export interface SentimentResponse {
   indicators: SentimentIndicator[];
   headline_count: number;
   message: string | null;
+}
+
+/**
+ * A date-range selection for news/video feeds. Presets carry a `days`
+ * look-back; the "custom" preset carries explicit `start`/`end` (YYYY-MM-DD).
+ */
+export interface NewsRange {
+  preset: "1d" | "1w" | "1m" | "3m" | "6m" | "1y" | "custom";
+  days?: number;
+  start?: string;
+  end?: string;
 }

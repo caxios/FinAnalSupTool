@@ -89,11 +89,20 @@ def _source_from_url(url: str) -> str:
 async def _tavily_search(
     query: str,
     *,
-    max_results: int = 8,
+    max_results: int = 30,
     include_domains: list[str] | None = None,
     days: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> NewsResult:
-    """Run one Tavily search and normalize the response to NewsArticles."""
+    """
+    Run one Tavily search and normalize the response to NewsArticles.
+
+    Date filtering:
+      - `days`: look back this many days from now (used for the preset ranges).
+      - `start_date` / `end_date` (YYYY-MM-DD): an explicit custom window; when
+        given, they take precedence over `days`.
+    """
     api_key = tavily_api_key()
     if not api_key:
         return NewsResult(
@@ -106,13 +115,20 @@ async def _tavily_search(
     body: dict = {
         "api_key": api_key,
         "query": query,
+        # Tavily may cap this on some plans; we pass the requested count through.
         "max_results": max_results,
         "search_depth": "basic",
         "topic": "news",
     }
     if include_domains:
         body["include_domains"] = include_domains
-    if days:
+    # Explicit custom window wins; otherwise fall back to a relative day window.
+    if start_date or end_date:
+        if start_date:
+            body["start_date"] = start_date
+        if end_date:
+            body["end_date"] = end_date
+    elif days:
         body["days"] = days
 
     try:
@@ -160,7 +176,13 @@ async def _tavily_search(
 # =============================================================================
 
 async def search_company_news(
-    company: str, ticker: str | None = None, max_results: int = 8
+    company: str,
+    ticker: str | None = None,
+    *,
+    max_results: int = 30,
+    days: int | None = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> NewsResult:
     """News for a specific company, prioritizing the finance domains."""
     label = f"{company} ({ticker})" if ticker else company
@@ -169,11 +191,19 @@ async def search_company_news(
         query,
         max_results=max_results,
         include_domains=FINANCE_DOMAINS,
-        days=14,
+        days=days,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
-async def search_macro_news(max_results: int = 10) -> NewsResult:
+async def search_macro_news(
+    *,
+    max_results: int = 30,
+    days: int | None = 7,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> NewsResult:
     """Broad market / macroeconomic news, prioritizing the finance domains."""
     query = (
         "stock market today macroeconomic outlook Federal Reserve inflation "
@@ -183,5 +213,7 @@ async def search_macro_news(max_results: int = 10) -> NewsResult:
         query,
         max_results=max_results,
         include_domains=FINANCE_DOMAINS,
-        days=7,
+        days=days,
+        start_date=start_date,
+        end_date=end_date,
     )

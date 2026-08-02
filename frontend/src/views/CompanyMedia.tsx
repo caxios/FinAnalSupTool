@@ -3,18 +3,30 @@
  * ──────────────────────
  * View 2 — Company Media & Events (qualitative, per-company).
  *
- * Sections: company news feed, analysis videos (+ transcripts), and a
- * best-effort earnings section (earnings-call video + AI-summarized news).
+ * Sections, each with its own control:
+ *   - News        → date-range selector
+ *   - Videos      → date-range selector + channel picker/manager
+ *   - Earnings    → fiscal-quarter (year + Q1–Q4) selector
+ *
  * The company is derived from the uploaded filings (DashboardContext).
  */
 
-import type { EarningsResponse } from "../types";
+import { useState } from "react";
+import type { EarningsResponse, NewsRange } from "../types";
 import { useDashboard } from "../context/DashboardContext";
 import { useAsync } from "../hooks/useAsync";
 import { getCompanyNews, getCompanyVideos, getEarnings } from "../api";
 import NewsFeed from "../components/media/NewsFeed";
 import VideoList from "../components/media/VideoList";
 import MediaNotice from "../components/media/MediaNotice";
+import DateRangeSelector, {
+  defaultRange,
+} from "../components/media/DateRangeSelector";
+import ChannelBar from "../components/media/ChannelBar";
+import QuarterSelector, {
+  defaultQuarter,
+  type QuarterValue,
+} from "../components/media/QuarterSelector";
 
 function EarningsSection({
   data,
@@ -41,35 +53,33 @@ function EarningsSection({
     );
   }
 
+  const hasAnything =
+    data.summary || data.videos.length > 0 || data.articles.length > 0;
+
   return (
     <div className="earnings-section">
       {data.summary && (
         <div className="earnings-summary">
-          <div className="transcript-label">Earnings Highlights (AI summary)</div>
+          <div className="transcript-label">
+            Q{data.quarter} {data.year} Earnings Highlights (AI summary)
+          </div>
           <div className="transcript-summary-text">{data.summary}</div>
         </div>
       )}
-      {data.video && (
-        <div className="earnings-video">
-          <div className="video-embed">
-            <iframe
-              src={data.video.embed_url}
-              title={data.video.title}
-              loading="lazy"
-              allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-              allowFullScreen
-            />
-          </div>
-          <a
-            className="video-title"
-            href={data.video.url}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            {data.video.title}
-          </a>
-        </div>
+
+      {data.videos.length > 0 && (
+        <VideoList
+          data={{
+            configured: true,
+            scope: "company",
+            videos: data.videos,
+            message: null,
+          }}
+          loading={false}
+          error={null}
+        />
       )}
+
       {data.articles.length > 0 && (
         <ul className="news-list">
           {data.articles.map((a, i) => (
@@ -82,13 +92,21 @@ function EarningsSection({
               >
                 {a.title}
               </a>
-              {a.source && <div className="news-meta"><span className="news-source">{a.source}</span></div>}
+              {a.source && (
+                <div className="news-meta">
+                  <span className="news-source">{a.source}</span>
+                </div>
+              )}
             </li>
           ))}
         </ul>
       )}
-      {!data.summary && !data.video && data.articles.length === 0 && (
-        <MediaNotice icon="📭" message="No earnings material found yet." />
+
+      {!hasAnything && (
+        <MediaNotice
+          icon="📭"
+          message={`No earnings material found for Q${data.quarter} ${data.year}.`}
+        />
       )}
     </div>
   );
@@ -97,10 +115,24 @@ function EarningsSection({
 export default function CompanyMedia() {
   const { company, refreshKey } = useDashboard();
 
+  const [newsRange, setNewsRange] = useState<NewsRange>(defaultRange(30));
+  const [videoRange, setVideoRange] = useState<NewsRange>(defaultRange(30));
+  const [channel, setChannel] = useState("all");
+  const [quarter, setQuarter] = useState<QuarterValue>(defaultQuarter());
+
   const cik = company?.cik ?? null;
-  const news = useAsync(getCompanyNews, [cik, refreshKey]);
-  const videos = useAsync(getCompanyVideos, [cik, refreshKey]);
-  const earnings = useAsync(getEarnings, [cik, refreshKey]);
+  const news = useAsync(
+    () => getCompanyNews(newsRange),
+    [cik, refreshKey, JSON.stringify(newsRange)]
+  );
+  const videos = useAsync(
+    () => getCompanyVideos(videoRange, channel),
+    [cik, refreshKey, JSON.stringify(videoRange), channel]
+  );
+  const earnings = useAsync(
+    () => getEarnings(quarter.year, quarter.quarter),
+    [cik, refreshKey, quarter.year, quarter.quarter]
+  );
 
   const companyLabel = company
     ? `${company.name ?? "Unknown company"}${company.ticker ? ` (${company.ticker})` : ""}`
@@ -131,16 +163,29 @@ export default function CompanyMedia() {
         <>
           <section className="view-section">
             <h2 className="section-title">📰 News</h2>
+            <div className="range-bar">
+              <span className="range-bar-label">Range</span>
+              <DateRangeSelector value={newsRange} onChange={setNewsRange} />
+            </div>
             <NewsFeed data={news.data} loading={news.loading} error={news.error} />
           </section>
 
           <section className="view-section">
             <h2 className="section-title">🎬 Analysis Videos</h2>
+            <div className="range-bar">
+              <span className="range-bar-label">Range</span>
+              <DateRangeSelector value={videoRange} onChange={setVideoRange} />
+              <ChannelBar value={channel} onChange={setChannel} />
+            </div>
             <VideoList data={videos.data} loading={videos.loading} error={videos.error} />
           </section>
 
           <section className="view-section">
             <h2 className="section-title">📞 Earnings</h2>
+            <div className="range-bar">
+              <span className="range-bar-label">Quarter</span>
+              <QuarterSelector value={quarter} onChange={setQuarter} />
+            </div>
             <EarningsSection
               data={earnings.data}
               loading={earnings.loading}

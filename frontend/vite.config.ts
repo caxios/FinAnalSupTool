@@ -4,4 +4,9 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  server: {
+    port: 5173,       // Keep the URL stable so it's always http://localhost:5173
+    strictPort: true, // Fail loudly if 5173 is taken (instead of silently hopping ports)
+    open: true,       // Auto-open the browser to the right page on `npm run dev`
+  },
 })
