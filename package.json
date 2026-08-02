@@ -1,0 +1,15 @@
+{
+  "name": "finanalsuptool",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Run the FastAPI backend and Vite frontend together with one command.",
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "python -m uvicorn main:app --reload --app-dir backend --port 8000",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "setup": "npm install && npm --prefix frontend install && python -m pip install -r backend/requirements.txt"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
