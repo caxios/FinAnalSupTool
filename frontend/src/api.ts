@@ -208,7 +208,7 @@ export async function getCompanyVideos(
   channelId?: string
 ): Promise<VideoResponse> {
   return fetchJson<VideoResponse>(
-    `${API_BASE}/media/videos${withChannel(rangeQuery(range), channelId)}`
+    `${API_BASE}/media/videos${withChannel(rangeQuery(range, 50), channelId)}`
   );
 }
 
@@ -285,7 +285,7 @@ export async function getMacroVideos(
   channelId?: string
 ): Promise<VideoResponse> {
   return fetchJson<VideoResponse>(
-    `${API_BASE}/macro/videos${withChannel(rangeQuery(range), channelId)}`
+    `${API_BASE}/macro/videos${withChannel(rangeQuery(range, 50), channelId)}`
   );
 }
 

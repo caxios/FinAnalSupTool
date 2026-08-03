@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
 import httpx
@@ -122,14 +123,17 @@ async def _tavily_search(
     }
     if include_domains:
         body["include_domains"] = include_domains
-    # Explicit custom window wins; otherwise fall back to a relative day window.
-    if start_date or end_date:
-        if start_date:
-            body["start_date"] = start_date
-        if end_date:
-            body["end_date"] = end_date
-    elif days:
-        body["days"] = days
+    # Enforce an explicit [start_date, end_date] window in every case so Tavily
+    # returns results spread across the whole range rather than clustering on the
+    # last day or two. A custom window wins; otherwise derive it from `days`.
+    if not (start_date or end_date) and days:
+        today = datetime.now(timezone.utc).date()
+        start_date = (today - timedelta(days=days)).isoformat()
+        end_date = today.isoformat()
+    if start_date:
+        body["start_date"] = start_date
+    if end_date:
+        body["end_date"] = end_date
 
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:

@@ -672,10 +672,11 @@ def _video_time_bounds(
         before = f"{end}T23:59:59Z" if end else None
         return after, before
     if days:
-        after = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        return after, None
+        now = datetime.now(timezone.utc)
+        after = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Pass an explicit upper bound too, so the window is [now-days, now].
+        before = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return after, before
     return None, None
 
 

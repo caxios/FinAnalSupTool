@@ -130,12 +130,20 @@ async def search_videos(
         )
 
     query = (query or "").strip()
-    # Sort by newest when browsing a channel or filtering by date; else by relevance.
-    order = (
-        "date"
-        if (published_after or published_before or (channel_id and not query))
-        else "relevance"
-    )
+    # Ordering strategy:
+    #   - A date window active → "relevance". Strict "date" ordering returns the
+    #     newest items first and caps out on the most recent day or two, so older
+    #     items inside the window (e.g. 3-4 weeks ago in a 1-month filter) never
+    #     get fetched. "relevance" spreads results across the whole window while
+    #     the publishedAfter/Before bounds keep them strictly in range.
+    #   - Plain channel browse (no window, no query) → "date" (newest uploads).
+    #   - Otherwise → "relevance".
+    if published_after or published_before:
+        order = "relevance"
+    elif channel_id and not query:
+        order = "date"
+    else:
+        order = "relevance"
     base_params = {
         "key": api_key,
         "part": "snippet",

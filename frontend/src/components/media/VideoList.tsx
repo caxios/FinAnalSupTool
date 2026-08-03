@@ -9,6 +9,8 @@ import { useState } from "react";
 import type { VideoResponse, Video, TranscriptResponse } from "../../types";
 import { getTranscript } from "../../api";
 import MediaNotice from "./MediaNotice";
+import Pagination from "./Pagination";
+import { usePagination } from "../../hooks/usePagination";
 
 /** Trigger a download of the transcript text as a .txt file. */
 function downloadTranscript(video: Video, text: string) {
@@ -113,6 +115,10 @@ function VideoCard({ video }: { video: Video }) {
 }
 
 export default function VideoList({ data, loading, error }: VideoListProps) {
+  const videos = data?.videos ?? [];
+  // 10 videos per page; reset to page 1 when the fetched set changes.
+  const pager = usePagination(videos, 10, videos[0]?.video_id ?? videos.length);
+
   if (loading) return <MediaNotice variant="loading" message="Loading videos…" />;
   if (error) return <MediaNotice variant="error" message={error} />;
   if (!data) return null;
@@ -129,15 +135,25 @@ export default function VideoList({ data, loading, error }: VideoListProps) {
     );
   }
 
-  if (data.videos.length === 0) {
+  if (videos.length === 0) {
     return <MediaNotice icon="🎬" message={data.message ?? "No videos found."} />;
   }
 
   return (
-    <div className="video-grid">
-      {data.videos.map((v) => (
-        <VideoCard key={v.video_id} video={v} />
-      ))}
-    </div>
+    <>
+      <div className="video-grid">
+        {pager.pageItems.map((v) => (
+          <VideoCard key={v.video_id} video={v} />
+        ))}
+      </div>
+      <Pagination
+        page={pager.page}
+        pageCount={pager.pageCount}
+        onChange={pager.setPage}
+        rangeStart={pager.rangeStart}
+        rangeEnd={pager.rangeEnd}
+        total={pager.total}
+      />
+    </>
   );
 }
