@@ -63,7 +63,7 @@ export default function MacroSentiment() {
         <div className="range-bar">
           <span className="range-bar-label">Range</span>
           <DateRangeSelector value={videoRange} onChange={setVideoRange} />
-          <ChannelBar value={channel} onChange={setChannel} />
+          <ChannelBar scope="macro" value={channel} onChange={setChannel} />
         </div>
         <VideoList data={videos.data} loading={videos.loading} error={videos.error} />
       </section>

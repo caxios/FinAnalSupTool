@@ -76,7 +76,7 @@ function VideoCard({ video }: { video: Video }) {
         </a>
         <div className="video-channel">{video.channel}</div>
         <button className="video-transcript-btn" onClick={toggleTranscript}>
-          {open ? "Hide transcript" : "Transcript & summary"}
+          {open ? "Hide transcript" : "Show transcript"}
         </button>
 
         {open && (
@@ -91,7 +91,10 @@ function VideoCard({ video }: { video: Video }) {
             {transcript && transcript.available && (
               <>
                 <div className="transcript-toolbar">
-                  <span className="transcript-label">Full transcript</span>
+                  <span className="transcript-label">
+                    Full transcript
+                    {transcript.language ? ` (${transcript.language})` : ""}
+                  </span>
                   <button
                     className="transcript-download"
                     onClick={() => downloadTranscript(video, transcript.text)}

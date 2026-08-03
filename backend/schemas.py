@@ -233,6 +233,9 @@ class TranscriptResponse(BaseModel):
     available: bool
     video_id: str
     text: str = ""
+    language: str | None = Field(
+        None, description="Language code of the returned transcript (e.g. 'en', 'ko')"
+    )
     summary: str | None = Field(
         None, description="Optional Gemini summary of the transcript"
     )

@@ -684,7 +684,7 @@ async def _videos_from_channels(
     channel_ids: list[str],
     after: str | None,
     before: str | None,
-    per_channel: int = 4,
+    per_channel: int = 25,
 ):
     """
     Merge videos across several saved channels (newest first).
@@ -831,7 +831,7 @@ async def media_videos(
     days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
     start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
     end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
-    max_results: int = Query(9, ge=1, le=25, description="Max videos"),
+    max_results: int = Query(25, ge=1, le=50, description="Max videos"),
 ):
     """
     YouTube analysis videos for the uploaded company.
@@ -856,7 +856,7 @@ async def media_videos(
             published_after=after, published_before=before,
         )
     else:
-        saved = channel_store.channel_ids()
+        saved = channel_store.channel_ids("company")
         if saved:
             result = await _videos_from_channels(label, saved, after, before)
         else:
@@ -891,7 +891,8 @@ async def media_transcript(
     # Cache a slice of the transcript text so the AI assistant can reference it.
     _media_cache["transcripts"][video_id] = {"text": tr.text[:4000]}
     return TranscriptResponse(
-        available=True, video_id=video_id, text=tr.text, summary=None
+        available=True, video_id=video_id, text=tr.text,
+        language=tr.language, summary=None,
     )
 
 
@@ -899,29 +900,45 @@ async def media_transcript(
 # ENDPOINTS: /channels  (curated YouTube channel list)
 # =============================================================================
 
-def _channel_models() -> list[ChannelModel]:
+def _channel_models(scope: str) -> list[ChannelModel]:
     return [
         ChannelModel(
             channel_id=c["channel_id"], title=c.get("title", c["channel_id"]),
             handle=c.get("handle"),
         )
-        for c in channel_store.list_channels()
+        for c in channel_store.list_channels(scope)
     ]
 
 
+def _valid_scope(scope: str) -> str:
+    if scope not in channel_store.SCOPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid scope '{scope}'. Must be one of: {list(channel_store.SCOPES)}",
+        )
+    return scope
+
+
 @app.get("/channels", response_model=ChannelsResponse)
-async def get_channels():
-    """List the user's saved YouTube channels."""
-    return ChannelsResponse(configured=True, channels=_channel_models())
+async def get_channels(
+    scope: str = Query("company", description="'company' or 'macro'"),
+):
+    """List the user's saved YouTube channels for a scope."""
+    scope = _valid_scope(scope)
+    return ChannelsResponse(configured=True, channels=_channel_models(scope))
 
 
 @app.post("/channels", response_model=ChannelsResponse)
-async def add_channel(request: AddChannelRequest):
+async def add_channel(
+    request: AddChannelRequest,
+    scope: str = Query("company", description="'company' or 'macro'"),
+):
     """
-    Add a channel by URL, @handle, UC… id, or name. Resolves it to a
-    channel_id + title via the YouTube API (an explicit UC id works even
-    without a key), then persists the list.
+    Add a channel (to the given scope) by URL, @handle, UC… id, or name.
+    Resolves it to a channel_id + title via the YouTube API (an explicit UC id
+    works even without a key), then persists that scope's list.
     """
+    scope = _valid_scope(scope)
     raw = request.input.strip()
     if not raw:
         raise HTTPException(status_code=400, detail="Channel input cannot be empty.")
@@ -935,26 +952,35 @@ async def add_channel(request: AddChannelRequest):
 
     ch = result.channel
     channel_store.add_channel(
-        {"channel_id": ch.channel_id, "title": ch.title, "handle": ch.handle}
+        scope, {"channel_id": ch.channel_id, "title": ch.title, "handle": ch.handle}
     )
-    return ChannelsResponse(configured=True, channels=_channel_models())
+    return ChannelsResponse(configured=True, channels=_channel_models(scope))
 
 
 @app.delete("/channels/{channel_id}", response_model=ChannelsResponse)
-async def delete_channel(channel_id: str):
-    """Remove a saved channel."""
-    channel_store.remove_channel(channel_id)
-    return ChannelsResponse(configured=True, channels=_channel_models())
+async def delete_channel(
+    channel_id: str,
+    scope: str = Query("company", description="'company' or 'macro'"),
+):
+    """Remove a saved channel from a scope."""
+    scope = _valid_scope(scope)
+    channel_store.remove_channel(scope, channel_id)
+    return ChannelsResponse(configured=True, channels=_channel_models(scope))
 
 
 @app.patch("/channels/{channel_id}", response_model=ChannelsResponse)
-async def rename_channel(channel_id: str, request: AddChannelRequest):
+async def rename_channel(
+    channel_id: str,
+    request: AddChannelRequest,
+    scope: str = Query("company", description="'company' or 'macro'"),
+):
     """Rename a saved channel's display title (reuses the `input` field)."""
+    scope = _valid_scope(scope)
     title = request.input.strip()
     if not title:
         raise HTTPException(status_code=400, detail="Title cannot be empty.")
-    channel_store.rename_channel(channel_id, title)
-    return ChannelsResponse(configured=True, channels=_channel_models())
+    channel_store.rename_channel(scope, channel_id, title)
+    return ChannelsResponse(configured=True, channels=_channel_models(scope))
 
 
 # =============================================================================
@@ -1049,7 +1075,7 @@ async def macro_videos(
     days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
     start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
     end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
-    max_results: int = Query(9, ge=1, le=25, description="Max videos"),
+    max_results: int = Query(25, ge=1, le=50, description="Max videos"),
 ):
     """
     Macro/economic YouTube videos.
@@ -1066,7 +1092,7 @@ async def macro_videos(
             published_after=after, published_before=before,
         )
     else:
-        saved = channel_store.channel_ids()
+        saved = channel_store.channel_ids("macro")
         if saved:
             # Empty query → browse each channel's latest uploads.
             result = await _videos_from_channels("", saved, after, before)

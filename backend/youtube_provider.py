@@ -84,6 +84,7 @@ class VideoResult:
 class TranscriptResult:
     available: bool
     text: str = ""
+    language: str | None = None
     message: str | None = None
 
 
@@ -135,64 +136,83 @@ async def search_videos(
         if (published_after or published_before or (channel_id and not query))
         else "relevance"
     )
-    params = {
+    base_params = {
         "key": api_key,
         "part": "snippet",
         "type": "video",
-        "maxResults": max_results,
         "order": order,
-        "relevanceLanguage": "en",
         "safeSearch": "none",
     }
+    # Only bias toward English for keyword searches; channel browses (e.g. a
+    # Korean channel) must not be filtered by language or they come back empty.
     if query:
-        params["q"] = query
+        base_params["q"] = query
+        base_params["relevanceLanguage"] = "en"
     if channel_id:
-        params["channelId"] = channel_id
+        base_params["channelId"] = channel_id
     if published_after:
-        params["publishedAfter"] = published_after
+        base_params["publishedAfter"] = published_after
     if published_before:
-        params["publishedBefore"] = published_before
+        base_params["publishedBefore"] = published_before
 
+    # The Data API returns at most 50 items per page; paginate to reach
+    # `max_results` (so a channel with lots of uploads isn't capped at one page).
+    videos: list[Video] = []
+    page_token: str | None = None
+    remaining = max_results
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(_SEARCH_URL, params=params)
+            while remaining > 0:
+                params = dict(base_params)
+                params["maxResults"] = min(remaining, 50)
+                if page_token:
+                    params["pageToken"] = page_token
+                resp = await client.get(_SEARCH_URL, params=params)
+
+                if resp.status_code != 200:
+                    detail = resp.text
+                    try:
+                        detail = resp.json().get("error", {}).get("message", detail)
+                    except Exception:
+                        pass
+                    logger.error(f"YouTube API error {resp.status_code}: {detail}")
+                    # If we already gathered some videos, return those.
+                    if videos:
+                        break
+                    return VideoResult(
+                        configured=True,
+                        message=f"YouTube API error ({resp.status_code}): {detail}",
+                    )
+
+                data = resp.json()
+                for item in data.get("items", []):
+                    vid = item.get("id", {}).get("videoId")
+                    if not vid:
+                        continue
+                    sn = item.get("snippet", {})
+                    thumbs = sn.get("thumbnails", {})
+                    thumb = (thumbs.get("medium") or thumbs.get("default") or {}).get("url")
+                    videos.append(
+                        Video(
+                            video_id=vid,
+                            title=sn.get("title", "").strip(),
+                            channel=sn.get("channelTitle", "").strip(),
+                            published=sn.get("publishedAt"),
+                            thumbnail=thumb,
+                            description=sn.get("description", "").strip(),
+                        )
+                    )
+
+                remaining = max_results - len(videos)
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
     except httpx.HTTPError as e:
         logger.error(f"YouTube request failed: {e}")
-        return VideoResult(configured=True, message=f"Could not reach YouTube: {e}")
+        if not videos:
+            return VideoResult(configured=True, message=f"Could not reach YouTube: {e}")
 
-    if resp.status_code != 200:
-        detail = resp.text
-        try:
-            detail = resp.json().get("error", {}).get("message", detail)
-        except Exception:
-            pass
-        logger.error(f"YouTube API error {resp.status_code}: {detail}")
-        return VideoResult(
-            configured=True,
-            message=f"YouTube API error ({resp.status_code}): {detail}",
-        )
-
-    data = resp.json()
-    videos: list[Video] = []
-    for item in data.get("items", []):
-        vid = item.get("id", {}).get("videoId")
-        if not vid:
-            continue
-        sn = item.get("snippet", {})
-        thumbs = sn.get("thumbnails", {})
-        thumb = (thumbs.get("medium") or thumbs.get("default") or {}).get("url")
-        videos.append(
-            Video(
-                video_id=vid,
-                title=sn.get("title", "").strip(),
-                channel=sn.get("channelTitle", "").strip(),
-                published=sn.get("publishedAt"),
-                thumbnail=thumb,
-                description=sn.get("description", "").strip(),
-            )
-        )
-
-    return VideoResult(configured=True, videos=videos)
+    return VideoResult(configured=True, videos=videos[:max_results])
 
 
 async def search_company_videos(
@@ -363,14 +383,30 @@ async def resolve_channel(raw: str) -> ChannelResolveResult:
 # Transcripts (youtube-transcript-api — no key)
 # =============================================================================
 
+# Languages we try first; anything else the video offers is used as a fallback,
+# so Korean / other non-English captions (e.g. 한경글로벌마켓) still come through.
+_PREFERRED_LANGS = ("en", "en-US", "en-GB", "ko")
+
+
+def _fetched_to_text(fetched) -> str:
+    """Join a FetchedTranscript (or list of dict/segment) into plain text."""
+    return " ".join(
+        (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
+        for seg in fetched
+    ).strip()
+
+
 def get_transcript(video_id: str) -> TranscriptResult:
     """
-    Fetch a video's caption transcript as plain text.
+    Fetch a video's full caption transcript as plain text, in whatever language
+    the video offers.
 
-    Handles both the older (`YouTubeTranscriptApi.get_transcript`) and newer
-    (instance `.fetch`) styles of youtube-transcript-api so we don't break on a
-    version bump. Captions are often unavailable — that's a normal outcome, not
-    an error.
+    youtube-transcript-api 1.x's `fetch()` defaults to English only, so for a
+    Korean (or other non-English) video it raises NoTranscriptFound. We instead
+    enumerate the available transcripts via `list()` and pick the best language
+    (preferring English/Korean, then falling back to anything available —
+    manually-created captions preferred over auto-generated). Captions being
+    unavailable is a normal outcome, not an error.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
@@ -380,33 +416,45 @@ def get_transcript(video_id: str) -> TranscriptResult:
             message="Transcript library not installed (youtube-transcript-api).",
         )
 
-    segments = None
+    api = YouTubeTranscriptApi()
+
+    # Enumerate available caption tracks and choose one.
     try:
-        # Newer (1.x) instance API
-        api = YouTubeTranscriptApi()
-        fetched = api.fetch(video_id)
-        segments = [
-            {"text": getattr(s, "text", "") if not isinstance(s, dict) else s.get("text", "")}
-            for s in fetched
-        ]
+        transcript_list = api.list(video_id)
+    except Exception as e:
+        return TranscriptResult(
+            available=False,
+            message=f"No transcript available for this video ({e.__class__.__name__}).",
+        )
+
+    available = list(transcript_list)
+    if not available:
+        return TranscriptResult(
+            available=False, message="This video has no captions."
+        )
+
+    codes = [t.language_code for t in available]
+    # Preferred languages first, then every remaining track as a fallback.
+    order = [c for c in _PREFERRED_LANGS if c in codes]
+    order += [c for c in codes if c not in order]
+
+    chosen = None
+    try:
+        chosen = transcript_list.find_transcript(order)
     except Exception:
-        segments = None
+        chosen = available[0]
 
-    if segments is None:
-        try:
-            # Older (0.6.x) static API
-            segments = YouTubeTranscriptApi.get_transcript(video_id)
-        except Exception as e:
-            return TranscriptResult(
-                available=False,
-                message=f"No transcript available for this video ({e.__class__.__name__}).",
-            )
+    try:
+        fetched = chosen.fetch()
+    except Exception as e:
+        return TranscriptResult(
+            available=False,
+            message=f"Could not fetch the transcript ({e.__class__.__name__}).",
+        )
 
-    text = " ".join(
-        (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
-        for seg in segments
-    ).strip()
-
+    text = _fetched_to_text(fetched)
     if not text:
         return TranscriptResult(available=False, message="Transcript was empty.")
-    return TranscriptResult(available=True, text=text)
+    return TranscriptResult(
+        available=True, text=text, language=getattr(chosen, "language_code", None)
+    )

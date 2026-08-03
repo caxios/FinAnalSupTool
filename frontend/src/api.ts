@@ -229,34 +229,43 @@ export async function getEarnings(
   );
 }
 
-// ── Curated YouTube channels ──
+// ── Curated YouTube channels (per scope: "company" | "macro") ──
 
-export async function getChannels(): Promise<ChannelsResponse> {
-  return fetchJson<ChannelsResponse>(`${API_BASE}/channels`);
+export type ChannelScope = "company" | "macro";
+
+export async function getChannels(scope: ChannelScope): Promise<ChannelsResponse> {
+  return fetchJson<ChannelsResponse>(`${API_BASE}/channels?scope=${scope}`);
 }
 
-/** Add a channel by URL, @handle, UC… id, or name. */
-export async function addChannel(input: string): Promise<ChannelsResponse> {
-  return fetchJson<ChannelsResponse>(`${API_BASE}/channels`, {
+/** Add a channel (to a scope) by URL, @handle, UC… id, or name. */
+export async function addChannel(
+  scope: ChannelScope,
+  input: string
+): Promise<ChannelsResponse> {
+  return fetchJson<ChannelsResponse>(`${API_BASE}/channels?scope=${scope}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ input }),
   });
 }
 
-export async function deleteChannel(channelId: string): Promise<ChannelsResponse> {
+export async function deleteChannel(
+  scope: ChannelScope,
+  channelId: string
+): Promise<ChannelsResponse> {
   return fetchJson<ChannelsResponse>(
-    `${API_BASE}/channels/${encodeURIComponent(channelId)}`,
+    `${API_BASE}/channels/${encodeURIComponent(channelId)}?scope=${scope}`,
     { method: "DELETE" }
   );
 }
 
 export async function renameChannel(
+  scope: ChannelScope,
   channelId: string,
   title: string
 ): Promise<ChannelsResponse> {
   return fetchJson<ChannelsResponse>(
-    `${API_BASE}/channels/${encodeURIComponent(channelId)}`,
+    `${API_BASE}/channels/${encodeURIComponent(channelId)}?scope=${scope}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },

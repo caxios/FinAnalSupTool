@@ -140,6 +140,7 @@ export interface TranscriptResponse {
   available: boolean;
   video_id: string;
   text: string;
+  language: string | null;
   summary: string | null;
   message: string | null;
 }

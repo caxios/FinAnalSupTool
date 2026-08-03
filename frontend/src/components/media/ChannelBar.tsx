@@ -10,15 +10,22 @@
 
 import { useEffect, useState } from "react";
 import type { ChannelInfo } from "../../types";
-import { getChannels, addChannel, deleteChannel } from "../../api";
+import {
+  getChannels,
+  addChannel,
+  deleteChannel,
+  type ChannelScope,
+} from "../../api";
 
 interface Props {
+  /** Which channel list this bar manages ("company" or "macro"). */
+  scope: ChannelScope;
   /** Selected channel id, or "all". */
   value: string;
   onChange: (channelId: string) => void;
 }
 
-export default function ChannelBar({ value, onChange }: Props) {
+export default function ChannelBar({ scope, value, onChange }: Props) {
   const [channels, setChannels] = useState<ChannelInfo[]>([]);
   const [manageOpen, setManageOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -27,7 +34,7 @@ export default function ChannelBar({ value, onChange }: Props) {
 
   async function load() {
     try {
-      const r = await getChannels();
+      const r = await getChannels(scope);
       setChannels(r.channels);
     } catch {
       /* non-fatal */
@@ -36,7 +43,8 @@ export default function ChannelBar({ value, onChange }: Props) {
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope]);
 
   async function handleAdd() {
     const v = input.trim();
@@ -44,7 +52,7 @@ export default function ChannelBar({ value, onChange }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const r = await addChannel(v);
+      const r = await addChannel(scope, v);
       setChannels(r.channels);
       setInput("");
     } catch (e) {
@@ -58,7 +66,7 @@ export default function ChannelBar({ value, onChange }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const r = await deleteChannel(id);
+      const r = await deleteChannel(scope, id);
       setChannels(r.channels);
       if (value === id) onChange("all"); // deselect if the removed one was active
     } catch (e) {
