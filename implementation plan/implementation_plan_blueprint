@@ -1,0 +1,850 @@
+# Multi-Agent System (MAS) for Stock Analysis — Architecture Proposal v3
+
+> [!NOTE]
+> **v3 변경사항:** (1) 기술적 분석(Technical/Price) Agent 추가, (2) 토론 구조를 그룹별이 아닌 **전체 에이전트 라운드테이블**로 변경, (3) 토론 제한 메커니즘(라운드 캡 + 수렴 감지 + 토큰 예산) 추가, (4) **유저가 선택한 기간**의 데이터를 전부 사용하도록 변경, (5) YouTube Agent를 콘텐츠 심층 분석으로 확장
+
+---
+
+## 1. Executive Summary
+
+이 문서는 현재 **FinAnalSupTool** 모놀리식 백엔드를 **Multi-Agent System (MAS)**으로 진화시키기 위한 고수준 아키텍처를 제안합니다. 시스템의 핵심 목표는 기업의 **실질적 펀더멘탈**, **시장 센티먼트**, 그리고 **가격 동향(기술적 분석)** 세 축 사이의 괴리(Gap)를 식별, 정량화, 분석하여 투자 기회를 포착하는 것입니다.
+
+**핵심 설계 원칙:**
+- **7개 에이전트** (기존 5개 + Technical Agent + Manager Agent)가 각자 심층 분석 수행
+- 단순 센티먼트 스코어링이 아닌 **비즈니스 임팩트 중심의 심층 분석**
+- 전체 에이전트가 **라운드테이블 토론**을 통해 서로의 분석에 도전하고 다듬음 (그룹 분리 없음)
+- **토론 제한 메커니즘** (최대 라운드 + 수렴 감지 + 토큰 예산)으로 무한 토론 방지
+- **유저 지정 기간** 내의 모든 데이터를 사용 (하드코딩된 "최근 1-2분기"가 아님)
+- **Manager Agent**가 최종 결론 도출 시 모든 출처를 명시적으로 추적(attribution)
+- 모든 에이전트는 **동일 LLM 모델** 사용, 현재 단일 기업 분석에 집중
+
+---
+
+## 2. 시스템 아키텍처
+
+### 2.1 목표 아키텍처 (MAS with Round-Table Debate)
+
+```mermaid
+graph TB
+    subgraph Input["User Input"]
+        UI["유저 지정:<br/>기업 + 분석 기간<br/>(예: AAPL, 2025-Q1 ~ 2026-Q2)"]
+    end
+
+    subgraph Data["Data Layer (기존 + 신규 파이프라인)"]
+        PDF_XBRL["pdf_utils + edgar_xbrl<br/>(기간 내 10-K/10-Q)"]
+        EarningsTavily["news_provider<br/>search_earnings_transcript()<br/>(기간 내 모든 분기 어닝콜)"]
+        CompNewsTavily["news_provider<br/>search_company_news()<br/>(기간 내 뉴스)"]
+        MacroTavily["news_provider<br/>search_macro_news()<br/>(기간 내 매크로 뉴스)"]
+        YT["youtube_provider<br/>+ channel_store<br/>(기간 내 지정 채널 영상)"]
+        PriceAPI["🆕 yfinance<br/>(기간 내 가격/거래량 데이터)"]
+    end
+
+    subgraph Phase1["Phase 1: 독립 분석 (병렬)"]
+        A1["🔬 SEC Filings Agent"]
+        A2["🎙️ Earnings Call Agent"]
+        A3["📰 Company News Agent"]
+        A4["🌍 Macro/Market Agent"]
+        A5["📺 YouTube Agent"]
+        A6["📈 Technical Analysis Agent"]
+    end
+
+    subgraph Phase2["Phase 2: 라운드테이블 토론"]
+        RT["🗣️ 전체 에이전트 라운드테이블<br/>(6개 에이전트 전원 참여)<br/>━━━━━━━━━<br/>제한: 최대 2라운드<br/>수렴 감지 시 조기 종료<br/>토큰 예산 상한"]
+    end
+
+    subgraph Phase3["Phase 3: 최종 종합"]
+        MGR["🧠 Manager Agent<br/>(3축 Gap Analysis + 출처 추적)"]
+    end
+
+    UI --> Data
+
+    PDF_XBRL --> A1
+    EarningsTavily --> A2
+    CompNewsTavily --> A3
+    MacroTavily --> A4
+    YT --> A5
+    PriceAPI --> A6
+
+    A1 --> RT
+    A2 --> RT
+    A3 --> RT
+    A4 --> RT
+    A5 --> RT
+    A6 --> RT
+
+    RT --> MGR
+    MGR -->|"최종 분석 보고서<br/>(출처 명시, 3축 Gap)"| User["User / Frontend"]
+
+    style A1 fill:#1a5276,color:#fff
+    style A2 fill:#1a5276,color:#fff
+    style A3 fill:#7b241c,color:#fff
+    style A4 fill:#7b241c,color:#fff
+    style A5 fill:#7b241c,color:#fff
+    style A6 fill:#6c3483,color:#fff
+    style RT fill:#7d6608,color:#fff
+    style MGR fill:#196f3d,color:#fff
+```
+
+### 2.2 유저 지정 분석 기간
+
+유저가 분석 기간을 직접 지정하면, 해당 기간 내의 **모든 데이터**가 각 에이전트에 공급됩니다.
+
+```
+예: 유저가 "AAPL, 2025-Q1 ~ 2026-Q2" 를 선택한 경우
+
+┌─────────────────────────────────────────────────────────────┐
+│                  2025-Q1 ~ 2026-Q2 (6분기)                  │
+├──────────┬──────────────────────────────────────────────────┤
+│ SEC      │ 업로드된 10-K/10-Q 중 해당 기간에 속하는 전부    │
+│ Earnings │ Q1'25, Q2'25, Q3'25, Q4'25, Q1'26, Q2'26        │
+│          │ 어닝콜 대본 전부 (Tavily로 각 분기별 가져옴)     │
+│ News     │ 해당 기간 내 기업 뉴스 전부                      │
+│ Macro    │ 해당 기간 내 매크로 뉴스                         │
+│ YouTube  │ 해당 기간 내 지정 채널 영상 + 트랜스크립트        │
+│ Price    │ 해당 기간의 일별 OHLCV + 기술적 지표             │
+└──────────┴──────────────────────────────────────────────────┘
+```
+
+> [!IMPORTANT]
+> 기간이 넓어질수록 데이터 양이 급격히 증가합니다. 예를 들어 6분기 어닝콜 대본은 각 3-5만 토큰 × 6 = 18-30만 토큰. 이것이 §7의 RAG 도입 시점 판단에 직결됩니다.
+
+---
+
+## 3. Agent Design — 역할 & 구조화된 출력
+
+### 3.1 SEC Filings Analyzer Agent
+
+| 속성 | 내용 |
+|---|---|
+| **데이터 소스** | 업로드된 10-K/10-Q PDF → `pdf_utils.py` + `edgar_xbrl.py` (유저 지정 기간 내 모든 파일링) |
+| **LLM 역할** | 재무제표 수치 분석, MD&A 핵심 인사이트 추출, 리스크 팩터 분류 및 심각도 평가, 기간 내 트렌드 추적 |
+| **분류** | **Fundamental** |
+
+**구조화된 출력 스키마:**
+```json
+{
+  "agent": "sec_filings",
+  "periods_analyzed": ["Q1 FY2025", "Q2 FY2025", "...", "Q2 FY2026"],
+  "fundamental_score": 78,
+  "financial_health": {
+    "revenue_trend": "growing",
+    "revenue_yoy_growth": 0.084,
+    "gross_margin": 0.467,
+    "gross_margin_trend": "expanding",
+    "operating_margin": 0.312,
+    "debt_to_equity": 1.44,
+    "free_cash_flow_margin": 0.268,
+    "current_ratio": 1.07
+  },
+  "multi_period_trends": [
+    {"metric": "Revenue", "trajectory": [380, 385, 394, 401, 410, 425], "unit": "B USD", "assessment": "6분기 연속 성장, 가속화 추세"},
+    {"metric": "Gross Margin", "trajectory": [0.44, 0.445, 0.45, 0.455, 0.46, 0.467], "assessment": "꾸준한 마진 확대"}
+  ],
+  "mda_insights": [
+    "서비스 부문 매출이 전년 대비 15% 성장하며 전체 매출 믹스에서 차지하는 비중이 22%→25%로 확대",
+    "R&D 투자가 전년 대비 12% 증가 — AI/ML 역량 강화에 집중"
+  ],
+  "risk_assessment": [
+    {"risk": "중국 시장 의존도", "severity": "high", "trend": "worsening", "detail": "중국 매출 비중 18%, 지정학적 리스크 심화 언급"},
+    {"risk": "환율 변동", "severity": "medium", "trend": "stable", "detail": "헤지 전략으로 $1.2B 노출 관리 중"}
+  ],
+  "confidence": 0.9,
+  "reasoning": "..."
+}
+```
+
+---
+
+### 3.2 Earnings Call Analyzer Agent
+
+| 속성 | 내용 |
+|---|---|
+| **데이터 소스** | `news_provider.search_earnings_transcript()` — 유저 지정 기간 내 **모든 분기**의 어닝콜 대본 (investing.com / fool.com) |
+| **LLM 역할** | (1) 경영진 톤 분석, (2) Q&A 핵심 질문·주제 식별, (3) 기업 사업 관련 핵심 내용 정리, (4) Forward guidance 추출, (5) **기간 내 모든 분기 어닝콜 간의 종단(longitudinal) 비교** |
+| **분류** | **Fundamental + Sentiment Hybrid** |
+
+> [!IMPORTANT]
+> 이 에이전트는 기간 내의 모든 어닝콜을 대상으로 **시계열 추적**을 수행합니다. Q1에서 한 약속이 Q2에서 어떻게 됐는지, Q3에서 새로 등장한 이슈가 Q4에서 어떻게 전개됐는지를 추적합니다.
+
+**구조화된 출력 스키마:**
+```json
+{
+  "agent": "earnings_call",
+  "quarters_analyzed": ["Q1 FY2025", "Q2 FY2025", "Q3 FY2025", "Q4 FY2025", "Q1 FY2026", "Q2 FY2026"],
+
+  "per_quarter_analysis": [
+    {
+      "quarter": "Q2 FY2026",
+      "management_tone": {"overall": "cautiously_optimistic", "confidence_level": "high", "tone_score": 72},
+      "qa_key_topics": [
+        {"topic": "AI 투자 ROI 타임라인", "question_count": 4, "response_quality": "somewhat_evasive"},
+        {"topic": "중국 시장 매출 전망", "question_count": 3, "response_quality": "direct_and_detailed"}
+      ],
+      "business_substance": {
+        "key_developments": [
+          {"area": "제품", "detail": "Vision Pro 2세대 출시 확정", "significance": "high"}
+        ],
+        "strategic_shifts": ["하드웨어 → 서비스 전환 가속화 명시적 언급"]
+      },
+      "forward_guidance": {
+        "direction": "raised",
+        "detail": "FY2026 매출 가이던스 $420-425B (기존 $415-420B에서 상향)"
+      }
+    }
+  ],
+
+  "longitudinal_tracking": {
+    "promise_vs_delivery": [
+      {"promise": "Q3'25: 인도 생산시설 Q4까지 완공", "delivery": "Q4'25: 완공 확인, 매출 33% 성장", "status": "delivered"},
+      {"promise": "Q1'26: AI capex 올해 내 ROI 가시화", "delivery": "Q2'26: '장기적 투자 관점'으로 톤 후퇴", "status": "shifted"}
+    ],
+    "evolving_themes": [
+      {"theme": "서비스 전환", "trajectory": "Q1'25에서 첫 언급 → 매 분기 강조 강화 → Q2'26에서 전략적 1순위로 격상", "assessment": "진정성 있는 전략 전환"},
+      {"theme": "중국 리스크", "trajectory": "Q1'25 경미한 언급 → Q3'25부터 매 Q&A 핵심 주제 → Q2'26 인도 대안 강조", "assessment": "인지하고 적극 대응 중"}
+    ],
+    "tone_trend_across_quarters": [65, 68, 60, 58, 70, 72],
+    "guidance_trend": ["maintained", "maintained", "lowered", "maintained", "raised", "raised"]
+  },
+
+  "confidence": 0.8,
+  "reasoning": "..."
+}
+```
+
+---
+
+### 3.3 Company News Analyzer Agent
+
+| 속성 | 내용 |
+|---|---|
+| **데이터 소스** | `news_provider.search_company_news()` → 유저 지정 기간 내 모든 기업 뉴스 |
+| **LLM 역할** | 기사별 비즈니스 임팩트 분석, 기업 사업에 대한 구체적 영향 평가, 촉매/역풍 식별 및 시간축 분류 |
+| **분류** | **Sentiment + Business Impact** |
+
+**구조화된 출력 스키마:**
+```json
+{
+  "agent": "company_news",
+  "articles_analyzed": 45,
+  "analysis_period": "2025-01-01 ~ 2026-06-30",
+  "overall_sentiment": {"label": "moderately_bullish", "score": 68},
+
+  "business_impact_analysis": [
+    {
+      "headline": "Apple-TSMC, 2nm AI 칩 독점 공급 계약 체결",
+      "source": "cnbc.com",
+      "sentiment": "positive",
+      "business_impact": {
+        "affected_segment": "Products — iPhone & Mac",
+        "impact_type": "competitive_advantage",
+        "magnitude": "high",
+        "time_horizon": "medium_term",
+        "analysis": "2nm 공정 독점 확보로 향후 2-3년간 경쟁 우위. 단 TSMC 의존도 심화라는 공급망 리스크도 동반."
+      }
+    }
+  ],
+
+  "sentiment_trend_over_period": {
+    "monthly_scores": [
+      {"month": "2025-01", "score": 55, "dominant_theme": "실적 부진 우려"},
+      {"month": "2025-06", "score": 72, "dominant_theme": "AI 전략 호평"},
+      {"month": "2026-06", "score": 68, "dominant_theme": "규제 리스크 vs 성장 기대"}
+    ]
+  },
+
+  "catalysts": [
+    {"event": "TSMC 2nm 독점 계약", "time_horizon": "medium_term", "confidence": "high"}
+  ],
+  "headwinds": [
+    {"event": "EU DMA 벌금 + App Store 구조 변경 가능성", "time_horizon": "medium_term", "confidence": "high"}
+  ],
+
+  "confidence": 0.72,
+  "reasoning": "..."
+}
+```
+
+---
+
+### 3.4 Macro & Market News Analyzer Agent
+
+| 속성 | 내용 |
+|---|---|
+| **데이터 소스** | `news_provider.search_macro_news()` + `market_sentiment.compute_market_sentiment()` — 유저 지정 기간 내 매크로 뉴스 |
+| **LLM 역할** | 거시경제 환경 평가 → 대상 기업의 섹터 및 사업에 대한 탑다운 영향 분석 |
+| **분류** | **Sentiment + Macro Context** |
+
+**구조화된 출력 스키마:**
+```json
+{
+  "agent": "macro_market",
+  "analysis_period": "2025-01-01 ~ 2026-06-30",
+  "current_market_regime": "risk_on",
+  "macro_score": 62,
+
+  "macro_environment_over_period": [
+    {"phase": "2025-H1", "regime": "risk_off", "key_driver": "금리 인상 사이클 지속"},
+    {"phase": "2025-H2", "regime": "transition", "key_driver": "인플레이션 둔화 시그널"},
+    {"phase": "2026-H1", "regime": "risk_on", "key_driver": "금리 인하 기대감"}
+  ],
+
+  "sector_impact": {
+    "sector": "Technology",
+    "direction": "favorable",
+    "reasoning": "금리 인하 기대감으로 성장주 밸류에이션 확장 가능"
+  },
+
+  "key_themes": [
+    {"theme": "통화정책", "direction": "bullish", "impact_on_company": "금리 인하 시 Apple 서비스 밸류에이션 멀티플 확장 기대"},
+    {"theme": "지정학", "direction": "bearish", "impact_on_company": "미중 무역 긴장 → Apple 중국 매출(18%)·공급망 위협"}
+  ],
+
+  "confidence": 0.65,
+  "reasoning": "..."
+}
+```
+
+---
+
+### 3.5 YouTube Video Analyzer Agent
+
+| 속성 | 내용 |
+|---|---|
+| **데이터 소스** | `youtube_provider.get_transcript()` → `channel_store`에 지정된 채널의 유저 지정 기간 내 영상 트랜스크립트 |
+| **LLM 역할** | 영상 내용 전반에 대한 **심층 분석** — 분석자가 제시한 논거, 사용한 데이터, 도달한 결론, 투자 논리의 강약점까지 식별. 단순 "bullish/bearish" 분류가 아님 |
+| **분류** | **Sentiment + Content Analysis** |
+
+> [!IMPORTANT]
+> 이 에이전트는 각 영상의 **분석 논거(thesis)를 구조적으로 해체**합니다. 분석자가 어떤 데이터를 근거로 어떤 결론에 도달했는지, 그 논리에 빈틈은 없는지, 다른 영상과 어떤 점에서 의견이 갈리는지를 분석합니다.
+
+**구조화된 출력 스키마:**
+```json
+{
+  "agent": "youtube_analysis",
+  "channels_analyzed": 4,
+  "videos_analyzed": 18,
+  "analysis_period": "2025-01-01 ~ 2026-06-30",
+
+  "per_video_analysis": [
+    {
+      "channel": "Financial Education",
+      "title": "Apple Stock: Why I'm Buying More in 2026",
+      "published": "2026-05-15",
+      "thesis": "bullish",
+      "key_arguments": [
+        {"argument": "서비스 매출 recurring revenue 전환 → 밸류에이션 리레이팅 당위", "supporting_data": "서비스 매출 비중 25% 돌파, 마진 70%+", "strength": "strong"},
+        {"argument": "AI 통합이 iPhone 교체 수요 촉발할 것", "supporting_data": "추정치만 제시, 구체적 데이터 부재", "strength": "weak"}
+      ],
+      "blind_spots": ["중국 리스크에 대한 언급 전무", "밸류에이션 비교 시 P/E만 사용, EV/EBITDA 무시"],
+      "actionable_insight": "서비스 전환 논거는 SEC 데이터와 일치하나, AI 교체 수요 추정은 근거 부족"
+    },
+    {
+      "channel": "Everything Money",
+      "title": "Apple is OVERVALUED — Here's Why",
+      "published": "2026-06-02",
+      "thesis": "bearish",
+      "key_arguments": [
+        {"argument": "P/E 32x는 8% 성장률 대비 과대평가", "supporting_data": "역사적 P/E 밴드 대비 +1.5 표준편차", "strength": "strong"},
+        {"argument": "AI capex가 FCF를 잠식할 것", "supporting_data": "$15B 추가 capex 계획 인용", "strength": "moderate"}
+      ],
+      "blind_spots": ["서비스 사업의 SaaS 유사 밸류에이션 프리미엄 미반영"],
+      "actionable_insight": "밸류에이션 우려는 valid하나 서비스 전환에 따른 멀티플 리레이팅 가능성을 무시"
+    }
+  ],
+
+  "cross_channel_synthesis": {
+    "consensus_areas": ["서비스 매출 성장은 모든 채널이 긍정적으로 평가"],
+    "disagreement_areas": [
+      {"topic": "현재 밸류에이션", "bullish_view": "서비스 전환 프리미엄 정당화", "bearish_view": "역사적 밴드 대비 과대평가", "stronger_argument": "각각 일리가 있음 — 어떤 밸류에이션 프레임워크를 사용하느냐에 따라 다름"}
+    ],
+    "overall_consensus_score": 62
+  },
+
+  "confidence": 0.6,
+  "reasoning": "..."
+}
+```
+
+---
+
+### 3.6 🆕 Technical Analysis (Price Trend) Agent
+
+| 속성 | 내용 |
+|---|---|
+| **데이터 소스** | 🆕 `yfinance` 라이브러리 — 유저 지정 기간 내 일별 OHLCV (시가/고가/저가/종가/거래량) 데이터 |
+| **LLM 역할** | 기술적 지표 계산 결과를 해석하여 가격 동향/패턴/모멘텀 분석. LLM이 직접 수학 계산을 하는 것이 아니라 **사전 계산된 기술적 지표**를 받아 해석 |
+| **분류** | **Price Action / Technical** |
+
+**데이터 파이프라인 (LLM 호출 전 코드로 사전 계산):**
+```python
+import yfinance as yf
+import pandas as pd
+
+def compute_technical_indicators(ticker: str, start: str, end: str) -> dict:
+    df = yf.download(ticker, start=start, end=end)
+    
+    # 이동평균선
+    df['SMA_50'] = df['Close'].rolling(50).mean()
+    df['SMA_200'] = df['Close'].rolling(200).mean()
+    df['EMA_20'] = df['Close'].ewm(span=20).mean()
+    
+    # RSI (14일)
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    df['RSI'] = 100 - (100 / (1 + gain / loss))
+    
+    # MACD
+    ema12 = df['Close'].ewm(span=12).mean()
+    ema26 = df['Close'].ewm(span=26).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
+    
+    # 볼린저 밴드
+    df['BB_Mid'] = df['Close'].rolling(20).mean()
+    df['BB_Std'] = df['Close'].rolling(20).std()
+    df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
+    df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
+    
+    # 거래량 분석
+    df['Vol_SMA_20'] = df['Volume'].rolling(20).mean()
+    
+    return {
+        "current_price": df['Close'].iloc[-1],
+        "period_high": df['High'].max(),
+        "period_low": df['Low'].min(),
+        "period_return": (df['Close'].iloc[-1] / df['Close'].iloc[0] - 1),
+        "sma_50": df['SMA_50'].iloc[-1],
+        "sma_200": df['SMA_200'].iloc[-1],
+        "golden_cross": bool(df['SMA_50'].iloc[-1] > df['SMA_200'].iloc[-1]),
+        "rsi_current": df['RSI'].iloc[-1],
+        "macd_current": df['MACD'].iloc[-1],
+        "macd_signal": df['MACD_Signal'].iloc[-1],
+        "macd_histogram": df['MACD'].iloc[-1] - df['MACD_Signal'].iloc[-1],
+        "bb_position": (df['Close'].iloc[-1] - df['BB_Lower'].iloc[-1]) / (df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1]),
+        "volume_vs_avg": df['Volume'].iloc[-1] / df['Vol_SMA_20'].iloc[-1],
+        "price_series_monthly": [...],  # 월별 종가 요약
+    }
+```
+
+**구조화된 출력 스키마:**
+```json
+{
+  "agent": "technical_analysis",
+  "ticker": "AAPL",
+  "analysis_period": "2025-01-01 ~ 2026-06-30",
+  "current_price": 215.40,
+
+  "trend_assessment": {
+    "primary_trend": "uptrend",
+    "trend_strength": "moderate",
+    "trend_score": 70,
+    "detail": "50일 이평선이 200일 이평선 위에 위치 (골든크로스 유지). 다만 최근 2주간 상승 모멘텀 둔화."
+  },
+
+  "momentum_indicators": {
+    "rsi": {"value": 58, "interpretation": "중립 — 과매수/과매도 아님"},
+    "macd": {"histogram": 0.82, "interpretation": "약한 상승 모멘텀, 시그널선 접근 중 → 주의 필요"},
+    "volume": {"vs_20d_avg": 0.85, "interpretation": "평균 이하 거래량 → 현재 상승에 확신 부족"}
+  },
+
+  "key_levels": {
+    "support": [{"price": 205, "type": "SMA_50"}, {"price": 195, "type": "previous_low"}],
+    "resistance": [{"price": 225, "type": "period_high"}, {"price": 220, "type": "BB_upper"}]
+  },
+
+  "pattern_recognition": {
+    "current_pattern": "ascending_triangle",
+    "implication": "강세 지속 패턴이나 $225 저항 돌파 여부가 핵심",
+    "reliability": "moderate"
+  },
+
+  "price_vs_fundamentals": {
+    "period_return": 0.12,
+    "note": "분석 기간 중 12% 상승했으나 같은 기간 매출은 8.4% 성장 → 멀티플 확장이 주가 상승의 일부를 설명"
+  },
+
+  "confidence": 0.75,
+  "reasoning": "..."
+}
+```
+
+---
+
+## 4. Round-Table Debate (전체 에이전트 토론)
+
+### 4.1 토론 구조: 전체 참여 라운드테이블
+
+6개 분석 에이전트 전원이 하나의 테이블에서 토론합니다. 그룹 분리 없이, 모든 에이전트가 모든 다른 에이전트의 분석에 도전하고 응답할 수 있습니다.
+
+```mermaid
+graph TB
+    subgraph RoundTable["라운드테이블 토론"]
+        direction TB
+        R1["Round 1: 상호 도전(Challenge)"]
+        R2["Round 2: 응답 및 수정(Respond & Revise)"]
+        Conv{"수렴 검사:<br/>입장 변경 < 2개?"}
+    end
+
+    AllReports["6개 에이전트<br/>독립 분석 결과"] --> R1
+    R1 --> R2
+    R2 --> Conv
+    Conv -->|"수렴됨<br/>(조기 종료)"| Output["토론 결과물"]
+    Conv -->|"미수렴<br/>(Round 2 완료)"| Output
+
+    style Conv fill:#7d6608,color:#fff
+```
+
+**Round 1 — 상호 도전 (Challenge)**
+
+하나의 LLM 호출로 토론 Moderator가 6개 분석 결과를 받아 각 에이전트의 관점에서 다른 에이전트에 도전합니다:
+
+```python
+DEBATE_MODERATOR_PROMPT = """
+당신은 6개 금융 분석 에이전트의 토론을 진행하는 Moderator입니다.
+각 에이전트의 독립 분석 결과가 아래에 있습니다.
+
+각 에이전트의 입장에서, 다른 에이전트의 분석에 대해 도전(challenge)할 수 있는 
+지점을 식별하세요:
+
+1. 모순점: 에이전트 A의 결론이 에이전트 B의 데이터와 모순되는 경우
+2. 맹점(blind spots): 한 에이전트가 다른 에이전트의 데이터를 고려했다면 
+   결론이 달라졌을 만한 경우
+3. 강화점: 서로 다른 데이터 소스에서 같은 결론에 도달한 경우 (상호 검증)
+
+각 도전에 대해 {challenger, target, challenge, supporting_evidence} 형식으로 
+구조화하세요.
+
+=== 에이전트 분석 결과 ===
+SEC Filings Agent: {sec_report}
+Earnings Call Agent: {earnings_report}
+Company News Agent: {news_report}
+Macro/Market Agent: {macro_report}
+YouTube Agent: {youtube_report}
+Technical Analysis Agent: {technical_report}
+"""
+```
+
+**Round 2 — 응답 및 수정 (Respond & Revise)**
+
+Round 1의 도전을 받아, 각 에이전트의 입장에서 응답하고 필요 시 자신의 분석을 수정합니다:
+
+```python
+DEBATE_RESPONSE_PROMPT = """
+Round 1에서 다음과 같은 도전들이 제기되었습니다:
+{challenges}
+
+각 도전에 대해, 해당 에이전트의 입장에서:
+1. 도전을 수용하고 분석을 수정할 것인지
+2. 도전을 반박하고 기존 입장을 유지할 것인지
+를 판단하세요.
+
+수정하는 경우: 어떤 점이 변경되었고 왜인지 명시
+유지하는 경우: 왜 기존 분석이 여전히 타당한지 근거 제시
+
+최종적으로 토론을 거친 후의 각 에이전트별 수정된(또는 유지된) 핵심 결론을 
+정리하세요.
+"""
+```
+
+### 4.2 토론의 가치 — 구체적 예시
+
+| 도전 (Round 1) | 응답 (Round 2) |
+|---|---|
+| **Technical → SEC:** "SEC Agent는 펀더멘탈 점수 78점을 줬지만, 기술적으로 현재 주가가 이미 12% 상승하여 펀더멘탈 성장(8.4%)을 초과 반영 중. 추가 상승 여력이 제한적일 수 있음" | **SEC 수정:** "맞는 지적. 그러나 서비스 전환에 따른 멀티플 리레이팅이 아직 초기 단계이므로 12% 상승이 과도한 것은 아님. 다만 단기적 상승 여력은 제한적이라는 점 인정 → `fundamental_score`를 78→74로 조정" |
+| **Earnings → YouTube:** "YouTube의 Financial Education 채널이 AI 교체 수요를 근거로 bullish하지만, 어닝콜 Q&A에서 경영진이 AI 관련 구체적 매출 수치 제시를 회피함. 이 논거는 근거 부족" | **YouTube 수정:** "수용. 해당 논거의 strength를 'weak'으로 하향 조정" |
+| **News → Macro:** "매크로 Agent가 금리 인하로 tech 유리하다고 했지만, 기업 뉴스에서 EU 규제 리스크가 매크로 환경 우호와 상관없이 기업 고유 하방 압력을 줄 수 있음" | **Macro 유지:** "EU 규제는 기업 고유(idiosyncratic) 리스크이지 매크로 요인이 아님. 매크로 평가는 섹터 레벨에서 타당. 다만 Manager에게 이 구분을 명확히 전달" |
+
+### 4.3 토론 제한 메커니즘 — 3중 안전장치
+
+무한 토론을 방지하기 위해 **세 가지 제한**을 동시에 적용합니다:
+
+#### 1️⃣ 라운드 캡: 최대 2라운드
+
+| 라운드 | 내용 | 최대 LLM 호출 |
+|---|---|---|
+| Round 1 | 상호 도전 (Challenge) | 1회 |
+| Round 2 | 응답 & 수정 (Respond & Revise) | 1회 |
+| **합계** | | **2회** |
+
+Round 2 이후에는 추가 라운드 없이 Manager Agent로 넘어갑니다. 이것은 하드 리미트입니다.
+
+#### 2️⃣ 수렴 감지: 조기 종료
+
+Round 1의 도전 결과를 분석하여, **의미 있는 입장 변경이 2개 미만**이면 Round 2를 건너뛰고 바로 Manager Agent로 넘어갑니다. 에이전트들이 이미 대체로 동의하고 있다면 추가 토론은 토큰 낭비입니다.
+
+```python
+def should_continue_debate(round1_result: dict) -> bool:
+    """
+    Round 1의 도전들 중 에이전트가 실제로 입장을 변경할 만한
+    '유효한 도전'이 2개 이상인 경우에만 Round 2 진행.
+    """
+    meaningful_challenges = [
+        c for c in round1_result["challenges"]
+        if c["impact_level"] in ("high", "medium")
+    ]
+    return len(meaningful_challenges) >= 2
+```
+
+#### 3️⃣ 토큰 예산 상한: Hard Budget Cap
+
+전체 토론 단계에 대한 **입출력 토큰 합산 상한**을 설정합니다:
+
+```python
+DEBATE_TOKEN_BUDGET = {
+    "max_input_tokens_per_round": 30_000,   # 6개 에이전트 보고서 요약
+    "max_output_tokens_per_round": 4_000,   # 토론 결과
+    "max_total_debate_tokens": 70_000,       # 전체 토론 단계 상한
+}
+```
+
+예산을 초과할 것으로 예상되면, 에이전트 보고서를 요약하여 압축한 후 토론에 투입합니다.
+
+**예상 비용 요약:**
+
+| 단계 | LLM 호출 | 입력 토큰 | 출력 토큰 |
+|---|---|---|---|
+| Phase 1: 6 에이전트 독립 분석 | 6 | ~90,000 | ~5,000 |
+| Phase 2: 토론 (최대 2라운드) | 2 | ~60,000 | ~8,000 |
+| Phase 3: Manager 종합 | 1 | ~15,000 | ~4,000 |
+| **합계** | **9** | **~165,000** | **~17,000** |
+| **Gemini 2.5 Flash 예상 비용** | | | **~$0.25-0.35 / 실행** |
+
+> [!TIP]
+> Phase 1의 6개 에이전트는 완전히 독립적이므로 `asyncio.gather()`로 **병렬 실행**. 전체 파이프라인 예상 소요 시간: ~40-60초 (Phase 1: 10-15s 병렬 + Phase 2: 15-25s + Phase 3: 10-15s).
+
+---
+
+## 5. Manager Agent (최종 관리자 에이전트)
+
+### 5.1 역할
+
+Manager Agent는 토론이 끝난 후의 결과물(원래 분석 + 수정사항)을 받아 **최종 종합 보고서**를 작성합니다. 핵심 원칙:
+- **모든 결론에 출처** (어떤 에이전트, 어떤 데이터 포인트)를 명시
+- **3축 Gap Analysis** — Fundamental vs Sentiment vs Price Action
+
+### 5.2 3축 Gap Analysis
+
+Technical Agent의 추가로, 기존 2축(Fundamental vs Sentiment)에서 **3축**으로 확장됩니다:
+
+```
+Fundamental Score = weighted_avg(
+    SEC_agent.fundamental_score         × 0.45,
+    Earnings_agent.tone_score           × 0.25,
+    Earnings_agent.guidance_direction   × 0.30,
+)
+
+Sentiment Score = weighted_avg(
+    CompanyNews_agent.sentiment_score   × 0.35,
+    Macro_agent.macro_score             × 0.25,
+    YouTube_agent.consensus_score       × 0.15,
+    Earnings_agent.qa_concern_level     × 0.25,
+)
+
+Technical Score = Technical_agent.trend_score
+```
+
+**3축 해석 매트릭스:**
+
+| Fundamental | Sentiment | Technical | 해석 |
+|---|---|---|---|
+| 🟢 높음 | 🔴 낮음 | 🔴 하락 | **숨은 보석** — 펀더멘탈 강하나 시장이 무시 + 가격도 하락 → 역발상 매수 기회 (가장 강한 신호) |
+| 🟢 높음 | 🔴 낮음 | 🟢 상승 | **발굴 진행 중** — 가격이 이미 펀더멘탈을 반영하기 시작 → 초기 진입 적기일 수 있음 |
+| 🟢 높음 | 🟢 높음 | 🟢 상승 | **컨센서스 강세** — 모든 지표 정렬 → 모멘텀 확인, 단 밸류에이션 과열 주의 |
+| 🔴 낮음 | 🟢 높음 | 🟢 상승 | **과대평가 경고** — 센티먼트·가격이 펀더멘탈 초과 → 하방 리스크 |
+| 🔴 낮음 | 🔴 낮음 | 🔴 하락 | **정당한 하락** — 모든 지표가 약세 → 회피 |
+| 🟢 높음 | 🟢 높음 | 🔴 하락 | **일시적 조정** — 펀더멘탈·센티먼트 건재하나 기술적 조정 → 매수 기회 가능 |
+
+### 5.3 출력 스키마
+
+```json
+{
+  "agent": "manager",
+  "company": "Apple Inc.",
+  "ticker": "AAPL",
+  "analysis_date": "2026-08-03",
+  "analysis_period": "2025-01-01 ~ 2026-06-30",
+
+  "three_axis_scores": {
+    "fundamental_score": 76,
+    "sentiment_score": 62,
+    "technical_score": 70,
+    "fundamental_sentiment_gap": 14,
+    "fundamental_technical_gap": 6,
+    "overall_signal": "mild_undervaluation"
+  },
+
+  "executive_summary": "Apple의 펀더멘탈(76)은 센티먼트(62) 대비 14포인트 저평가 상태이며, 기술적 지표(70)는 상승 추세를 유지하나 모멘텀이 둔화 중. 주요 괴리는 중국 리스크에 대한 뉴스의 과도한 주목에서 기인하며, 서비스 전환의 구조적 가치가 아직 충분히 반영되지 않음.",
+
+  "key_findings": [
+    {
+      "finding": "서비스 사업 전환은 실질적이며 밸류에이션 리레이팅의 근거가 됨",
+      "sources": [
+        {"agent": "sec_filings", "evidence": "서비스 매출 비중 22%→25% (6분기 연속 확대)"},
+        {"agent": "earnings_call", "evidence": "6분기 종단 추적: 매 분기 서비스 전환 강조 강화, Q2'26에서 전략적 1순위로 격상"},
+        {"agent": "youtube_analysis", "evidence": "Financial Education: 'recurring revenue 비중 확대 → 밸류에이션 리레이팅 당위' (논거 strong)"}
+      ],
+      "debate_refinement": "토론에서 Technical Agent가 '주가가 이미 12% 상승하여 일부 반영됨'을 지적 → 단기 추가 상승 여력은 제한적이나 장기 리레이팅 논거는 유효",
+      "confidence": 0.85
+    },
+    {
+      "finding": "AI capex ROI 불확실성은 진정한 리스크이나, 시장이 과대평가하고 있을 가능성",
+      "sources": [
+        {"agent": "earnings_call", "evidence": "종단 추적: Q1'26 '올해 ROI 가시화' → Q2'26 '장기적 투자'로 톤 후퇴. 4개 애널리스트 질문에 다소 회피적 답변"},
+        {"agent": "youtube_analysis", "evidence": "Everything Money의 bearish 논거 중 AI capex → FCF 잠식 우려 (strength: moderate)"},
+        {"agent": "sec_filings", "evidence": "capex 계획 $15B은 FCF 마진에 2-3%p 하방 압력이나, 과거 유사 투자(iPhone 초기) 3년 내 회수 이력"}
+      ],
+      "debate_refinement": "토론에서 SEC Agent가 '과거 대규모 capex 투자의 회수 이력' 근거로 YouTube의 우려를 일부 반박 → 리스크 수준을 'high'에서 'medium'으로 하향",
+      "confidence": 0.75
+    }
+  ],
+
+  "convergence_catalysts": [
+    "Q3 실적 발표: 상향 가이던스 달성 여부가 핵심 (source: earnings_call agent)",
+    "$225 저항선 돌파 시 기술적 확인 (source: technical agent)"
+  ],
+
+  "risk_to_thesis": [
+    "미중 관계 급격한 악화 시 중국 매출 18% 위협 (source: macro + sec agents)",
+    "AI capex ROI 부재 장기화 → 마진 압력 (source: earnings_call + youtube agents)"
+  ],
+
+  "debate_summary": {
+    "total_challenges": 8,
+    "accepted_and_revised": 3,
+    "rejected_with_justification": 5,
+    "key_revision": "SEC Agent fundamental_score 78→74 (Technical Agent의 '주가 이미 반영' 도전 수용)"
+  }
+}
+```
+
+---
+
+## 6. Orchestration — 실행 흐름
+
+### 추천: LangGraph (Stateful DAG)
+
+```mermaid
+graph TB
+    START["START<br/>User: 기업 + 분석 기간"] --> DataFetch["데이터 수집<br/>(기간 내 모든 소스)"]
+    
+    DataFetch --> Fork{"Phase 1:<br/>6 에이전트 병렬 실행"}
+    
+    Fork --> SEC["SEC Filings Agent"]
+    Fork --> Earnings["Earnings Call Agent"]
+    Fork --> CompNews["Company News Agent"]
+    Fork --> Macro["Macro/Market Agent"]
+    Fork --> YouTube["YouTube Agent"]
+    Fork --> Technical["Technical Agent"]
+    
+    SEC --> Barrier{"모든 에이전트 완료"}
+    Earnings --> Barrier
+    CompNews --> Barrier
+    Macro --> Barrier
+    YouTube --> Barrier
+    Technical --> Barrier
+    
+    Barrier --> R1["Phase 2 Round 1:<br/>상호 도전 (Challenge)"]
+    
+    R1 --> ConvCheck{"수렴 검사:<br/>유효한 도전 ≥ 2?"}
+    
+    ConvCheck -->|"아니오 → 조기 종료"| Manager
+    ConvCheck -->|"예"| BudgetCheck{"토큰 예산 확인"}
+    
+    BudgetCheck -->|"예산 내"| R2["Round 2:<br/>응답 & 수정"]
+    BudgetCheck -->|"예산 초과 예상"| Compress["보고서 압축 후<br/>축소 Round 2"]
+    
+    Compress --> R2
+    R2 --> Manager["Phase 3:<br/>🧠 Manager Agent<br/>3축 Gap Analysis"]
+    
+    Manager --> END["최종 보고서<br/>→ Frontend"]
+
+    style Manager fill:#196f3d,color:#fff
+    style ConvCheck fill:#7d6608,color:#fff
+    style BudgetCheck fill:#922b21,color:#fff
+```
+
+---
+
+## 7. RAG (Retrieval-Augmented Generation) 필요성 논의
+
+### 7.1 현재 시스템: Context Stuffing
+
+현재 프로젝트의 [build_context()](file:///c:/Users/mrsim/FinAnalSupTool/backend/gemini_chat.py#L101-L174)는 모든 데이터를 하나의 Markdown 문자열로 조립하여 LLM에 통째로 전달합니다.
+
+### 7.2 유저 지정 기간에 따른 데이터 규모 추정
+
+유저가 넓은 기간을 선택할수록 RAG의 필요성이 높아집니다:
+
+| 분석 기간 | 어닝콜 수 | 어닝콜 토큰 | 뉴스 기사 | 영상 트랜스크립트 | **총 예상 토큰** |
+|---|---|---|---|---|---|
+| 1분기 | 1 | ~35K | ~15 | ~5 | ~80K |
+| 2분기 | 2 | ~70K | ~30 | ~10 | ~150K |
+| 4분기 (1년) | 4 | ~140K | ~60 | ~20 | ~300K |
+| 6분기 | 6 | ~210K | ~90 | ~30 | ~450K |
+| 8분기 (2년) | 8 | ~280K | ~120 | ~40 | ~600K |
+
+> [!WARNING]
+> 4분기 이상의 기간에서는 **어닝콜 대본 하나만 3-5만 토큰**이므로, 모든 데이터를 모든 에이전트에 context stuffing하면 비용과 노이즈가 급격히 증가합니다.
+
+### 7.3 추천: 단계적 Hybrid Approach
+
+| 단계 | 방식 | 조건 |
+|---|---|---|
+| **초기 (Phase 1-3)** | Context Stuffing | 분석 기간 ≤ 2분기이거나 총 토큰 < 150K |
+| **확장 (Phase 4+)** | RAG (ChromaDB + Gemini Embedding) | 분석 기간 > 2분기이거나 총 토큰 ≥ 150K |
+
+**RAG 도입 시 가장 가치 있는 적용 지점:**
+1. **Earnings Call Agent의 종단 비교** — 과거 어닝콜 전체를 넣는 대신, "AI capex"에 대해 각 분기에서 뭐라고 했는지만 검색하여 전달
+2. **과거 MAS 분석 결과 참조** — "지난 달 분석에서 gap이 얼마였고 어떤 결론이었지?" 검색
+3. **추후 다중 기업 비교** 시 필수
+
+---
+
+## 8. 잠재적 도전과제 & 완화 방안
+
+### 8.1 Technical Agent를 위한 가격 데이터 소스
+
+`yfinance`는 무료이고 쉽지만, 실시간 데이터가 아닌 **15분 지연 데이터**입니다. 일별 분석에는 충분하나, 분석 시점의 정확한 가격이 필요하면 Alpha Vantage 또는 Financial Modeling Prep API를 고려해야 합니다.
+
+### 8.2 다중 분기 어닝콜의 토큰 관리
+
+유저가 6분기를 선택하면 어닝콜만 21만+ 토큰. 대응:
+- 각 어닝콜 대본을 **요약(summary)**한 후 에이전트에 전달 (요약 단계 추가)
+- 또는 RAG으로 관련 부분만 검색하여 전달
+- 최근 1-2분기는 전문, 나머지는 요약으로 하이브리드 처리
+
+### 8.3 구조화된 출력 보장
+
+- Gemini의 `response_mime_type: "application/json"` + `response_schema` 활용
+- Pydantic 검증 + 최대 2회 재시도
+
+### 8.4 환각(Hallucination) 방지
+
+- 각 에이전트 프롬프트에 "제공된 데이터에만 기반하여 분석" 규칙 명시
+- Manager Agent가 출처를 강제 명시함으로써 근거 없는 주장 차단
+- 각 에이전트의 `confidence` 필드로 데이터 완전성 자기 평가
+
+---
+
+## 9. 구현 로드맵
+
+| Phase | 내용 | 핵심 산출물 |
+|---|---|---|
+| **Phase 1** | LangGraph 도입 + SEC Filings Agent + Technical Agent 구현 + 가격 데이터 파이프라인 (yfinance) + Pydantic 출력 검증 | 2개 에이전트 실행 가능한 `/analyze` 엔드포인트 |
+| **Phase 2** | 나머지 4개 에이전트 (Earnings, News, Macro, YouTube) 구현 + 유저 지정 기간 기반 데이터 수집 | 6개 에이전트 독립 분석 |
+| **Phase 3** | Round-Table Debate 메커니즘 (제한 포함) + Manager Agent 구현 | 3축 Gap Analysis 보고서 |
+| **Phase 4** | RAG 도입 (ChromaDB) + 다중 분기 어닝콜 종단 비교 최적화 + 분석 이력 저장 | 넓은 기간 효율적 분석, 시계열 gap 추적 |
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Q1: 오케스트레이션 프레임워크** — LangGraph (LangChain 의존성 포함) vs. 기존 FastAPI + asyncio 기반 커스텀 오케스트레이터, 어느 쪽을 선호하시나요?
+
+> [!IMPORTANT]
+> **Q2: RAG 도입 시점** — Phase 4에서 도입하는 것에 동의하시나요? 아니면 처음부터 포함시키고 싶으신가요?
+
+> [!IMPORTANT]
+> **Q3: 가격 데이터 소스** — `yfinance` (무료, 15분 지연)로 시작할지, Alpha Vantage/FMP 등 유료 API를 처음부터 사용할지?
