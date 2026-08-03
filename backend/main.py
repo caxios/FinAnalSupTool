@@ -994,53 +994,35 @@ async def media_earnings(
     quarter: int = Query(..., ge=1, le=4, description="Quarter 1-4"),
 ):
     """
-    Best-effort earnings material for a chosen quarter (e.g. 2026 Q1):
-    earnings-call videos (YouTube) plus a Gemini summary of earnings news
-    (Tavily). No dedicated earnings-transcript provider is wired in.
+    Earnings-call transcript for a chosen quarter (e.g. 2026 Q1).
+
+    Fetches the full transcript from investing.com first, falling back to
+    Motley Fool (fool.com) if investing.com has none. Returns a graceful
+    not-found / not-configured payload otherwise.
     """
     primary = _primary_company()
     if primary is None or not (primary.name or primary.ticker):
         return EarningsResponse(
-            configured=bool(
-                youtube_provider.youtube_api_key() or news_provider.tavily_api_key()
-            ),
+            configured=bool(news_provider.tavily_api_key()),
             year=year, quarter=quarter,
             message="No company detected yet. Upload a 10-K/10-Q first.",
         )
 
-    label = primary.name or primary.ticker or ""
-    term = f"{label} Q{quarter} {year} earnings call"
-
-    vids = await youtube_provider.search_videos(term, max_results=3)
-    videos = _video_models(vids.videos) if vids.configured else []
-
-    news = await news_provider.search_company_news(
-        f"{label} Q{quarter} {year} earnings results", primary.ticker,
-        max_results=6, days=None, start_date=None, end_date=None,
+    doc = await news_provider.search_earnings_transcript(
+        primary.name or "", primary.ticker, year, quarter
     )
-    summary: str | None = None
-    if news.configured and news.articles and gemini_api_key():
-        payload = "\n".join(
-            f"- {a.title}: {a.snippet[:200]}" for a in news.articles
-        )
-        try:
-            summary = await gemini_generate(
-                f"Summarize {label}'s Q{quarter} {year} earnings highlights from "
-                f"these news headlines in 3-5 concise bullets.",
-                payload,
-            )
-        except RuntimeError:
-            summary = None
 
-    configured = vids.configured or news.configured
-    msg = None if configured else (
-        "Set YOUTUBE_API_KEY and/or TAVILY_API_KEY to see earnings material."
+    resp = EarningsResponse(
+        configured=doc.configured, company=primary, year=year, quarter=quarter,
+        found=doc.found, transcript=doc.text or None, source=doc.source,
+        url=doc.url, title=doc.title, published=doc.published, message=doc.message,
     )
-    return EarningsResponse(
-        configured=configured, company=primary, year=year, quarter=quarter,
-        videos=videos, summary=summary,
-        articles=_news_models(news.articles), message=msg,
-    )
+    # Cache a slice so the AI assistant can reference the latest earnings call.
+    if doc.found and doc.text:
+        _media_cache["transcripts"][f"earnings-{year}Q{quarter}"] = {
+            "text": doc.text[:4000]
+        }
+    return resp
 
 
 # =============================================================================

@@ -150,9 +150,12 @@ export interface EarningsResponse {
   company: CompanyInfo | null;
   year: number | null;
   quarter: number | null;
-  videos: Video[];
-  summary: string | null;
-  articles: NewsArticle[];
+  found: boolean;
+  transcript: string | null;
+  source: string | null; // "investing.com" | "fool.com"
+  url: string | null;
+  title: string | null;
+  published: string | null;
   message: string | null;
 }
 

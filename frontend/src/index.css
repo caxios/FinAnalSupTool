@@ -1957,3 +1957,67 @@ body {
   color: var(--text-muted);
   user-select: none;
 }
+
+/* ============================================================================
+   Earnings-call transcript
+   ========================================================================== */
+
+.earnings-transcript {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.earnings-transcript-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.earnings-transcript-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.earnings-source-badge {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-blue);
+  border-radius: 999px;
+}
+
+.earnings-transcript-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.earnings-transcript-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.earnings-transcript-text {
+  margin: 0;
+  padding: 16px;
+  max-height: 520px;
+  overflow: auto;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

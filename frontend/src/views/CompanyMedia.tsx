@@ -19,6 +19,7 @@ import { getCompanyNews, getCompanyVideos, getEarnings } from "../api";
 import NewsFeed from "../components/media/NewsFeed";
 import VideoList from "../components/media/VideoList";
 import MediaNotice from "../components/media/MediaNotice";
+import EarningsTranscript from "../components/media/EarningsTranscript";
 import DateRangeSelector, {
   defaultRange,
 } from "../components/media/DateRangeSelector";
@@ -38,7 +39,7 @@ function EarningsSection({
   error: string | null;
 }) {
   if (loading)
-    return <MediaNotice variant="loading" message="Loading earnings material…" />;
+    return <MediaNotice variant="loading" message="Fetching earnings-call transcript…" />;
   if (error) return <MediaNotice variant="error" message={error} />;
   if (!data) return null;
   if (!data.configured) {
@@ -47,69 +48,25 @@ function EarningsSection({
         title="Earnings not configured"
         message={
           data.message ??
-          "Set YOUTUBE_API_KEY and/or TAVILY_API_KEY to see earnings material."
+          "Set TAVILY_API_KEY on the backend to fetch earnings-call transcripts."
         }
       />
     );
   }
 
-  const hasAnything =
-    data.summary || data.videos.length > 0 || data.articles.length > 0;
+  if (!data.found || !data.transcript) {
+    return (
+      <MediaNotice
+        icon="📭"
+        message={
+          data.message ??
+          `No earnings-call transcript found for Q${data.quarter} ${data.year}.`
+        }
+      />
+    );
+  }
 
-  return (
-    <div className="earnings-section">
-      {data.summary && (
-        <div className="earnings-summary">
-          <div className="transcript-label">
-            Q{data.quarter} {data.year} Earnings Highlights (AI summary)
-          </div>
-          <div className="transcript-summary-text">{data.summary}</div>
-        </div>
-      )}
-
-      {data.videos.length > 0 && (
-        <VideoList
-          data={{
-            configured: true,
-            scope: "company",
-            videos: data.videos,
-            message: null,
-          }}
-          loading={false}
-          error={null}
-        />
-      )}
-
-      {data.articles.length > 0 && (
-        <ul className="news-list">
-          {data.articles.map((a, i) => (
-            <li key={`${a.url}-${i}`} className="news-item">
-              <a
-                className="news-title"
-                href={a.url}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {a.title}
-              </a>
-              {a.source && (
-                <div className="news-meta">
-                  <span className="news-source">{a.source}</span>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {!hasAnything && (
-        <MediaNotice
-          icon="📭"
-          message={`No earnings material found for Q${data.quarter} ${data.year}.`}
-        />
-      )}
-    </div>
-  );
+  return <EarningsTranscript data={data} />;
 }
 
 export default function CompanyMedia() {

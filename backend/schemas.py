@@ -243,14 +243,20 @@ class TranscriptResponse(BaseModel):
 
 
 class EarningsResponse(BaseModel):
-    """Best-effort earnings-call material for a chosen fiscal quarter."""
+    """
+    Earnings-call transcript for a chosen fiscal quarter, sourced from
+    investing.com (preferred) or Motley Fool (fallback).
+    """
     configured: bool
     company: CompanyInfo | None = None
     year: int | None = None
     quarter: int | None = None
-    videos: list[VideoModel] = Field(default_factory=list)
-    summary: str | None = None
-    articles: list[NewsArticleModel] = Field(default_factory=list)
+    found: bool = False
+    transcript: str | None = None
+    source: str | None = None       # "investing.com" | "fool.com"
+    url: str | None = None
+    title: str | None = None
+    published: str | None = None
     message: str | None = None
 
 

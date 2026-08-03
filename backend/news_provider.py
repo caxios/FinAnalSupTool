@@ -21,6 +21,7 @@ When the key is missing, every function returns a `NewsResult` with
 from __future__ import annotations
 
 import os
+import re
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -73,6 +74,19 @@ class NewsResult:
     articles: list[NewsArticle] = field(default_factory=list)
     message: str | None = None
     query: str | None = None
+
+
+@dataclass
+class TranscriptDoc:
+    """An earnings-call transcript located on a source site."""
+    configured: bool
+    found: bool = False
+    source: str | None = None       # e.g. "investing.com" / "fool.com"
+    url: str | None = None
+    title: str | None = None
+    text: str = ""
+    published: str | None = None
+    message: str | None = None
 
 
 # =============================================================================
@@ -198,6 +212,164 @@ async def search_company_news(
         days=days,
         start_date=start_date,
         end_date=end_date,
+    )
+
+
+# =============================================================================
+# Earnings-call transcripts (investing.com first, then Motley Fool)
+# =============================================================================
+
+# Priority-ordered transcript sources. `hint` is a substring the transcript
+# page URL must contain, so we skip generic quote/earnings-date pages.
+EARNINGS_SOURCES: list[tuple[str, str]] = [
+    ("investing.com", "transcript"),
+    ("fool.com", "call-transcripts"),
+]
+
+
+# Corporate-suffix / filler words to drop when deriving company match tokens.
+_NAME_STOPWORDS = {
+    "inc", "corp", "corporation", "incorporated", "co", "company", "ltd",
+    "limited", "plc", "llc", "lp", "holdings", "holding", "group", "the",
+    "and", "technology", "technologies", "international", "global",
+}
+
+
+def _company_tokens(company: str, ticker: str | None) -> set[str]:
+    """Significant lowercase tokens that identify the company in a page URL/title."""
+    tokens: set[str] = set()
+    if ticker:
+        tokens.add(ticker.lower())
+    for raw in re.split(r"[^a-z0-9]+", (company or "").lower()):
+        if len(raw) >= 3 and raw not in _NAME_STOPWORDS:
+            tokens.add(raw)
+    return tokens
+
+
+def _pick_transcript_result(
+    results: list[dict],
+    hint: str,
+    company: str,
+    ticker: str | None,
+    year: int,
+    quarter: int,
+) -> dict | None:
+    """
+    From a source's search results, choose the best actual-transcript page.
+
+    Keeps only pages whose URL looks like a transcript (`hint`) AND that mention
+    the company (name token or ticker) — so a same-quarter transcript for a
+    different company isn't returned — then ranks by how well the title/URL
+    matches the requested year and quarter.
+    """
+    tokens = _company_tokens(company, ticker)
+
+    def text_of(r: dict) -> str:
+        return f"{r.get('url', '')} {r.get('title', '')}".lower()
+
+    # A page qualifies only if it is a transcript page (`hint`), names the
+    # company, and matches BOTH the requested year and quarter — so we never
+    # surface a different company's or a different quarter's call. Tavily already
+    # relevance-orders the results, so the first qualifying page is the best one.
+    for r in results:
+        s = text_of(r)
+        if hint not in (r.get("url", "") or "").lower():
+            continue
+        if tokens and not any(t in s for t in tokens):
+            continue
+        if str(year) not in s:
+            continue
+        if f"q{quarter}" not in s and f"q{quarter} {year}" not in s:
+            continue
+        return r
+    return None
+
+
+async def _tavily_transcript(
+    query: str, domain: str, hint: str,
+    company: str, ticker: str | None, year: int, quarter: int,
+) -> TranscriptDoc:
+    """Search one source for a transcript page and pull its full text."""
+    api_key = tavily_api_key()
+    if not api_key:
+        return TranscriptDoc(configured=False, message="TAVILY_API_KEY not set.")
+
+    body = {
+        "api_key": api_key,
+        "query": query,
+        "include_domains": [domain],
+        "max_results": 6,
+        "search_depth": "advanced",
+        "include_raw_content": True,
+        "topic": "news",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(_TAVILY_URL, json=body)
+    except httpx.HTTPError as e:
+        logger.error(f"Tavily transcript request failed ({domain}): {e}")
+        return TranscriptDoc(configured=True, message=f"Could not reach {domain}: {e}")
+
+    if resp.status_code != 200:
+        return TranscriptDoc(
+            configured=True,
+            message=f"Transcript search error ({resp.status_code}) on {domain}.",
+        )
+
+    results = resp.json().get("results", [])
+    best = _pick_transcript_result(results, hint, company, ticker, year, quarter)
+    if not best:
+        return TranscriptDoc(configured=True, found=False)
+
+    text = (best.get("raw_content") or best.get("content") or "").strip()
+    if not text:
+        return TranscriptDoc(configured=True, found=False)
+
+    return TranscriptDoc(
+        configured=True,
+        found=True,
+        source=domain,
+        url=best.get("url"),
+        title=(best.get("title") or "").strip() or None,
+        text=text,
+        published=best.get("published_date"),
+    )
+
+
+async def search_earnings_transcript(
+    company: str, ticker: str | None, year: int, quarter: int
+) -> TranscriptDoc:
+    """
+    Find a quarter's earnings-call transcript, trying each source in priority
+    order (investing.com → Motley Fool). Returns the first full transcript found.
+    """
+    if not tavily_api_key():
+        return TranscriptDoc(
+            configured=False,
+            message="Transcripts are not configured: set TAVILY_API_KEY on the "
+                    "backend to fetch earnings-call transcripts.",
+        )
+
+    label = company or ticker or ""
+    ticker_hint = f" {ticker}" if ticker else ""
+    query = f"{label}{ticker_hint} Q{quarter} {year} earnings call transcript"
+
+    last_msg: str | None = None
+    for domain, hint in EARNINGS_SOURCES:
+        doc = await _tavily_transcript(
+            query, domain, hint, company, ticker, year, quarter
+        )
+        if doc.found:
+            return doc
+        if doc.message:
+            last_msg = doc.message
+
+    return TranscriptDoc(
+        configured=True,
+        found=False,
+        message=last_msg
+        or f"No earnings-call transcript found for {label} Q{quarter} {year} "
+           f"on investing.com or Motley Fool.",
     )
 
 
