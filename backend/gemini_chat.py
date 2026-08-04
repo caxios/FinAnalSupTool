@@ -239,12 +239,16 @@ async def _gemini_call(
     *,
     temperature: float = 0.3,
     max_output_tokens: int = 2048,
+    response_mime_type: str | None = None,
 ) -> str:
     """
-    Low-level Gemini generateContent call shared by the chat assistant and the
-    one-shot helpers (transcript summaries, sentiment synthesis).
+    Low-level Gemini generateContent call shared by the chat assistant, the
+    one-shot helpers (transcript summaries, sentiment synthesis), and the MAS
+    agents (via agents/llm_utils.py).
 
-    Raises RuntimeError with a user-friendly message on any failure.
+    Pass `response_mime_type="application/json"` to force valid-JSON output
+    (used by the structured-output agents). Raises RuntimeError with a
+    user-friendly message on any failure.
     """
     api_key = gemini_api_key()
     if not api_key:
@@ -254,13 +258,16 @@ async def _gemini_call(
         )
 
     url = _GEMINI_URL.format(model=_model_name())
+    generation_config: dict = {
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens,
+    }
+    if response_mime_type:
+        generation_config["responseMimeType"] = response_mime_type
     body = {
         "system_instruction": {"parts": [{"text": system_instruction}]},
         "contents": contents,
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-        },
+        "generationConfig": generation_config,
     }
 
     try:

@@ -94,6 +94,7 @@ import news_provider
 import youtube_provider
 import channel_store
 from market_sentiment import compute_market_sentiment
+from agents import SECFilingsAgent
 
 
 # =============================================================================
@@ -1281,6 +1282,45 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=502, detail=str(e))
 
     return ChatResponse(answer=answer)
+
+
+# =============================================================================
+# ENDPOINT: POST /analyze  (Multi-Agent System — Step 1: SEC Filings Agent)
+# =============================================================================
+
+@app.post("/analyze")
+async def run_analysis():
+    """
+    Run the MAS analysis pipeline over the uploaded filings.
+
+    Step 1 wires up only the SEC Filings Analyzer agent, which produces a
+    structured fundamental-analysis report (score, financial-health snapshot,
+    multi-period trends, MD&A insights, classified risks) grounded in the
+    in-memory filing data. Returns the report as JSON.
+    """
+    if not _filing_meta:
+        raise HTTPException(status_code=404, detail="No filings uploaded yet.")
+
+    if not gemini_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="Analysis is not configured: GEMINI_API_KEY is not set on "
+                   "the backend. Set it and restart to enable the agents.",
+        )
+
+    agent = SECFilingsAgent()
+    try:
+        report = await agent.analyze({
+            "merged_tables": _merged_tables,
+            "text_store": _text_store,
+            "filing_meta": _filing_meta,
+        })
+    except RuntimeError as e:
+        # Gemini config/API failures or repeated structured-output validation
+        # failures surface here as a clear 502 rather than a 500 crash.
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return report.model_dump()
 
 
 # =============================================================================
