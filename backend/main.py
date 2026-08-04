@@ -30,7 +30,7 @@ import io
 import tempfile
 import shutil
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 # Load backend/.env (if present) so API keys — GEMINI_API_KEY, TAVILY_API_KEY,
 # YOUTUBE_API_KEY, etc. — can live in a file instead of shell exports. Optional:
@@ -66,6 +66,7 @@ from schemas import (
     ChannelModel,
     ChannelsResponse,
     AddChannelRequest,
+    AnalyzeRequest,
 )
 from pdf_utils import (
     detect_filing_metadata,
@@ -95,7 +96,14 @@ import news_provider
 import youtube_provider
 import channel_store
 from market_sentiment import compute_market_sentiment
-from agents import SECFilingsAgent, TechnicalAnalysisAgent
+from agents import (
+    SECFilingsAgent,
+    TechnicalAnalysisAgent,
+    EarningsCallAgent,
+    CompanyNewsAgent,
+    MacroMarketAgent,
+    YouTubeAgent,
+)
 
 
 # =============================================================================
@@ -1287,29 +1295,62 @@ async def chat(request: ChatRequest):
 
 # =============================================================================
 # ENDPOINT: POST /analyze  (Multi-Agent System)
-#   Step 1: SEC Filings Agent   Step 2: + Technical Analysis Agent (parallel)
+#   Step 1: SEC Filings   Step 2: + Technical Analysis
+#   Step 3: + Earnings Call, Company News, Macro & Market, YouTube — all six
+#           run concurrently over one user-specified analysis period.
 # =============================================================================
 
-def _analysis_window() -> tuple[str, str]:
+# Default window when the caller doesn't specify one: a trailing ~18 months.
+# ~550 calendar days yields ~380 trading days (enough for a reliable SMA200) and
+# spans 6 quarters of earnings calls.
+_DEFAULT_WINDOW_DAYS = 550
+
+
+def _analysis_window(request: AnalyzeRequest | None = None) -> tuple[str, str]:
     """
-    Default price-history window for technical analysis: a trailing ~18 months
-    ending today. ~550 calendar days yields ~380 trading days, enough for a
-    reliable SMA200.
+    Resolve the analysis period that drives EVERY agent's data fetching.
+
+    Uses the caller's start/end when given, else falls back to the trailing
+    default window. Raises HTTPException(400) on a malformed or inverted range.
     """
-    end = datetime.now(timezone.utc).date()
-    start = end - timedelta(days=550)
+    def parse(value: str, field: str) -> date:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} must be a YYYY-MM-DD date (got '{value}').",
+            )
+
+    today = datetime.now(timezone.utc).date()
+    end = parse(request.end_date, "end_date") if (request and request.end_date) else today
+    start = (
+        parse(request.start_date, "start_date")
+        if (request and request.start_date)
+        else end - timedelta(days=_DEFAULT_WINDOW_DAYS)
+    )
+
+    if start > end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_date ({start}) must not be after end_date ({end}).",
+        )
     return start.isoformat(), end.isoformat()
 
 
 @app.post("/analyze")
-async def run_analysis():
+async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
     """
-    Run the MAS analysis pipeline over the uploaded filings.
+    Run the full MAS analysis pipeline over the uploaded filings.
 
-    Runs the SEC Filings Analyzer and (when a ticker is resolved) the Technical
-    Analysis agent CONCURRENTLY via asyncio.gather, so wall-clock time is ~max of
-    the two rather than their sum. Each agent is isolated: a failure in one is
-    reported in its slot and does not prevent the other's result from returning.
+    All six agents run CONCURRENTLY via a single `asyncio.gather(...,
+    return_exceptions=True)`, so wall-clock time is ~the slowest agent rather
+    than the sum of all six. Each agent is isolated: a failure lands in that
+    agent's slot as an `error` and never prevents the others from returning.
+
+    The request's `start_date`/`end_date` drive every data source — price
+    history, which quarters' transcripts are fetched, the news search windows,
+    and the video publish window.
     """
     if not _filing_meta:
         raise HTTPException(status_code=404, detail="No filings uploaded yet.")
@@ -1321,55 +1362,80 @@ async def run_analysis():
                    "the backend. Set it and restart to enable the agents.",
         )
 
+    start_date, end_date = _analysis_window(request)
+
     primary = _primary_company()
     ticker = primary.ticker if primary else None
-    start_date, end_date = _analysis_window()
+    company_name = primary.name if primary else None
+    # Every agent except the SEC one works from the company identity; the shared
+    # payload keeps their contexts identical.
+    company_ctx = {
+        "company": company_name or "",
+        "ticker": ticker,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
 
-    sec_task = SECFilingsAgent().analyze({
-        "merged_tables": _merged_tables,
-        "text_store": _text_store,
-        "filing_meta": _filing_meta,
-    })
+    # (agent_id, coroutine | skip-reason). A skip reason means the agent's
+    # prerequisites are missing, so we report it without spending an LLM call.
+    planned: list[tuple[str, object]] = [
+        ("sec_filings", SECFilingsAgent().analyze({
+            "merged_tables": _merged_tables,
+            "text_store": _text_store,
+            "filing_meta": _filing_meta,
+        })),
+        ("technical_analysis",
+         TechnicalAnalysisAgent().analyze({
+             "ticker": ticker, "start_date": start_date, "end_date": end_date,
+         })
+         if ticker else
+         "No ticker could be resolved from the uploaded filings; "
+         "technical analysis was skipped."),
+    ]
 
-    if ticker:
-        tech_task = TechnicalAnalysisAgent().analyze({
-            "ticker": ticker,
-            "start_date": start_date,
-            "end_date": end_date,
-        })
-        sec_res, tech_res = await asyncio.gather(
-            sec_task, tech_task, return_exceptions=True
+    identified = bool(company_name or ticker)
+    no_company = (
+        "No company could be identified from the uploaded filings; "
+        "this agent was skipped."
+    )
+    for agent_id, agent_cls in (
+        ("earnings_call", EarningsCallAgent),
+        ("company_news", CompanyNewsAgent),
+        ("macro_market", MacroMarketAgent),
+        ("youtube_analysis", YouTubeAgent),
+    ):
+        planned.append(
+            (agent_id, agent_cls().analyze(dict(company_ctx)) if identified else no_company)
         )
-    else:
-        (sec_res,) = await asyncio.gather(sec_task, return_exceptions=True)
-        tech_res = None
 
-    response: dict = {"agents_completed": 0}
+    # Run everything still runnable in one parallel batch.
+    runnable = [(aid, coro) for aid, coro in planned if not isinstance(coro, str)]
+    outcomes = await asyncio.gather(
+        *(coro for _, coro in runnable), return_exceptions=True
+    )
+    by_id = dict(zip((aid for aid, _ in runnable), outcomes))
+
+    reports: dict[str, dict] = {}
     completed = 0
+    for agent_id, coro in planned:
+        if isinstance(coro, str):          # skipped before launch
+            reports[agent_id] = {"error": coro}
+            continue
+        result = by_id[agent_id]
+        if isinstance(result, BaseException):
+            logger.error(f"{agent_id} agent failed: {result}")
+            reports[agent_id] = {"error": str(result)}
+        else:
+            reports[agent_id] = result.model_dump()
+            completed += 1
 
-    # ── SEC Filings slot ──
-    if isinstance(sec_res, Exception):
-        logger.error(f"SEC filings agent failed: {sec_res}")
-        response["sec_filings"] = {"error": str(sec_res)}
-    else:
-        response["sec_filings"] = sec_res.model_dump()
-        completed += 1
-
-    # ── Technical Analysis slot ──
-    if ticker is None:
-        response["technical_analysis"] = {
-            "error": "No ticker could be resolved from the uploaded filings; "
-                     "technical analysis was skipped."
-        }
-    elif isinstance(tech_res, Exception):
-        logger.error(f"Technical analysis agent failed: {tech_res}")
-        response["technical_analysis"] = {"error": str(tech_res)}
-    else:
-        response["technical_analysis"] = tech_res.model_dump()
-        completed += 1
-
-    response["agents_completed"] = completed
-    return response
+    return {
+        "analysis_period": f"{start_date}..{end_date}",
+        "company": primary.model_dump() if primary else None,
+        "agents_total": len(planned),
+        "agents_completed": completed,
+        "reports": reports,
+    }
 
 
 # =============================================================================

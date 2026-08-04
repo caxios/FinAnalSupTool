@@ -296,6 +296,31 @@ class SentimentResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Multi-Agent Analysis Model (POST /analyze)
+# ─────────────────────────────────────────────────────────────
+
+class AnalyzeRequest(BaseModel):
+    """
+    Request body for POST /analyze — the user-specified analysis period.
+
+    This single date range drives EVERY agent's data fetching: the price history
+    window, which quarters' earnings transcripts are pulled, the news search
+    windows, and the video publish window.
+
+    Both fields are optional; omitting them (or posting no body at all) falls
+    back to a trailing 18-month window, which is long enough for a reliable
+    SMA200 and several quarters of transcripts.
+    """
+
+    start_date: str | None = Field(
+        None, description="Analysis period start, YYYY-MM-DD (e.g. '2025-01-01')"
+    )
+    end_date: str | None = Field(
+        None, description="Analysis period end, YYYY-MM-DD (e.g. '2026-06-30')"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # Error Model
 # ─────────────────────────────────────────────────────────────
 

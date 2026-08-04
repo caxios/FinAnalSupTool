@@ -12,10 +12,19 @@ shared by every agent so new ones can be added without touching the plumbing.
 from .base_agent import AgentReport, BaseAgent
 from .sec_filings_agent import SECFilingsAgent
 from .technical_analysis_agent import TechnicalAnalysisAgent
+from .earnings_call_agent import EarningsCallAgent, date_range_to_quarters
+from .company_news_agent import CompanyNewsAgent
+from .macro_market_agent import MacroMarketAgent
+from .youtube_agent import YouTubeAgent
 
 __all__ = [
     "AgentReport",
     "BaseAgent",
     "SECFilingsAgent",
     "TechnicalAnalysisAgent",
+    "EarningsCallAgent",
+    "CompanyNewsAgent",
+    "MacroMarketAgent",
+    "YouTubeAgent",
+    "date_range_to_quarters",
 ]
