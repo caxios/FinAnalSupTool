@@ -7,3 +7,5 @@ pandas
 httpx
 youtube-transcript-api
 python-dotenv
+yfinance
+numpy

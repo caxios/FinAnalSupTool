@@ -11,5 +11,11 @@ shared by every agent so new ones can be added without touching the plumbing.
 
 from .base_agent import AgentReport, BaseAgent
 from .sec_filings_agent import SECFilingsAgent
+from .technical_analysis_agent import TechnicalAnalysisAgent
 
-__all__ = ["AgentReport", "BaseAgent", "SECFilingsAgent"]
+__all__ = [
+    "AgentReport",
+    "BaseAgent",
+    "SECFilingsAgent",
+    "TechnicalAnalysisAgent",
+]

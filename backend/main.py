@@ -24,6 +24,7 @@ Configured to allow requests from React dev servers (ports 3000, 5173, 5174).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import io
 import tempfile
@@ -94,7 +95,7 @@ import news_provider
 import youtube_provider
 import channel_store
 from market_sentiment import compute_market_sentiment
-from agents import SECFilingsAgent
+from agents import SECFilingsAgent, TechnicalAnalysisAgent
 
 
 # =============================================================================
@@ -1285,18 +1286,30 @@ async def chat(request: ChatRequest):
 
 
 # =============================================================================
-# ENDPOINT: POST /analyze  (Multi-Agent System — Step 1: SEC Filings Agent)
+# ENDPOINT: POST /analyze  (Multi-Agent System)
+#   Step 1: SEC Filings Agent   Step 2: + Technical Analysis Agent (parallel)
 # =============================================================================
+
+def _analysis_window() -> tuple[str, str]:
+    """
+    Default price-history window for technical analysis: a trailing ~18 months
+    ending today. ~550 calendar days yields ~380 trading days, enough for a
+    reliable SMA200.
+    """
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=550)
+    return start.isoformat(), end.isoformat()
+
 
 @app.post("/analyze")
 async def run_analysis():
     """
     Run the MAS analysis pipeline over the uploaded filings.
 
-    Step 1 wires up only the SEC Filings Analyzer agent, which produces a
-    structured fundamental-analysis report (score, financial-health snapshot,
-    multi-period trends, MD&A insights, classified risks) grounded in the
-    in-memory filing data. Returns the report as JSON.
+    Runs the SEC Filings Analyzer and (when a ticker is resolved) the Technical
+    Analysis agent CONCURRENTLY via asyncio.gather, so wall-clock time is ~max of
+    the two rather than their sum. Each agent is isolated: a failure in one is
+    reported in its slot and does not prevent the other's result from returning.
     """
     if not _filing_meta:
         raise HTTPException(status_code=404, detail="No filings uploaded yet.")
@@ -1308,19 +1321,55 @@ async def run_analysis():
                    "the backend. Set it and restart to enable the agents.",
         )
 
-    agent = SECFilingsAgent()
-    try:
-        report = await agent.analyze({
-            "merged_tables": _merged_tables,
-            "text_store": _text_store,
-            "filing_meta": _filing_meta,
-        })
-    except RuntimeError as e:
-        # Gemini config/API failures or repeated structured-output validation
-        # failures surface here as a clear 502 rather than a 500 crash.
-        raise HTTPException(status_code=502, detail=str(e))
+    primary = _primary_company()
+    ticker = primary.ticker if primary else None
+    start_date, end_date = _analysis_window()
 
-    return report.model_dump()
+    sec_task = SECFilingsAgent().analyze({
+        "merged_tables": _merged_tables,
+        "text_store": _text_store,
+        "filing_meta": _filing_meta,
+    })
+
+    if ticker:
+        tech_task = TechnicalAnalysisAgent().analyze({
+            "ticker": ticker,
+            "start_date": start_date,
+            "end_date": end_date,
+        })
+        sec_res, tech_res = await asyncio.gather(
+            sec_task, tech_task, return_exceptions=True
+        )
+    else:
+        (sec_res,) = await asyncio.gather(sec_task, return_exceptions=True)
+        tech_res = None
+
+    response: dict = {"agents_completed": 0}
+    completed = 0
+
+    # ── SEC Filings slot ──
+    if isinstance(sec_res, Exception):
+        logger.error(f"SEC filings agent failed: {sec_res}")
+        response["sec_filings"] = {"error": str(sec_res)}
+    else:
+        response["sec_filings"] = sec_res.model_dump()
+        completed += 1
+
+    # ── Technical Analysis slot ──
+    if ticker is None:
+        response["technical_analysis"] = {
+            "error": "No ticker could be resolved from the uploaded filings; "
+                     "technical analysis was skipped."
+        }
+    elif isinstance(tech_res, Exception):
+        logger.error(f"Technical analysis agent failed: {tech_res}")
+        response["technical_analysis"] = {"error": str(tech_res)}
+    else:
+        response["technical_analysis"] = tech_res.model_dump()
+        completed += 1
+
+    response["agents_completed"] = completed
+    return response
 
 
 # =============================================================================
