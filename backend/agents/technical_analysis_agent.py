@@ -134,9 +134,11 @@ class TechnicalAnalysisAgent(BaseAgent):
         td = await price_provider.fetch_technical_data(ticker, start_date, end_date)
 
         user_prompt = _USER_TEMPLATE.format(ticker=ticker, data=_format_data(td))
+        # This report is compact, but Gemini's thinking tokens draw from the same
+        # budget as the answer — keep headroom so the JSON can't be truncated.
         report = await self._generate_report(
             TechnicalAnalysisReport, _SYSTEM_PROMPT, user_prompt,
-            max_output_tokens=4096,
+            max_output_tokens=16384,
         )
 
         # Overwrite the factual fields with the ground-truth computed values, so

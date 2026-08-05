@@ -97,7 +97,7 @@ You output ONLY a single JSON object matching this structure:
         "strategic_shifts": ["<stated change in strategy or priorities>"]
       },
       "forward_guidance": {
-        "direction": "raised|maintained|lowered|withdrawn|not_provided",
+        "direction": "raised|maintained|lowered|initiated|withdrawn|not_provided",
         "detail": "<what was guided and to what numbers>"
       }
     }
@@ -112,7 +112,7 @@ You output ONLY a single JSON object matching this structure:
       {"theme": "<theme>", "trajectory": "<how it changed across quarters>", "assessment": "<what that implies>"}
     ],
     "tone_trend_across_quarters": [{"quarter": "Q1 2025", "tone_score": <int 0-100>}],
-    "guidance_trend": [{"quarter": "Q1 2025", "direction": "raised|maintained|lowered|withdrawn|not_provided"}],
+    "guidance_trend": [{"quarter": "Q1 2025", "direction": "raised|maintained|lowered|initiated|withdrawn|not_provided"}],
     "new_topics_not_in_previous": ["<topic raised for the first time>"],
     "dropped_topics": ["<topic previously discussed, now absent>"]
   }
@@ -121,7 +121,10 @@ You output ONLY a single JSON object matching this structure:
 ENUM FIELDS — copy one of the listed values EXACTLY, never prose:
 - `confidence_level` and `significance`: high | medium | low
 - `response_quality`: direct | partial | evasive
-- `direction`: raised | maintained | lowered | withdrawn | not_provided
+- `direction`: raised | maintained | lowered | initiated | withdrawn | not_provided
+  (relative to the PRIOR quarter's guidance: use `initiated` when guidance is
+  issued with no prior figure to compare, and `not_provided` when management
+  gave no guidance at all. Never write 'provided' — it is not a direction.)
 - `verdict`: delivered | partially_delivered | missed | too_early
 (`overall` is free text.) The rubric below describes the SCORE — never put a
 rubric phrase in an enum field.

@@ -38,9 +38,15 @@ class ResponseQuality(str, Enum):
 
 
 class GuidanceDirection(str, Enum):
+    """
+    Direction RELATIVE to the prior quarter's guidance. `initiated` covers
+    guidance issued where there is no prior figure to compare against (a new
+    period or metric) — it is 'provided, but directionless'.
+    """
     raised = "raised"
     maintained = "maintained"
     lowered = "lowered"
+    initiated = "initiated"
     withdrawn = "withdrawn"
     not_provided = "not_provided"
 

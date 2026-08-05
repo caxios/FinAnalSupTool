@@ -25,6 +25,7 @@ there's no extra SDK to install.
 from __future__ import annotations
 
 import os
+import re
 import logging
 
 import httpx
@@ -33,6 +34,53 @@ import pandas as pd
 from pdf_utils import SECTION_LABELS
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+class GeminiRetryableError(RuntimeError):
+    """
+    A TRANSIENT Gemini failure that is worth retrying: rate limiting (429), a
+    server-side/overload error (5xx), or a network failure.
+
+    It subclasses RuntimeError so every existing caller that catches
+    RuntimeError behaves exactly as before; callers that want to back off and
+    retry (see agents/llm_utils.py) can catch this specific type instead.
+
+    `retry_after` carries the server's own suggested wait, in seconds, when it
+    supplies one — Gemini returns it as a RetryInfo detail on 429.
+    """
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(payload: dict, message: str) -> float | None:
+    """
+    Pull the server's suggested retry delay out of an error response.
+
+    Preferred source is the structured RetryInfo detail ({"retryDelay": "42s"});
+    we fall back to the human-readable "Please retry in 42.8s." in the message.
+    """
+    details = (payload.get("error") or {}).get("details") or []
+    for d in details:
+        delay = d.get("retryDelay") if isinstance(d, dict) else None
+        if isinstance(delay, str) and delay.endswith("s"):
+            try:
+                return float(delay[:-1])
+            except ValueError:
+                pass
+
+    m = re.search(r"retry in ([0-9.]+)\s*s", message or "", re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return None
 
 
 # =============================================================================
@@ -50,6 +98,14 @@ _HTTP_TIMEOUT = 90.0
 # (especially MD&A / Risk Factors) can be enormous; this keeps the prompt
 # bounded while still giving the model the substance to reason over.
 _SECTION_CHAR_CAP = 12_000
+
+# Sliding window for chat history. The frontend resends the entire conversation
+# every turn, and the system prompt already carries the full filing context, so
+# an unbounded history makes per-turn cost grow with conversation length.
+# 6 messages ≈ the last 3 exchanges — enough for pronouns and follow-ups
+# ("what about the previous quarter?") without hauling the whole session along.
+_MAX_HISTORY_MESSAGES = 6
+_MAX_HISTORY_CHARS = 24_000     # ~6K tokens, a second guard for very long turns
 
 
 def gemini_api_key() -> str | None:
@@ -216,21 +272,65 @@ def _build_system_prompt(context: str) -> str:
 # =============================================================================
 
 def _to_gemini_contents(
-    history: list[dict], question: str
+    history: list[dict],
+    question: str,
+    *,
+    max_messages: int = _MAX_HISTORY_MESSAGES,
+    max_chars: int = _MAX_HISTORY_CHARS,
 ) -> list[dict]:
     """
     Convert a simple [{role, content}] history + the new question into
     Gemini's `contents` format. Roles map: user→"user", assistant→"model".
+
+    A SLIDING WINDOW is applied to the history, because the frontend sends the
+    whole conversation on every turn and the system prompt already carries the
+    full filing context. Without a bound, each turn resends every prior turn —
+    cost grows quadratically with conversation length.
+
+    Two independent bounds, both counted from the most recent message backwards:
+      - `max_messages`: how many turns are kept at all.
+      - `max_chars`:    a size budget, so a few very long turns (a pasted
+                        transcript, a long tabular answer) can't blow the
+                        request up even when the message count is small.
+
+    The current `question` is always sent in full and is never counted against
+    the budget — dropping it would defeat the purpose of the call.
     """
-    contents: list[dict] = []
+    normalized: list[dict] = []
     for msg in history:
         role = "model" if msg.get("role") in ("assistant", "model") else "user"
         text = str(msg.get("content", "")).strip()
         if not text:
             continue
-        contents.append({"role": role, "parts": [{"text": text}]})
-    contents.append({"role": "user", "parts": [{"text": question}]})
-    return contents
+        normalized.append({"role": role, "parts": [{"text": text}]})
+
+    # Newest-first walk, keeping turns until either bound is reached.
+    window: list[dict] = []
+    used = 0
+    for msg in reversed(normalized):
+        if max_messages and len(window) >= max_messages:
+            break
+        size = len(msg["parts"][0]["text"])
+        if max_chars and used + size > max_chars and window:
+            break
+        window.append(msg)
+        used += size
+    window.reverse()
+
+    # Gemini expects the exchange to start with a user turn; a window that
+    # happens to begin with a model reply would be a dangling answer anyway.
+    while window and window[0]["role"] == "model":
+        window.pop(0)
+
+    dropped = len(normalized) - len(window)
+    if dropped:
+        logger.info(
+            f"Chat history trimmed: sent {len(window)} of {len(normalized)} "
+            f"prior messages ({used:,} chars), dropped {dropped} older turns."
+        )
+
+    window.append({"role": "user", "parts": [{"text": question}]})
+    return window
 
 
 async def _gemini_call(
@@ -281,17 +381,27 @@ async def _gemini_call(
                 json=body,
             )
     except httpx.HTTPError as e:
+        # Network-level failures (timeout, reset) are transient — retryable.
         logger.error(f"Gemini request failed: {e}")
-        raise RuntimeError(f"Could not reach the Gemini API: {e}")
+        raise GeminiRetryableError(f"Could not reach the Gemini API: {e}")
 
     if resp.status_code != 200:
         detail = resp.text
+        payload: dict = {}
         try:
-            detail = resp.json().get("error", {}).get("message", detail)
+            payload = resp.json()
+            detail = payload.get("error", {}).get("message", detail)
         except Exception:
             pass
         logger.error(f"Gemini API error {resp.status_code}: {detail}")
-        raise RuntimeError(f"Gemini API error ({resp.status_code}): {detail}")
+        message = f"Gemini API error ({resp.status_code}): {detail}"
+        # 429 (rate limit / quota) and 5xx (overloaded) are transient; a 400 for
+        # a malformed request or a 403 for a bad key will never fix itself.
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise GeminiRetryableError(
+                message, _retry_after_seconds(payload, detail)
+            )
+        raise RuntimeError(message)
 
     data = resp.json()
     candidates = data.get("candidates", [])

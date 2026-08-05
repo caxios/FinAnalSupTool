@@ -150,8 +150,11 @@ class SECFilingsAgent(BaseAgent):
             context=data_context,
         )
 
+        # Multi-period trends + risk assessment across several filings runs long,
+        # and Gemini's thinking tokens draw from the same budget — too small a
+        # ceiling truncates the JSON mid-string and burns retries.
         report = await self._generate_report(
-            SECFilingsReport, _SYSTEM_PROMPT, user_prompt, max_output_tokens=4096,
+            SECFilingsReport, _SYSTEM_PROMPT, user_prompt, max_output_tokens=16384,
         )
 
         # Backfill periods if the model left them empty, so the report always
