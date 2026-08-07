@@ -130,7 +130,7 @@ class SECFilingsAgent(BaseAgent):
     def agent_id(self) -> str:
         return "sec_filings"
 
-    async def analyze(self, context: dict) -> SECFilingsReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> SECFilingsReport:
         """
         Args:
             context: {
@@ -138,6 +138,7 @@ class SECFilingsAgent(BaseAgent):
                 "text_store":    dict[str, dict],
                 "filing_meta":   dict[str, dict],
             }
+            capture: optional side-channel for the assembled raw-data prompt.
         """
         merged_tables: dict[str, pd.DataFrame] = context.get("merged_tables", {}) or {}
         text_store: dict[str, dict] = context.get("text_store", {}) or {}
@@ -149,6 +150,8 @@ class SECFilingsAgent(BaseAgent):
             periods=", ".join(periods) or "(none)",
             context=data_context,
         )
+        if capture is not None:
+            capture["raw_data"] = user_prompt
 
         # Multi-period trends + risk assessment across several filings runs long,
         # and Gemini's thinking tokens draw from the same budget — too small a

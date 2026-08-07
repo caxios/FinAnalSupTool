@@ -184,11 +184,12 @@ class EarningsCallAgent(BaseAgent):
     def agent_id(self) -> str:
         return "earnings_call"
 
-    async def analyze(self, context: dict) -> EarningsCallReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> EarningsCallReport:
         """
         Args:
             context: {"company": str, "ticker": str | None,
                       "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+            capture: optional side-channel for the assembled raw-data prompt.
         """
         company = (context.get("company") or "").strip()
         ticker = (context.get("ticker") or "").strip() or None
@@ -253,6 +254,8 @@ class EarningsCallAgent(BaseAgent):
             missing=", ".join(missing) or "(none)",
             transcripts="\n\n".join(blocks),
         )
+        if capture is not None:
+            capture["raw_data"] = user_prompt
 
         # Per-quarter breakdown plus cross-quarter tracking is a long report, and
         # Gemini's thinking tokens draw from the same budget — too small a

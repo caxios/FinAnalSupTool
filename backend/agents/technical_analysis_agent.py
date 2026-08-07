@@ -118,11 +118,12 @@ class TechnicalAnalysisAgent(BaseAgent):
     def agent_id(self) -> str:
         return "technical_analysis"
 
-    async def analyze(self, context: dict) -> TechnicalAnalysisReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> TechnicalAnalysisReport:
         """
         Args:
             context: {"ticker": str, "start_date": "YYYY-MM-DD",
                       "end_date": "YYYY-MM-DD"}
+            capture: optional side-channel for the assembled raw-data prompt.
         """
         ticker = (context.get("ticker") or "").strip().upper()
         start_date = context["start_date"]
@@ -134,6 +135,8 @@ class TechnicalAnalysisAgent(BaseAgent):
         td = await price_provider.fetch_technical_data(ticker, start_date, end_date)
 
         user_prompt = _USER_TEMPLATE.format(ticker=ticker, data=_format_data(td))
+        if capture is not None:
+            capture["raw_data"] = user_prompt
         # This report is compact, but Gemini's thinking tokens draw from the same
         # budget as the answer — keep headroom so the JSON can't be truncated.
         report = await self._generate_report(

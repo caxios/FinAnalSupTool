@@ -25,6 +25,7 @@ Configured to allow requests from React dev servers (ports 3000, 5173, 5174).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import io
 import tempfile
@@ -89,6 +90,7 @@ from edgar_xbrl import resolve_company_identity
 from gemini_chat import (
     build_context,
     ask_gemini,
+    ask_persona,
     gemini_api_key,
     gemini_generate,
 )
@@ -103,6 +105,12 @@ from agents import (
     CompanyNewsAgent,
     MacroMarketAgent,
     YouTubeAgent,
+    ManagerAgent,
+    DebateTranscript,
+    run_sequential_debate,
+    render_transcript,
+    display_name,
+    FIELD_AGENT_IDS,
 )
 
 
@@ -188,6 +196,17 @@ _page_map_store: dict[str, list[tuple[int, int, int]]] = {}
 # Keys: "company_news", "company_videos", "macro_news", "macro_videos",
 #       "sentiment"; plus "transcripts" (video_id → {title, text/summary}).
 _media_cache: dict = {"transcripts": {}}
+
+# Holds the most recent /analyze run so the role-based chat can talk to a single
+# agent in isolation. Cleared/overwritten on each /analyze. Structure:
+#   {
+#     "reports":        {agent_id: report_dict},        # Phase-1 initial reports
+#     "agent_contexts": {agent_id: {"raw_data": str, "report": dict}},
+#     "transcript":     DebateTranscript | None,        # Phase-2 relay debate
+#     "manager":        ManagerReport | dict | None,    # Phase-3 synthesis
+#     "period": str, "company": str | None,
+#   }
+_debate_store: dict = {}
 
 
 def _derive_period_key(
@@ -1239,6 +1258,122 @@ async def get_filing_pdf(
 
 
 # =============================================================================
+# Role-based chat — isolated per-agent personas (data isolation / token saver)
+# =============================================================================
+
+# Cap on a single agent's raw data injected into an isolated chat. Bounds a long
+# earnings transcript (~80K chars) while leaving room for the debate + question.
+_CHAT_RAW_CAP = 60_000
+
+_FIELD_CHAT_TEMPLATE = """\
+You are the {name}, one of six specialist analysts on a financial research team.
+You have completed your own analysis and taken part in a round-table debate with
+the other analysts. A user now wants to talk to YOU specifically.
+
+Ground rules:
+- Answer ONLY from YOUR OWN data and findings below, plus the shared debate
+  transcript. You do NOT have the other analysts' raw data. If the user asks
+  about something outside your domain, say it is outside your remit and point
+  them to the relevant analyst or the Manager.
+- Cite specifics from your data (numbers, quotes, dates). Never invent figures or
+  use outside knowledge about the company's actuals.
+- You may reference what other analysts argued in the debate transcript, but you
+  can only speak authoritatively about your own evidence.
+- Be concise and use Markdown.
+
+=== YOUR INITIAL FINDINGS (your Phase-1 JSON report) ===
+{report}
+=== END FINDINGS ===
+
+=== YOUR RAW DATA ===
+{raw_data}
+=== END RAW DATA ===
+
+=== ROUND-TABLE DEBATE TRANSCRIPT (all analysts) ===
+{transcript}
+=== END TRANSCRIPT ==="""
+
+_MANAGER_CHAT_TEMPLATE = """\
+You are the Lead Analyst (Manager) of a financial research team. Six specialist
+analysts each produced a report and then debated each other. A user wants to
+discuss the overall investment picture with you.
+
+Ground rules:
+- You see every analyst's INITIAL REPORT (JSON) and the full debate transcript —
+  but NOT their raw source data (no filings text, earnings transcripts, or
+  headlines). Reason from the reports and the debate only; never introduce facts
+  or numbers that are not present in them.
+- Weigh evidence quality across domains, resolve disagreements, and give a clear
+  synthesized view. Attribute claims to the analyst/domain they came from.
+- Be concise and use Markdown.
+
+=== ALL INITIAL AGENT REPORTS (JSON) ===
+{reports}
+=== END REPORTS ===
+
+=== ROUND-TABLE DEBATE TRANSCRIPT ===
+{transcript}
+=== END TRANSCRIPT ==="""
+
+
+def _agent_chat_persona(agent_id: str) -> str:
+    """
+    Build the ISOLATED system prompt for a single-agent chat from the last
+    /analyze run. Enforces the data-isolation rules: a field agent sees only its
+    own raw data + report + the debate transcript; the Manager sees all reports +
+    the transcript but no raw data.
+
+    Raises HTTPException with a helpful message when the persona can't be served
+    (no analysis yet, agent didn't report, or unknown id).
+    """
+    if not _debate_store:
+        raise HTTPException(
+            status_code=409,
+            detail="No analysis has been run yet. Run POST /analyze first, then "
+                   "you can chat with an individual agent.",
+        )
+
+    transcript = _debate_store.get("transcript")
+    rendered = render_transcript(transcript)
+
+    if agent_id == "manager":
+        reports = _debate_store.get("reports") or {}
+        if not reports:
+            raise HTTPException(
+                status_code=409,
+                detail="The last analysis produced no agent reports to synthesize.",
+            )
+        return _MANAGER_CHAT_TEMPLATE.format(
+            reports=json.dumps(reports, ensure_ascii=False, indent=2),
+            transcript=rendered,
+        )
+
+    if agent_id in FIELD_AGENT_IDS:
+        ctx = (_debate_store.get("agent_contexts") or {}).get(agent_id)
+        if not ctx:
+            raise HTTPException(
+                status_code=409,
+                detail=f"The '{agent_id}' agent did not produce a report in the "
+                       f"last analysis (it may have been skipped or failed), so "
+                       f"there is nothing to discuss with it.",
+            )
+        raw = (ctx.get("raw_data") or "")[:_CHAT_RAW_CAP] or "(no raw data captured)"
+        return _FIELD_CHAT_TEMPLATE.format(
+            name=display_name(agent_id),
+            report=json.dumps(ctx.get("report") or {}, ensure_ascii=False, indent=2),
+            raw_data=raw,
+            transcript=rendered,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unknown agent_id '{agent_id}'. Use one of "
+               f"{sorted(FIELD_AGENT_IDS)}, 'manager', or omit it for the "
+               f"general assistant.",
+    )
+
+
+# =============================================================================
 # ENDPOINT: POST /chat
 # =============================================================================
 
@@ -1264,6 +1399,21 @@ async def chat(request: ChatRequest):
                    "set on the backend. Set it in the server environment and "
                    "restart to enable chat.",
         )
+
+    # ── Role-based chat: talk to ONE agent (or the Manager) in isolation ──
+    # When an agent_id is supplied, we scope the system prompt to just that
+    # agent's data + the debate transcript (data isolation → far fewer tokens
+    # than the omniscient assistant). Omit it (or 'general') for the cross-view
+    # assistant below.
+    agent_id = (request.agent_id or "").strip().lower()
+    if agent_id and agent_id != "general":
+        system_prompt = _agent_chat_persona(agent_id)  # raises if unavailable
+        history = [{"role": m.role, "content": m.content} for m in request.history]
+        try:
+            answer = await ask_persona(question, history, system_prompt)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return ChatResponse(answer=answer)
 
     # Assemble the grounding context from the current in-memory data, including
     # any media/macro data the user has fetched (so the AI sees all views).
@@ -1341,12 +1491,20 @@ def _analysis_window(request: AnalyzeRequest | None = None) -> tuple[str, str]:
 @app.post("/analyze")
 async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
     """
-    Run the full MAS analysis pipeline over the uploaded filings.
+    Run the full three-phase MAS pipeline over the uploaded filings.
 
-    All six agents run CONCURRENTLY via a single `asyncio.gather(...,
-    return_exceptions=True)`, so wall-clock time is ~the slowest agent rather
-    than the sum of all six. Each agent is isolated: a failure lands in that
-    agent's slot as an `error` and never prevents the others from returning.
+    Phase 1 — Independent analysis: all six field agents run concurrently (capped
+      at two Gemini calls at a time to avoid 429s). Each is isolated — a failure
+      lands in that agent's slot as an `error` and never blocks the others.
+    Phase 2 — True sequential debate: the agents that produced a report speak one
+      after another, each citing its own raw data to refute or reinforce prior
+      turns, building a shared debate transcript.
+    Phase 3 — Manager synthesis: the Manager reads the initial reports + the
+      debate transcript (never any raw data) and issues one final recommendation.
+
+    The debate transcript and each agent's raw data are stored in memory so the
+    role-based chat (`POST /chat` with `agent_id`) can talk to a single agent in
+    isolation afterwards.
 
     The request's `start_date`/`end_date` drive every data source — price
     history, which quarters' transcripts are fetched, the news search windows,
@@ -1376,18 +1534,32 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
         "end_date": end_date,
     }
 
+    # Each runnable agent gets a fresh `capture` dict; the agent writes its
+    # assembled RAW-DATA prompt there, so Phase 2 (debate) and the isolated
+    # per-agent chat can reuse the primary evidence without re-fetching it.
+    captures: dict[str, dict] = {}
+
+    def _cap(agent_id: str) -> dict:
+        c: dict = {}
+        captures[agent_id] = c
+        return c
+
     # (agent_id, coroutine | skip-reason). A skip reason means the agent's
     # prerequisites are missing, so we report it without spending an LLM call.
     planned: list[tuple[str, object]] = [
-        ("sec_filings", SECFilingsAgent().analyze({
-            "merged_tables": _merged_tables,
-            "text_store": _text_store,
-            "filing_meta": _filing_meta,
-        })),
+        ("sec_filings", SECFilingsAgent().analyze(
+            {
+                "merged_tables": _merged_tables,
+                "text_store": _text_store,
+                "filing_meta": _filing_meta,
+            },
+            capture=_cap("sec_filings"),
+        )),
         ("technical_analysis",
-         TechnicalAnalysisAgent().analyze({
-             "ticker": ticker, "start_date": start_date, "end_date": end_date,
-         })
+         TechnicalAnalysisAgent().analyze(
+             {"ticker": ticker, "start_date": start_date, "end_date": end_date},
+             capture=_cap("technical_analysis"),
+         )
          if ticker else
          "No ticker could be resolved from the uploaded filings; "
          "technical analysis was skipped."),
@@ -1404,37 +1576,102 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
         ("macro_market", MacroMarketAgent),
         ("youtube_analysis", YouTubeAgent),
     ):
-        planned.append(
-            (agent_id, agent_cls().analyze(dict(company_ctx)) if identified else no_company)
-        )
+        planned.append((
+            agent_id,
+            agent_cls().analyze(dict(company_ctx), capture=_cap(agent_id))
+            if identified else no_company,
+        ))
 
-    # Run everything still runnable in one parallel batch.
+    # ── Phase 1: independent analysis, concurrent but RATE-LIMITED ──────────
+    # A Semaphore(2) caps how many agents hit Gemini at once. Firing all six
+    # simultaneously reliably trips the per-minute quota (429) on Flash before
+    # the sequential debate even begins; two at a time stays under it while still
+    # overlapping the slow, network-bound data fetching. Any 429s that still slip
+    # through are retried with backoff in llm_utils.
+    sem = asyncio.Semaphore(2)
+
+    async def _bounded(coro):
+        async with sem:
+            return await coro
+
     runnable = [(aid, coro) for aid, coro in planned if not isinstance(coro, str)]
     outcomes = await asyncio.gather(
-        *(coro for _, coro in runnable), return_exceptions=True
+        *(_bounded(coro) for _, coro in runnable), return_exceptions=True
     )
     by_id = dict(zip((aid for aid, _ in runnable), outcomes))
 
-    reports: dict[str, dict] = {}
+    reports: dict[str, dict] = {}          # successful reports only (feed 2 & 3)
+    slots: dict[str, dict] = {}            # every agent's slot (incl. errors)
+    agent_contexts: dict[str, dict] = {}   # raw_data + report, for debate & chat
     completed = 0
     for agent_id, coro in planned:
         if isinstance(coro, str):          # skipped before launch
-            reports[agent_id] = {"error": coro}
+            slots[agent_id] = {"error": coro}
             continue
         result = by_id[agent_id]
         if isinstance(result, BaseException):
             logger.error(f"{agent_id} agent failed: {result}")
-            reports[agent_id] = {"error": str(result)}
+            slots[agent_id] = {"error": str(result)}
         else:
-            reports[agent_id] = result.model_dump()
+            report_dict = result.model_dump()
+            reports[agent_id] = report_dict
+            slots[agent_id] = report_dict
+            agent_contexts[agent_id] = {
+                "raw_data": captures.get(agent_id, {}).get("raw_data", ""),
+                "report": report_dict,
+            }
             completed += 1
+
+    # ── Phase 2: TRUE sequential debate over the agents that reported ───────
+    # Runs one agent at a time so each speaker reacts to the growing transcript.
+    # Best-effort: a debate failure must not sink the whole analysis.
+    transcript: DebateTranscript | None = None
+    if len(agent_contexts) >= 2:
+        try:
+            transcript = await run_sequential_debate(agent_contexts)
+        except Exception as e:             # noqa: BLE001
+            logger.error(f"Sequential debate failed: {e}")
+            transcript = None
+
+    # ── Phase 3: manager synthesis (reports + transcript, NEVER raw data) ───
+    manager_result: object = None
+    if reports:
+        try:
+            manager_result = await ManagerAgent().analyze({
+                "reports": reports,
+                "transcript": transcript,
+                "period": f"{start_date}..{end_date}",
+                "company": company_name or ticker,
+            })
+        except Exception as e:             # noqa: BLE001
+            logger.error(f"Manager synthesis failed: {e}")
+            manager_result = {"error": str(e)}
+
+    # Persist for the role-based chat (overwrites any previous run).
+    _debate_store.clear()
+    _debate_store.update({
+        "reports": reports,
+        "agent_contexts": agent_contexts,
+        "transcript": transcript,
+        "manager": manager_result,
+        "period": f"{start_date}..{end_date}",
+        "company": company_name or ticker,
+    })
+
+    manager_payload = (
+        manager_result.model_dump()
+        if hasattr(manager_result, "model_dump")
+        else manager_result
+    )
 
     return {
         "analysis_period": f"{start_date}..{end_date}",
         "company": primary.model_dump() if primary else None,
         "agents_total": len(planned),
         "agents_completed": completed,
-        "reports": reports,
+        "reports": slots,
+        "debate": transcript.model_dump() if transcript else None,
+        "manager": manager_payload,
     }
 
 

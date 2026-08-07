@@ -131,11 +131,12 @@ class CompanyNewsAgent(BaseAgent):
     def agent_id(self) -> str:
         return "company_news"
 
-    async def analyze(self, context: dict) -> CompanyNewsReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> CompanyNewsReport:
         """
         Args:
             context: {"company": str, "ticker": str | None,
                       "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+            capture: optional side-channel for the assembled raw-data prompt.
         """
         company = (context.get("company") or "").strip()
         ticker = (context.get("ticker") or "").strip() or None
@@ -204,6 +205,8 @@ class CompanyNewsAgent(BaseAgent):
             count=total,
             articles="\n".join(lines),
         )
+        if capture is not None:
+            capture["raw_data"] = user_prompt
 
         # A per-article impact breakdown across many months is a long report,
         # and Gemini's thinking tokens draw from the same budget — too small a

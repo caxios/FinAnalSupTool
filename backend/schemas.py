@@ -162,6 +162,16 @@ class ChatRequest(BaseModel):
         default_factory=list,
         description="Prior conversation turns (oldest first), excluding the current question",
     )
+    agent_id: str | None = Field(
+        None,
+        description=(
+            "Optional persona to chat with in isolation: a field agent id "
+            "(sec_filings, earnings_call, company_news, youtube_analysis, "
+            "macro_market, technical_analysis), 'manager', or omit/'general' for "
+            "the cross-view assistant. Field agents see ONLY their own data + the "
+            "debate transcript; the manager sees all reports + the transcript."
+        ),
+    )
 
 
 class ChatResponse(BaseModel):

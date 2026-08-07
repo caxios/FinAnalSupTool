@@ -16,6 +16,16 @@ from .earnings_call_agent import EarningsCallAgent, date_range_to_quarters
 from .company_news_agent import CompanyNewsAgent
 from .macro_market_agent import MacroMarketAgent
 from .youtube_agent import YouTubeAgent
+from .manager_agent import ManagerAgent
+from .debate import (
+    AgentArgument,
+    DebateTranscript,
+    run_sequential_debate,
+    render_transcript,
+    display_name,
+    DEBATE_ORDER,
+    FIELD_AGENT_IDS,
+)
 
 __all__ = [
     "AgentReport",
@@ -26,5 +36,13 @@ __all__ = [
     "CompanyNewsAgent",
     "MacroMarketAgent",
     "YouTubeAgent",
+    "ManagerAgent",
     "date_range_to_quarters",
+    "AgentArgument",
+    "DebateTranscript",
+    "run_sequential_debate",
+    "render_transcript",
+    "display_name",
+    "DEBATE_ORDER",
+    "FIELD_AGENT_IDS",
 ]

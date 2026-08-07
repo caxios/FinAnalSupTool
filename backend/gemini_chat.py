@@ -434,6 +434,26 @@ async def ask_gemini(
     )
 
 
+async def ask_persona(
+    question: str,
+    history: list[dict],
+    system_prompt: str,
+) -> str:
+    """
+    Role-scoped chat: like `ask_gemini`, but the caller supplies the ENTIRE system
+    prompt (persona + its isolated data context) instead of the generic filings
+    template. Used by the per-agent ("talk to one analyst") chat, where each
+    agent must be grounded ONLY in its own data + the debate transcript.
+
+    The same history sliding window applies, so a long conversation with one
+    agent doesn't inflate per-turn cost.
+    """
+    return await _gemini_call(
+        system_prompt,
+        _to_gemini_contents(history, question),
+    )
+
+
 async def gemini_generate(
     system: str,
     user: str,

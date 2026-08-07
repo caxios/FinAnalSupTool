@@ -42,13 +42,17 @@ class BaseAgent(ABC):
         """Unique identifier, e.g. 'sec_filings', 'technical_analysis'."""
 
     @abstractmethod
-    async def analyze(self, context: dict) -> AgentReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> AgentReport:
         """
         Run the agent's analysis.
 
         Args:
             context: A dict containing the agent-specific input data. The exact
                      keys depend on the agent type.
+            capture: Optional side-channel. When provided, the agent writes its
+                     assembled RAW-DATA prompt to ``capture["raw_data"]`` so the
+                     caller can reuse it (for the debate and the isolated,
+                     per-agent chat) without paying to re-fetch/re-assemble it.
 
         Returns:
             A Pydantic model extending AgentReport with structured findings.

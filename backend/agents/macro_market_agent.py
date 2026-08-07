@@ -150,11 +150,12 @@ class MacroMarketAgent(BaseAgent):
     def agent_id(self) -> str:
         return "macro_market"
 
-    async def analyze(self, context: dict) -> MacroMarketReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> MacroMarketReport:
         """
         Args:
             context: {"company": str, "ticker": str | None,
                       "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+            capture: optional side-channel for the assembled raw-data prompt.
         """
         company = (context.get("company") or "").strip()
         ticker = (context.get("ticker") or "").strip() or None
@@ -223,6 +224,8 @@ class MacroMarketAgent(BaseAgent):
             snapshot=snapshot,
             articles="\n".join(lines),
         )
+        if capture is not None:
+            capture["raw_data"] = user_prompt
 
         # Gemini's thinking tokens draw from the same budget as the answer, so
         # keep headroom above the report's own size.

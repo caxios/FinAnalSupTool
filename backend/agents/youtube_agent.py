@@ -207,11 +207,12 @@ class YouTubeAgent(BaseAgent):
     def agent_id(self) -> str:
         return "youtube_analysis"
 
-    async def analyze(self, context: dict) -> YouTubeAnalysisReport:
+    async def analyze(self, context: dict, capture: dict | None = None) -> YouTubeAnalysisReport:
         """
         Args:
             context: {"company": str, "ticker": str | None,
                       "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+            capture: optional side-channel for the assembled raw-data prompt.
         """
         company = (context.get("company") or "").strip()
         ticker = (context.get("ticker") or "").strip() or None
@@ -263,6 +264,8 @@ class YouTubeAgent(BaseAgent):
             skipped=f" ({skipped} skipped — no captions)" if skipped else "",
             videos="\n\n".join(blocks),
         )
+        if capture is not None:
+            capture["raw_data"] = user_prompt
 
         # Argument-by-argument deconstruction of several videos runs long, and
         # Gemini's thinking tokens draw from the same budget — too small a
