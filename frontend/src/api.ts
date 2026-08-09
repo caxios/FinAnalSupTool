@@ -154,15 +154,21 @@ export function getFilingPdfUrl(period: string, section: string): string {
  * @param question - The user's current question
  * @param history  - Prior conversation turns (oldest first), excluding the
  *                    current question. Gives the assistant follow-up context.
+ * @param agentId  - Optional persona to chat with in isolation: a field agent id
+ *                    (sec_filings, earnings_call, …), "manager", or omit for the
+ *                    general cross-view assistant. Field agents see only their own
+ *                    data + the debate transcript; the manager sees all reports +
+ *                    the transcript.
  */
 export async function askChat(
   question: string,
-  history: ChatMessage[]
+  history: ChatMessage[],
+  agentId?: string
 ): Promise<ChatResponse> {
   return fetchJson<ChatResponse>(`${API_BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, history }),
+    body: JSON.stringify({ question, history, agent_id: agentId }),
   });
 }
 

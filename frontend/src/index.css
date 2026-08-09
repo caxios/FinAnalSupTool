@@ -849,12 +849,38 @@ body {
 
 .chat-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 10px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
+
+.chat-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Persona selector — matches the dark, glassy panel aesthetic. */
+.chat-agent-select {
+  width: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color-scheme: dark;
+  transition: border-color var(--transition-fast);
+}
+.chat-agent-select:hover:not(:disabled) { border-color: var(--border-active); }
+.chat-agent-select:focus {
+  outline: none;
+  border-color: var(--border-active);
+}
+.chat-agent-select:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .chat-title {
   display: flex;

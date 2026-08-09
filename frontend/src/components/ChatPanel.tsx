@@ -14,6 +14,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { ChatMessage } from "../types";
 import { askChat } from "../api";
+import { AGENT_ORDER, AGENT_NAMES } from "./agentMeta";
 
 interface ChatPanelProps {
   /** Whether the panel is expanded. */
@@ -98,8 +99,21 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Which persona the user is chatting with. "general" = the omniscient
+  // cross-view assistant; otherwise a single agent scoped to its own data +
+  // the debate transcript (requires an /analyze run to have populated them).
+  const [selectedAgent, setSelectedAgent] = useState<string>("general");
 
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Switching persona starts a fresh conversation — different agents have
+  // isolated contexts, so their histories must not bleed into each other.
+  function handleAgentChange(agent: string) {
+    if (agent === selectedAgent) return;
+    setSelectedAgent(agent);
+    setMessages([]);
+    setError(null);
+  }
 
   // Auto-scroll to the newest message.
   useEffect(() => {
@@ -122,7 +136,11 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     setLoading(true);
 
     try {
-      const res = await askChat(q, history);
+      const res = await askChat(
+        q,
+        history,
+        selectedAgent === "general" ? undefined : selectedAgent
+      );
       setMessages([...nextMessages, { role: "assistant", content: res.answer }]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -143,27 +161,66 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
 
   if (!isOpen) return null;
 
+  // Persona-aware empty state, so it's obvious an agent chat is scoped to that
+  // agent's data + the debate (and needs an analysis run to have populated them).
+  const isGeneral = selectedAgent === "general";
+  const personaName =
+    selectedAgent === "manager" ? "Manager" : AGENT_NAMES[selectedAgent] ?? "agent";
+  const emptyLead = isGeneral
+    ? "Ask about the financials, ratios, or filing text of your uploaded filings."
+    : selectedAgent === "manager"
+    ? "Chat with the Manager about the synthesized verdict and how the debate resolved. Run a Deep Analysis first."
+    : `Chat with the ${personaName} agent — scoped to its own data and the debate transcript. Run a Deep Analysis first.`;
+  const suggestions = isGeneral
+    ? SUGGESTIONS
+    : selectedAgent === "manager"
+    ? [
+        "What was the final recommendation, and why?",
+        "What did the agents disagree on, and which side won?",
+        "What are the biggest risks to the thesis?",
+      ]
+    : [
+        "Summarize your key findings.",
+        "What specific evidence did you cite in the debate?",
+        "What are you most and least confident about?",
+      ];
+
   return (
     <aside className="chat-panel">
       <div className="chat-header">
-        <div className="chat-title">
-          <span className="chat-title-dot" />
-          AI Assistant
+        <div className="chat-header-top">
+          <div className="chat-title">
+            <span className="chat-title-dot" />
+            AI Assistant
+          </div>
+          <button className="chat-close" onClick={onClose} title="Close assistant">
+            ✕
+          </button>
         </div>
-        <button className="chat-close" onClick={onClose} title="Close assistant">
-          ✕
-        </button>
+        <select
+          className="chat-agent-select"
+          value={selectedAgent}
+          onChange={(e) => handleAgentChange(e.target.value)}
+          disabled={loading}
+          title="Choose who to chat with"
+          aria-label="Chat persona"
+        >
+          <option value="general">General Assistant (All Data)</option>
+          <option value="manager">Manager Agent</option>
+          {AGENT_ORDER.map((id) => (
+            <option key={id} value={id}>
+              {AGENT_NAMES[id]} Agent
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="chat-messages" ref={scrollRef}>
         {messages.length === 0 && (
           <div className="chat-empty">
-            <p className="chat-empty-lead">
-              Ask about the financials, ratios, or filing text of your uploaded
-              filings.
-            </p>
+            <p className="chat-empty-lead">{emptyLead}</p>
             <div className="chat-suggestions">
-              {SUGGESTIONS.map((s) => (
+              {suggestions.map((s) => (
                 <button
                   key={s}
                   className="chat-suggestion"
