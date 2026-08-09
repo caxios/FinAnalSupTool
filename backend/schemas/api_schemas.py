@@ -1,18 +1,23 @@
 """
-schemas.py
-──────────
-Pydantic models that define the API request/response contract.
-
-These models serve two purposes:
-  1. Automatic request validation (FastAPI uses them to validate incoming data)
-  2. Response serialization (FastAPI uses them to serialize outgoing JSON)
-
-Each model corresponds to one endpoint's response shape.
+schemas.api_schemas
+────────────────────
+Pydantic models that define the API request/response contract — the envelopes
+FastAPI uses for request validation and response serialization. Each model
+corresponds to one endpoint's input or output shape and composes the reusable
+entities from ``domain_schemas``.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+
+from .domain_schemas import (
+    CompanyInfo,
+    NewsArticleModel,
+    VideoModel,
+    ChannelModel,
+    SentimentIndicatorModel,
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -22,7 +27,7 @@ from pydantic import BaseModel, Field
 class FilingMeta(BaseModel):
     """
     Metadata for a single processed filing.
-    
+
     One of these is returned per uploaded PDF file, telling the
     frontend whether the file was processed successfully and what
     was detected inside it.
@@ -62,7 +67,7 @@ class FilingMeta(BaseModel):
 class UploadResponse(BaseModel):
     """
     Response from POST /upload.
-    
+
     Contains the total count and per-file results so the frontend
     can display a summary of what was successfully parsed.
     """
@@ -84,11 +89,11 @@ class FinancialTableResponse(BaseModel):
 
     The table merges the same statement type (e.g., Balance Sheet)
     across multiple filing periods using a pandas outer join.
-    
+
     Structure:
       columns = ["Line Item", "2023-10K", "2022-10K", ...]
       rows    = [{"Line Item": "Total Assets", "2023-10K": "100", "2022-10K": "95"}, ...]
-    
+
     Values for periods that didn't contain a line item are null
     (outer-join semantics — unmatched items appear as gaps).
     """
@@ -113,7 +118,7 @@ class FinancialTableResponse(BaseModel):
 class FilingTextResponse(BaseModel):
     """
     Extracted text section returned by GET /filing-text.
-    
+
     Contains the raw text of one section (e.g., MD&A) from one
     specific filing period. The frontend renders this in the
     Lower Pane's text viewer.
@@ -184,14 +189,6 @@ class ChatResponse(BaseModel):
 # Company Endpoint Models (GET /company)
 # ─────────────────────────────────────────────────────────────
 
-class CompanyInfo(BaseModel):
-    """A company derived from the uploaded filings."""
-    cik: int | None = None
-    name: str | None = None
-    ticker: str | None = None
-    filing_count: int = 0
-
-
 class CompanyResponse(BaseModel):
     """Response from GET /company — companies behind the uploaded filings."""
     primary: CompanyInfo | None = Field(
@@ -204,14 +201,6 @@ class CompanyResponse(BaseModel):
 # Media Endpoint Models (GET /media/*, GET /macro/*)
 # ─────────────────────────────────────────────────────────────
 
-class NewsArticleModel(BaseModel):
-    title: str
-    url: str
-    source: str
-    snippet: str = ""
-    published: str | None = None
-
-
 class NewsResponse(BaseModel):
     """News feed (company or macro). `configured=False` → show a connect-key card."""
     configured: bool
@@ -219,17 +208,6 @@ class NewsResponse(BaseModel):
     company: CompanyInfo | None = None
     articles: list[NewsArticleModel] = Field(default_factory=list)
     message: str | None = None
-
-
-class VideoModel(BaseModel):
-    video_id: str
-    title: str
-    channel: str
-    url: str
-    embed_url: str
-    thumbnail: str | None = None
-    published: str | None = None
-    description: str = ""
 
 
 class VideoResponse(BaseModel):
@@ -272,12 +250,6 @@ class EarningsResponse(BaseModel):
 
 # ── YouTube channel management (GET/POST/DELETE /channels) ──
 
-class ChannelModel(BaseModel):
-    channel_id: str
-    title: str
-    handle: str | None = None
-
-
 class ChannelsResponse(BaseModel):
     configured: bool = True
     channels: list[ChannelModel] = Field(default_factory=list)
@@ -287,12 +259,6 @@ class ChannelsResponse(BaseModel):
 class AddChannelRequest(BaseModel):
     """Add a channel by URL, @handle, UC… id, or name."""
     input: str = Field(description="Channel URL, @handle, UC id, or name")
-
-
-class SentimentIndicatorModel(BaseModel):
-    theme: str
-    direction: str  # bullish | neutral | bearish
-    note: str
 
 
 class SentimentResponse(BaseModel):
@@ -337,7 +303,7 @@ class AnalyzeRequest(BaseModel):
 class ErrorDetail(BaseModel):
     """
     Standard error response body.
-    
+
     FastAPI's HTTPException already returns {"detail": "..."} by default,
     but this model documents the shape explicitly for OpenAPI docs.
     """
