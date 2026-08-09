@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 
-import price_provider
+from providers import price_provider
 
 from .base_agent import BaseAgent
 from .schemas.technical_analysis import TechnicalAnalysisReport

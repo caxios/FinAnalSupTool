@@ -22,7 +22,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from news_provider import search_macro_news, tavily_api_key
+from providers.news_provider import search_macro_news, tavily_api_key
 from gemini_chat import gemini_generate, gemini_api_key
 
 logger = logging.getLogger(__name__)

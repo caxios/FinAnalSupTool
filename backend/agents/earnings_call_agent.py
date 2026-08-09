@@ -20,7 +20,7 @@ import asyncio
 import logging
 from datetime import date
 
-import news_provider
+from providers import news_provider
 import rag
 
 from .base_agent import BaseAgent

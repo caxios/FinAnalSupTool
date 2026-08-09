@@ -31,7 +31,7 @@ import logging
 import httpx
 import pandas as pd
 
-from pdf_utils import SECTION_LABELS
+from parsers.pdf_utils import SECTION_LABELS
 
 logger = logging.getLogger(__name__)
 

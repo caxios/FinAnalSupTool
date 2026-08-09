@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import news_provider
+from providers import news_provider
 from market_sentiment import compute_market_sentiment
 
 from .base_agent import BaseAgent

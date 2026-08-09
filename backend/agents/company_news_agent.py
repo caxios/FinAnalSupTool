@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import news_provider
+from providers import news_provider
 
 from .base_agent import BaseAgent
 from .date_windows import month_windows

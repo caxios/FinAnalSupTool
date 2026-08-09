@@ -19,7 +19,7 @@ import asyncio
 import logging
 
 import channel_store
-import youtube_provider
+from providers import youtube_provider
 
 from .base_agent import BaseAgent
 from .schemas.youtube_analysis import YouTubeAnalysisReport
