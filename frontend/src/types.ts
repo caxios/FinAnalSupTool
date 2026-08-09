@@ -197,3 +197,130 @@ export interface NewsRange {
   start?: string;
   end?: string;
 }
+
+// =============================================================================
+// Deep Analysis (POST /analyze, /analyze/stream, GET /analysis/*)
+// =============================================================================
+
+/** Programmatic 3-axis gap scores. Any axis with no supporting agent is null. */
+export interface ThreeAxisScores {
+  fundamental_score: number | null;
+  sentiment_score: number | null;
+  technical_score: number | null;
+  fundamental_sentiment_gap: number | null;
+  fundamental_technical_gap: number | null;
+  overall_signal: string;
+  signal_label: string;
+  signal_tone: "positive" | "negative" | "neutral" | string;
+  components: Record<string, number | null>;
+}
+
+/** One agent's contribution to the sequential debate. */
+export interface DebateArgument {
+  agent_id: string;
+  stance: "bullish" | "bearish" | "neutral" | string;
+  argument: string;
+  cited_evidence: string[];
+}
+
+export interface DebateTranscript {
+  rounds: number;
+  history: DebateArgument[];
+  consensus_reached: boolean;
+}
+
+export interface DebateResolution {
+  topic: string;
+  positions_summary: string;
+  winning_side: string;
+  resolution: string;
+}
+
+/** The Manager's synthesized final report. */
+export interface ManagerReport {
+  agent: string;
+  confidence: number;
+  reasoning: string;
+  recommendation: "bullish" | "neutral" | "bearish" | string;
+  conviction: "high" | "medium" | "low" | string;
+  overall_score: number;
+  executive_summary: string;
+  bull_case: string[];
+  bear_case: string[];
+  key_debates: DebateResolution[];
+  consensus_points: string[];
+  key_risks: string[];
+  recommended_actions: string[];
+  agents_considered: string[];
+}
+
+/** An agent slot in the report: either a report object or an `{error}`. */
+export type AgentSlot = Record<string, unknown> & { error?: string };
+
+/** Full result from POST /analyze (and the `complete` stream event). */
+export interface AnalyzeResult {
+  run_id: string;
+  analysis_period: string;
+  company: CompanyInfo | null;
+  agents_total: number;
+  agents_completed: number;
+  three_axis_scores: ThreeAxisScores;
+  reports: Record<string, AgentSlot>;
+  debate: DebateTranscript | null;
+  manager: (ManagerReport & { error?: string }) | { error: string } | null;
+}
+
+/** A progress event streamed from POST /analyze/stream. */
+export interface AnalyzeProgressEvent {
+  phase: number;
+  status:
+    | "running"
+    | "agent_done"
+    | "debating"
+    | "synthesizing"
+    | "complete"
+    | "error";
+  agents_total?: number;
+  agents_completed?: number;
+  agent?: string;
+  ok?: boolean;
+  skipped?: boolean;
+  participants?: string[];
+  result?: AnalyzeResult;
+  detail?: string;
+}
+
+/** Lightweight past-run summary for the history sidebar. */
+export interface AnalysisHistoryItem {
+  run_id: string;
+  company: string | null;
+  ticker: string | null;
+  analysis_period: string;
+  timestamp: string;
+  fundamental_score: number | null;
+  sentiment_score: number | null;
+  technical_score: number | null;
+  fundamental_sentiment_gap: number | null;
+  overall_signal: string | null;
+  signal_label: string | null;
+  recommendation: string | null;
+  overall_score: number | null;
+}
+
+export interface AnalysisHistoryResponse {
+  ticker: string;
+  history: AnalysisHistoryItem[];
+}
+
+/** Full stored record from GET /analysis/{run_id}. */
+export interface AnalysisRecord {
+  run_id: string;
+  company: string | null;
+  ticker: string | null;
+  analysis_period: string;
+  timestamp: string;
+  three_axis_scores: ThreeAxisScores;
+  manager: ManagerReport | { error: string } | null;
+  reports: Record<string, AgentSlot>;
+  debate: DebateTranscript | null;
+}

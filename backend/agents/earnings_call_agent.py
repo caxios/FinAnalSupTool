@@ -21,6 +21,7 @@ import logging
 from datetime import date
 
 import news_provider
+import rag
 
 from .base_agent import BaseAgent
 from .schemas.earnings_call import EarningsCallReport
@@ -213,7 +214,8 @@ class EarningsCallAgent(BaseAgent):
             return_exceptions=True,
         )
 
-        blocks: list[str] = []
+        # Chronological (oldest → newest) tuples of the transcripts we secured.
+        fetched: list[tuple[str, str, str]] = []   # (quarter_label, source, full_text)
         found: list[str] = []
         missing: list[str] = []
         for (year, q), doc in zip(quarters, docs):
@@ -230,29 +232,55 @@ class EarningsCallAgent(BaseAgent):
             if not doc.found or not doc.text:
                 missing.append(qlabel)
                 continue
-
             found.append(qlabel)
-            text = doc.text[:_MAX_TRANSCRIPT_CHARS]
-            truncated = " [TRANSCRIPT TRUNCATED]" if len(doc.text) > _MAX_TRANSCRIPT_CHARS else ""
-            blocks.append(
-                f"=== TRANSCRIPT: {qlabel} (source: {doc.source or 'unknown'}) ===\n"
-                f"{text}{truncated}\n"
-                f"=== END TRANSCRIPT: {qlabel} ==="
-            )
+            fetched.append((qlabel, doc.source or "unknown", doc.text))
 
-        if not blocks:
+        if not fetched:
             raise RuntimeError(
                 f"No earnings-call transcripts were found for {label} in "
                 f"{start_date}..{end_date} (quarters tried: "
                 f"{', '.join(f'Q{q} {y}' for y, q in quarters)})."
             )
 
+        # ── Conditional RAG: for LONG periods, retrieve historical excerpts by
+        # topic instead of stuffing every full transcript (which explodes the
+        # prompt). Short periods keep the simpler full-context path. Any RAG
+        # failure falls back to full stuffing, so the agent always produces.
+        total_tokens = rag.estimate_tokens("".join(t for _, _, t in fetched))
+        transcripts_block: str | None = None
+        if len(fetched) >= 3 and rag.should_use_rag(total_tokens):
+            try:
+                transcripts_block = await rag.earnings_rag.prepare_context(
+                    fetched, ticker=ticker,
+                    run_id=str(context.get("run_id") or "adhoc"),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Earnings RAG failed, falling back to full context: {e}")
+                transcripts_block = None
+            if transcripts_block:
+                logger.info(
+                    f"Earnings agent using RAG for {len(fetched)} quarters "
+                    f"(~{total_tokens:,} est. tokens)."
+                )
+
+        if transcripts_block is None:
+            blocks = []
+            for qlabel, source, text in fetched:
+                body = text[:_MAX_TRANSCRIPT_CHARS]
+                truncated = " [TRANSCRIPT TRUNCATED]" if len(text) > _MAX_TRANSCRIPT_CHARS else ""
+                blocks.append(
+                    f"=== TRANSCRIPT: {qlabel} (source: {source}) ===\n"
+                    f"{body}{truncated}\n"
+                    f"=== END TRANSCRIPT: {qlabel} ==="
+                )
+            transcripts_block = "\n\n".join(blocks)
+
         user_prompt = _USER_TEMPLATE.format(
             company=label,
             ticker=f" ({ticker})" if ticker else "",
             found=", ".join(found),
             missing=", ".join(missing) or "(none)",
-            transcripts="\n\n".join(blocks),
+            transcripts=transcripts_block,
         )
         if capture is not None:
             capture["raw_data"] = user_prompt

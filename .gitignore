@@ -12,6 +12,9 @@
 
 # ── Per-user runtime data ──
 backend/channels.json
+# RAG vector store + persisted analysis history (regenerated at runtime)
+backend/chroma_data/
+backend/analysis_history/
 
 # ── Python ──
 __pycache__/

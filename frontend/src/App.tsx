@@ -21,6 +21,7 @@ import ChatPanel from "./components/ChatPanel";
 import FilingDashboard from "./views/FilingDashboard";
 import CompanyMedia from "./views/CompanyMedia";
 import MacroSentiment from "./views/MacroSentiment";
+import DeepAnalysis from "./views/DeepAnalysis";
 
 export default function App() {
   const [periods, setPeriods] = useState<PeriodInfo[]>([]);
@@ -65,6 +66,7 @@ export default function App() {
               <Route path="/" element={<FilingDashboard />} />
               <Route path="/media" element={<CompanyMedia />} />
               <Route path="/macro" element={<MacroSentiment />} />
+              <Route path="/analysis" element={<DeepAnalysis />} />
             </Routes>
           </main>
 

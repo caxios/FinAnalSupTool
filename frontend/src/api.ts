@@ -26,6 +26,10 @@ import type {
   SentimentResponse,
   NewsRange,
   ChannelsResponse,
+  AnalyzeResult,
+  AnalyzeProgressEvent,
+  AnalysisHistoryResponse,
+  AnalysisRecord,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -292,4 +296,127 @@ export async function getMacroVideos(
 /** Market sentiment synthesis (View 3). */
 export async function getMarketSentiment(): Promise<SentimentResponse> {
   return fetchJson<SentimentResponse>(`${API_BASE}/macro/sentiment`);
+}
+
+// =============================================================================
+// Deep Analysis (Multi-Agent System)
+// =============================================================================
+
+interface AnalyzeBody {
+  start_date?: string;
+  end_date?: string;
+}
+
+function analyzeBody(startDate?: string, endDate?: string): AnalyzeBody {
+  const body: AnalyzeBody = {};
+  if (startDate) body.start_date = startDate;
+  if (endDate) body.end_date = endDate;
+  return body;
+}
+
+/**
+ * Run the full MAS pipeline (non-streaming). Returns the final report once the
+ * whole ~60-120s pipeline completes. Prefer `runAnalysisStream` for live
+ * per-agent progress.
+ */
+export async function runAnalysis(
+  startDate?: string,
+  endDate?: string
+): Promise<AnalyzeResult> {
+  return fetchJson<AnalyzeResult>(`${API_BASE}/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(analyzeBody(startDate, endDate)),
+  });
+}
+
+/**
+ * Run the pipeline with live progress via Server-Sent Events.
+ *
+ * The backend streams one `data: {json}` line per event (agents finishing, then
+ * the debate + synthesis phases). `onEvent` fires for each; the promise resolves
+ * with the final `AnalyzeResult` (from the `complete` event) or rejects if the
+ * stream reports an error. Pass an `AbortSignal` to cancel the request.
+ */
+export async function runAnalysisStream(
+  startDate: string | undefined,
+  endDate: string | undefined,
+  onEvent: (event: AnalyzeProgressEvent) => void,
+  signal?: AbortSignal
+): Promise<AnalyzeResult> {
+  const response = await fetch(`${API_BASE}/analyze/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(analyzeBody(startDate, endDate)),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    // Non-200 (e.g. 404 no filings, 503 no key) comes back as normal JSON.
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body.detail) message = body.detail;
+    } catch {
+      message = response.statusText || message;
+    }
+    throw new Error(message);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: AnalyzeResult | null = null;
+
+  // Read the stream, splitting on the SSE record separator (blank line).
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const record = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+
+      const line = record.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      const payload = line.slice(5).trim();
+      if (!payload) continue;
+
+      let event: AnalyzeProgressEvent;
+      try {
+        event = JSON.parse(payload) as AnalyzeProgressEvent;
+      } catch {
+        continue;
+      }
+      onEvent(event);
+      if (event.status === "error") {
+        throw new Error(event.detail || "Analysis failed.");
+      }
+      if (event.status === "complete" && event.result) {
+        result = event.result;
+      }
+    }
+  }
+
+  if (!result) throw new Error("Analysis stream ended without a result.");
+  return result;
+}
+
+/** Past analysis-run summaries for a ticker (newest first). */
+export async function getAnalysisHistory(
+  ticker: string,
+  limit = 10
+): Promise<AnalysisHistoryResponse> {
+  return fetchJson<AnalysisHistoryResponse>(
+    `${API_BASE}/analysis/history?ticker=${encodeURIComponent(ticker)}&limit=${limit}`
+  );
+}
+
+/** Full stored record for one past run. */
+export async function getAnalysisRun(runId: string): Promise<AnalysisRecord> {
+  return fetchJson<AnalysisRecord>(
+    `${API_BASE}/analysis/${encodeURIComponent(runId)}`
+  );
 }

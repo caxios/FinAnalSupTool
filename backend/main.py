@@ -98,6 +98,7 @@ import news_provider
 import youtube_provider
 import channel_store
 from market_sentiment import compute_market_sentiment
+from rag import compute_three_axis_scores, history_store
 from agents import (
     SECFilingsAgent,
     TechnicalAnalysisAgent,
@@ -1488,31 +1489,10 @@ def _analysis_window(request: AnalyzeRequest | None = None) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
-@app.post("/analyze")
-async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
-    """
-    Run the full three-phase MAS pipeline over the uploaded filings.
-
-    Phase 1 — Independent analysis: all six field agents run concurrently (capped
-      at two Gemini calls at a time to avoid 429s). Each is isolated — a failure
-      lands in that agent's slot as an `error` and never blocks the others.
-    Phase 2 — True sequential debate: the agents that produced a report speak one
-      after another, each citing its own raw data to refute or reinforce prior
-      turns, building a shared debate transcript.
-    Phase 3 — Manager synthesis: the Manager reads the initial reports + the
-      debate transcript (never any raw data) and issues one final recommendation.
-
-    The debate transcript and each agent's raw data are stored in memory so the
-    role-based chat (`POST /chat` with `agent_id`) can talk to a single agent in
-    isolation afterwards.
-
-    The request's `start_date`/`end_date` drive every data source — price
-    history, which quarters' transcripts are fetched, the news search windows,
-    and the video publish window.
-    """
+def _analyze_preconditions() -> None:
+    """Guardrails shared by the sync and streaming analyze endpoints."""
     if not _filing_meta:
         raise HTTPException(status_code=404, detail="No filings uploaded yet.")
-
     if not gemini_api_key():
         raise HTTPException(
             status_code=503,
@@ -1520,7 +1500,25 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
                    "the backend. Set it and restart to enable the agents.",
         )
 
+
+async def _analyze_pipeline(request: AnalyzeRequest):
+    """
+    The full three-phase MAS pipeline, as an async GENERATOR of progress events.
+
+    Phase 1 — Independent analysis: the six field agents run concurrently, capped
+      at two Gemini calls at a time (avoids 429s). Each is isolated; a per-agent
+      `agent_done` event fires as each finishes.
+    Phase 2 — True sequential debate over the agents that reported.
+    Phase 3 — Manager synthesis + programmatic 3-axis gap scoring, then the run
+      is persisted to history.
+
+    The last event is `{"status": "complete", "result": <full payload>}`. Both
+    POST /analyze (drains to that result) and POST /analyze/stream (relays every
+    event as SSE) build on this, so the pipeline lives in exactly one place.
+    """
     start_date, end_date = _analysis_window(request)
+    # Unique id for this run — scopes the earnings RAG index so runs don't mix.
+    analysis_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
     primary = _primary_company()
     ticker = primary.ticker if primary else None
@@ -1532,6 +1530,7 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
         "ticker": ticker,
         "start_date": start_date,
         "end_date": end_date,
+        "run_id": analysis_id,
     }
 
     # Each runnable agent gets a fresh `capture` dict; the agent writes its
@@ -1582,58 +1581,69 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
             if identified else no_company,
         ))
 
-    # ── Phase 1: independent analysis, concurrent but RATE-LIMITED ──────────
-    # A Semaphore(2) caps how many agents hit Gemini at once. Firing all six
-    # simultaneously reliably trips the per-minute quota (429) on Flash before
-    # the sequential debate even begins; two at a time stays under it while still
-    # overlapping the slow, network-bound data fetching. Any 429s that still slip
-    # through are retried with backoff in llm_utils.
-    sem = asyncio.Semaphore(2)
-
-    async def _bounded(coro):
-        async with sem:
-            return await coro
-
-    runnable = [(aid, coro) for aid, coro in planned if not isinstance(coro, str)]
-    outcomes = await asyncio.gather(
-        *(_bounded(coro) for _, coro in runnable), return_exceptions=True
-    )
-    by_id = dict(zip((aid for aid, _ in runnable), outcomes))
+    total = len(planned)
+    yield {"phase": 1, "status": "running", "agents_total": total, "agents_completed": 0}
 
     reports: dict[str, dict] = {}          # successful reports only (feed 2 & 3)
     slots: dict[str, dict] = {}            # every agent's slot (incl. errors)
     agent_contexts: dict[str, dict] = {}   # raw_data + report, for debate & chat
-    completed = 0
-    for agent_id, coro in planned:
-        if isinstance(coro, str):          # skipped before launch
-            slots[agent_id] = {"error": coro}
-            continue
-        result = by_id[agent_id]
-        if isinstance(result, BaseException):
-            logger.error(f"{agent_id} agent failed: {result}")
-            slots[agent_id] = {"error": str(result)}
-        else:
-            report_dict = result.model_dump()
-            reports[agent_id] = report_dict
-            slots[agent_id] = report_dict
-            agent_contexts[agent_id] = {
-                "raw_data": captures.get(agent_id, {}).get("raw_data", ""),
-                "report": report_dict,
-            }
-            completed += 1
+    done = 0
 
-    # ── Phase 2: TRUE sequential debate over the agents that reported ───────
-    # Runs one agent at a time so each speaker reacts to the growing transcript.
-    # Best-effort: a debate failure must not sink the whole analysis.
+    # Agents skipped before launch: report immediately so progress stays honest.
+    runnable: list[tuple[str, object]] = []
+    for agent_id, coro in planned:
+        if isinstance(coro, str):
+            slots[agent_id] = {"error": coro}
+            done += 1
+            yield {"phase": 1, "status": "agent_done", "agent": agent_id, "ok": False,
+                   "skipped": True, "agents_completed": done, "agents_total": total}
+        else:
+            runnable.append((agent_id, coro))
+
+    # ── Phase 1: run the rest concurrently but capped at 2 Gemini calls. ─────
+    # Firing all six at once reliably trips the per-minute quota on Flash; two at
+    # a time stays under it while overlapping the slow, network-bound fetching.
+    sem = asyncio.Semaphore(2)
+
+    async def _run(aid: str, coro):
+        async with sem:
+            try:
+                return aid, await coro
+            except BaseException as e:      # noqa: BLE001 — isolate every agent
+                return aid, e
+
+    tasks = [asyncio.create_task(_run(aid, coro)) for aid, coro in runnable]
+    for fut in asyncio.as_completed(tasks):
+        aid, res = await fut
+        done += 1
+        if isinstance(res, BaseException):
+            logger.error(f"{aid} agent failed: {res}")
+            slots[aid] = {"error": str(res)}
+            ok = False
+        else:
+            rd = res.model_dump()
+            reports[aid] = rd
+            slots[aid] = rd
+            agent_contexts[aid] = {
+                "raw_data": captures.get(aid, {}).get("raw_data", ""), "report": rd,
+            }
+            ok = True
+        yield {"phase": 1, "status": "agent_done", "agent": aid, "ok": ok,
+               "agents_completed": done, "agents_total": total}
+
+    # ── Phase 2: TRUE sequential debate over the agents that reported. ───────
     transcript: DebateTranscript | None = None
     if len(agent_contexts) >= 2:
+        yield {"phase": 2, "status": "debating",
+               "participants": sorted(agent_contexts.keys())}
         try:
             transcript = await run_sequential_debate(agent_contexts)
         except Exception as e:             # noqa: BLE001
             logger.error(f"Sequential debate failed: {e}")
             transcript = None
 
-    # ── Phase 3: manager synthesis (reports + transcript, NEVER raw data) ───
+    # ── Phase 3: manager synthesis (reports + transcript, NEVER raw data). ───
+    yield {"phase": 3, "status": "synthesizing"}
     manager_result: object = None
     if reports:
         try:
@@ -1647,6 +1657,13 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
             logger.error(f"Manager synthesis failed: {e}")
             manager_result = {"error": str(e)}
 
+    # Programmatic 3-axis gap scores (deterministic, from the agent reports).
+    three_axis = compute_three_axis_scores(reports)
+    manager_payload = (
+        manager_result.model_dump()
+        if hasattr(manager_result, "model_dump") else manager_result
+    )
+
     # Persist for the role-based chat (overwrites any previous run).
     _debate_store.clear()
     _debate_store.update({
@@ -1658,21 +1675,107 @@ async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
         "company": company_name or ticker,
     })
 
-    manager_payload = (
-        manager_result.model_dump()
-        if hasattr(manager_result, "model_dump")
-        else manager_result
+    # Persist to history: disk (authoritative) + best-effort vector store.
+    run_id = history_store.save_analysis(
+        company=company_name, ticker=ticker,
+        analysis_period=f"{start_date}..{end_date}",
+        three_axis_scores=three_axis,
+        manager=manager_payload if isinstance(manager_payload, dict) else None,
+        reports=slots,
+        debate=transcript.model_dump() if transcript else None,
     )
 
-    return {
+    result = {
+        "run_id": run_id,
         "analysis_period": f"{start_date}..{end_date}",
         "company": primary.model_dump() if primary else None,
-        "agents_total": len(planned),
-        "agents_completed": completed,
+        "agents_total": total,
+        "agents_completed": len(reports),
+        "three_axis_scores": three_axis,
         "reports": slots,
         "debate": transcript.model_dump() if transcript else None,
         "manager": manager_payload,
     }
+    yield {"phase": 3, "status": "complete", "result": result}
+
+
+@app.post("/analyze")
+async def run_analysis(request: AnalyzeRequest = AnalyzeRequest()):
+    """
+    Run the full three-phase MAS pipeline and return the final report.
+
+    Phase 1 (six agents, rate-limited) → Phase 2 (sequential debate) → Phase 3
+    (manager synthesis + 3-axis gap scoring). The run is saved to history. For
+    live per-phase progress on the ~60-120s pipeline, use POST /analyze/stream.
+    """
+    _analyze_preconditions()
+    final: dict = {}
+    async for event in _analyze_pipeline(request):
+        if event.get("status") == "complete":
+            final = event["result"]
+    return final
+
+
+@app.post("/analyze/stream")
+async def run_analysis_stream(request: AnalyzeRequest = AnalyzeRequest()):
+    """
+    Same pipeline as POST /analyze, but streamed as Server-Sent Events so the UI
+    can show real-time progress: one event per agent as it finishes, then the
+    debate and synthesis phases, then a final `complete` event carrying the full
+    report. Each SSE line is `data: {json}`.
+    """
+    _analyze_preconditions()
+
+    async def event_generator():
+        try:
+            async for event in _analyze_pipeline(request):
+                yield f"data: {json.dumps(event)}\n\n"
+        except HTTPException as e:
+            yield f"data: {json.dumps({'phase': 0, 'status': 'error', 'detail': e.detail})}\n\n"
+        except Exception as e:             # noqa: BLE001
+            logger.error(f"Streaming analysis failed: {e}")
+            yield f"data: {json.dumps({'phase': 0, 'status': 'error', 'detail': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable proxy buffering so events flush
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# =============================================================================
+# ENDPOINTS: Analysis history  (persisted past runs)
+# =============================================================================
+
+@app.get("/analysis/history")
+async def analysis_history(
+    ticker: str = Query(..., description="Ticker symbol, e.g. 'AAPL'"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Lightweight summaries of past analysis runs for a ticker, newest first."""
+    return {
+        "ticker": ticker,
+        "history": history_store.get_analysis_history(ticker, limit=limit),
+    }
+
+
+@app.get("/analysis/tickers")
+async def analysis_tickers():
+    """Distinct tickers that have stored runs, with run counts (for the sidebar)."""
+    return {"tickers": history_store.list_tickers()}
+
+
+@app.get("/analysis/{run_id}")
+async def get_analysis(run_id: str):
+    """Full stored record for a specific past run."""
+    record = history_store.get_analysis(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No analysis run '{run_id}' found.")
+    return record
 
 
 # =============================================================================
