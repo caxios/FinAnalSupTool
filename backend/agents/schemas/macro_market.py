@@ -65,6 +65,16 @@ class MacroMarketReport(AgentReport):
     agent: str = "macro_market"
     analysis_period: str = Field(..., description="YYYY-MM-DD..YYYY-MM-DD")
     articles_analyzed: int = Field(0, ge=0)
+    yield_news_correlation: str = Field(
+        ...,
+        description=(
+            "Cross-asset finding on the US 10-Year Treasury yield (^TNX): the "
+            "historical relationship between yield moves and news tone/market "
+            "reaction across the period, followed by the current diagnosis read "
+            "through that pattern. Grounded strictly in the injected ^TNX "
+            "series — no invented yield levels."
+        ),
+    )
     current_market_regime: MarketRegime
     macro_score: int = Field(
         ..., ge=0, le=100, description="0 = maximally hostile macro, 100 = maximally supportive"

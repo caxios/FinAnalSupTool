@@ -264,3 +264,98 @@ async def fetch_technical_data(
     others). Raises ValueError for an invalid ticker / empty data.
     """
     return await asyncio.to_thread(_compute, ticker, start_date, end_date)
+
+
+# =============================================================================
+# US 10-Year Treasury Yield (^TNX) — macro cross-asset context
+# =============================================================================
+# The Macro & Market agent correlates market news/sentiment against the path of
+# long rates. Like the technical indicators above, the LLM does NOT invent these
+# numbers — they are fetched here and injected as pre-computed facts.
+
+# ^TNX is the CBOE 10-Year Treasury Note Yield Index. Yahoo currently quotes it
+# as the yield in percent (e.g. 4.34 = 4.34%), but the index historically used a
+# ×10 convention (43.4). If the level looks like the ×10 form, normalize it.
+_TNX_TICKER = "^TNX"
+_TNX_X10_THRESHOLD = 25.0
+
+
+@dataclass
+class YieldData:
+    """Pre-computed 10-Year Treasury yield facts for the LLM to interpret."""
+    ticker: str
+    period_start: str
+    period_end: str
+    current_yield: float           # latest close, in percent
+    start_yield: float             # first close in the period, in percent
+    period_high: float
+    period_low: float
+    change_bps: float              # end − start, in basis points (1% = 100bps)
+    # Monthly series aligned to the news grouping:
+    # [{"month": "2025-01", "yield": 4.25, "change_bps": +12.0 | None}, ...]
+    monthly: list[dict] = field(default_factory=list)
+    data_points: int = 0           # number of trading days fetched
+
+
+def _compute_yield(start_date: str, end_date: str, ticker: str = _TNX_TICKER) -> YieldData:
+    """Blocking fetch + summarize of the 10-Year yield (run in a thread)."""
+    raw = yf.download(
+        ticker, start=start_date, end=end_date,
+        auto_adjust=True, progress=False,
+    )
+    if raw is None or raw.empty:
+        raise ValueError(
+            f"No yield data returned for '{ticker}' over "
+            f"{start_date} → {end_date}."
+        )
+
+    df = _flatten_columns(raw, ticker)
+    close = df["Close"].dropna()
+    if close.empty:
+        raise ValueError(f"Yield data for '{ticker}' had no usable closes.")
+
+    # Normalize the legacy ×10 convention (e.g. 43.4 → 4.34) if present.
+    if float(close.median()) > _TNX_X10_THRESHOLD:
+        close = close / 10.0
+
+    current_yield = round(float(close.iloc[-1]), 3)
+    start_yield = round(float(close.iloc[0]), 3)
+    change_bps = round((current_yield - start_yield) * 100.0, 1)
+
+    monthly: list[dict] = []
+    prev: float | None = None
+    for ts, v in close.resample("ME").last().dropna().items():
+        y = round(float(v), 3)
+        monthly.append({
+            "month": ts.strftime("%Y-%m"),
+            "yield": y,
+            "change_bps": round((y - prev) * 100.0, 1) if prev is not None else None,
+        })
+        prev = y
+
+    return YieldData(
+        ticker=ticker,
+        period_start=start_date,
+        period_end=end_date,
+        current_yield=current_yield,
+        start_yield=start_yield,
+        period_high=round(float(close.max()), 3),
+        period_low=round(float(close.min()), 3),
+        change_bps=change_bps,
+        monthly=monthly,
+        data_points=len(close),
+    )
+
+
+async def fetch_treasury_yield(
+    start_date: str, end_date: str, ticker: str = _TNX_TICKER
+) -> YieldData:
+    """
+    Fetch the US 10-Year Treasury yield (^TNX) and summarize it for the macro
+    agent: period scalars plus a month-by-month series (aligned to the news
+    grouping) with month-over-month change in basis points.
+
+    The blocking yfinance/pandas work runs in a worker thread. Raises ValueError
+    on empty/invalid data so the caller can degrade gracefully.
+    """
+    return await asyncio.to_thread(_compute_yield, start_date, end_date, ticker)
