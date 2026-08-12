@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import io
 import logging
-from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
@@ -29,9 +28,6 @@ from schemas import (
     FilingTextResponse,
 )
 from parsers.pdf_utils import (
-    detect_filing_metadata,
-    extract_all_sections,
-    extract_tables,
     chars_to_pages,
     extract_section_pages,
     pdf_to_text,
@@ -40,11 +36,7 @@ from parsers.pdf_utils import (
     SECTION_MAP_10K,
     SECTION_MAP_10Q,
 )
-from providers.edgar_xbrl import (
-    build_xbrl_statement_tables,
-    parse_period_end,
-    resolve_company_identity,
-)
+from services.ingestion import ingest_pdf
 from services.storage import DocumentStore, get_document_store
 
 logger = logging.getLogger(__name__)
@@ -94,159 +86,9 @@ async def upload_filings(
             ))
             continue
 
-        # ── Step 2: Detect form type and filing period ────────
-        try:
-            meta = detect_filing_metadata(dest)
-        except Exception as e:
-            logger.error(f"Metadata detection failed for {filename}: {e}")
-            results.append(FilingMeta(
-                filename=filename,
-                status="failed",
-                message=f"Could not read PDF metadata: {e}",
-            ))
-            continue
-
-        form_type = meta.get("form_type")
-
-        # Can't proceed without knowing the form type
-        if not form_type:
-            logger.warning(f"Could not detect form type for {filename}")
-            results.append(FilingMeta(
-                filename=filename,
-                status="failed",
-                message="Could not detect form type (10-K or 10-Q) from the PDF.",
-            ))
-            continue
-
-        # Parse the period-end date — the basis for both a unique, sortable
-        # period key and (later) matching XBRL facts to this filing.
-        period_end = parse_period_end(meta.get("period"))
-        # Provisional key used only if we can't derive anything better.
-        provisional_key = meta.get("period_key") or Path(filename).stem
-
-        # ── Step 3: Extract financial tables ──────────────────
-        # XBRL-first: try SEC EDGAR's machine-readable XBRL data, which gives
-        # exact, standardized numbers with no PDF-table guesswork. Fall back
-        # to pdfplumber only if the company can't be identified or EDGAR fails.
-        detected_cik: int | None = None
-        xbrl_metrics: dict | None = None
-        xbrl_label: str | None = None
-        try:
-            (xbrl_tables, detected_cik, xbrl_metrics, xbrl_label) = (
-                await build_xbrl_statement_tables(
-                    dest,
-                    filename=filename,
-                    form_type=form_type,
-                    period_str=meta.get("period"),
-                )
-            )
-        except Exception as e:
-            logger.error(f"XBRL extraction failed for {filename}: {e}")
-            xbrl_tables = None
-
-        # Finalize the period key. Prefer XBRL's authoritative fiscal label
-        # (e.g. "Q2 FY2026"); otherwise derive a unique, sortable key from the
-        # period-end date. This MUST be unique per filing — otherwise Q1/Q2/Q3
-        # of the same year would share one key and silently overwrite each
-        # other (the bug where same-year uploads were "skipped").
-        period_key = xbrl_label or store.derive_period_key(
-            form_type, period_end, provisional_key
-        )
-
-        classified_tables: dict = {}
-        data_source = "pdfplumber"
-
-        if xbrl_tables is not None:
-            classified_tables = xbrl_tables
-            data_source = "xbrl"
-            store.table_store[period_key] = classified_tables
-            # Store the raw metrics so the Financial Ratios tab can be built.
-            if xbrl_metrics is not None:
-                store.metrics_store[period_key] = xbrl_metrics
-            table_count = sum(len(v) for v in classified_tables.values())
-            logger.info(
-                f"  [{period_key}] tables from XBRL (CIK {detected_cik}): "
-                f"{table_count} statement table(s)"
-            )
-        else:
-            # No XBRL for this period — drop any stale ratio metrics so a
-            # re-upload that falls back to pdfplumber doesn't show old ratios.
-            store.metrics_store.pop(period_key, None)
-            # Fallback: parse tables out of the PDF with pdfplumber.
-            try:
-                classified_tables = extract_tables(dest)
-                store.table_store[period_key] = classified_tables
-                table_count = sum(len(v) for v in classified_tables.values())
-                logger.info(
-                    f"  [{period_key}] tables extracted (pdfplumber): {table_count}"
-                )
-            except Exception as e:
-                logger.error(f"Table extraction failed for {filename}: {e}")
-                classified_tables = {}
-
-        # ── Step 4: Extract text sections ─────────────────────
-        try:
-            sections, page_offsets = extract_all_sections(dest, form_type=form_type)
-            store.text_store[period_key] = sections
-            store.page_map_store[period_key] = page_offsets
-            found = [k for k, v in sections.items() if v is not None]
-            logger.info(f"  Text sections extracted: {found}")
-        except Exception as e:
-            logger.error(f"Text extraction failed for {filename}: {e}")
-            sections = {}
-
-        # ── Step 5: Store filing metadata ─────────────────────
-        # Persist the detected CIK, table source, and a `sort_date` so the
-        # merged tables can be ordered chronologically. Also resolve the company
-        # name/ticker (from data already fetched) so the Company Media view
-        # knows which company to look up.
-        entity_name: str | None = None
-        ticker: str | None = None
-        if detected_cik is not None:
-            try:
-                entity_name, ticker = await resolve_company_identity(detected_cik)
-            except Exception as e:
-                logger.warning(f"Company identity resolution failed: {e}")
-
-        store.filing_meta[period_key] = {
-            "filename": filename,
-            "form_type": form_type,
-            "period": meta.get("period"),
-            "period_key": period_key,
-            "cik": detected_cik,
-            "entity_name": entity_name,
-            "ticker": ticker,
-            "data_source": data_source,
-            "sort_date": period_end.isoformat() if period_end else None,
-        }
-
-        # ── Determine overall processing status ──────────────
-        has_tables = bool(classified_tables and any(classified_tables.values()))
-        has_text = bool(sections and any(v is not None for v in sections.values()))
-
-        if has_tables and has_text:
-            status = "success"
-            message = None
-        elif has_tables or has_text:
-            # Got something but not everything
-            status = "partial"
-            parts = []
-            if not has_tables:
-                parts.append("no tables detected")
-            if not has_text:
-                parts.append("no text sections detected")
-            message = "Partial extraction: " + ", ".join(parts)
-        else:
-            status = "failed"
-            message = "No tables or text sections could be extracted from this PDF."
-
-        results.append(FilingMeta(
-            filename=filename,
-            detected_period=period_key,
-            form_type=form_type,
-            status=status,
-            message=message,
-        ))
+        # ── Steps 2-5: Extract tables + text and persist into the store. ──
+        # Shared with POST /sec/fetch so both entry points ingest identically.
+        results.append(await ingest_pdf(dest, filename, store))
 
     # After processing all files, rebuild the merged tables cache
     # so GET /financials reflects the newly uploaded data

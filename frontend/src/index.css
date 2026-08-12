@@ -721,6 +721,207 @@ body {
   margin-top: 2px;
 }
 
+/* Shared inline error text */
+.error-message {
+  font-size: 13px;
+  color: var(--color-error);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 12px 0 0;
+}
+
+/* ── Mode tabs (Upload PDF / Fetch from SEC) ── */
+.mode-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.mode-tab:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.mode-tab-active,
+.mode-tab-active:hover {
+  color: white;
+  background: var(--accent-gradient);
+}
+
+.mode-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── SEC fetch form ── */
+.sec-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sec-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.sec-field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.sec-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.sec-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  transition: border-color var(--transition-fast);
+}
+
+.sec-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.sec-input:disabled {
+  opacity: 0.6;
+}
+
+/* Filing-type chips (10-K / 10-Q) */
+.sec-radio-row {
+  display: flex;
+  gap: 10px;
+}
+
+.sec-chip {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.sec-chip:hover:not(:disabled) {
+  border-color: var(--accent-blue);
+  color: var(--text-primary);
+}
+
+.sec-chip-active {
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.sec-chip-hint {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.sec-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -4px 0 0;
+}
+
+/* In-flight staged loading */
+.sec-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 11px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+
+.sec-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: sec-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes sec-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Provenance banner in the results view */
+.sec-resolved {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 8px;
+}
+
+.sec-resolved a {
+  color: var(--accent-blue);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.sec-resolved a:hover {
+  text-decoration: underline;
+}
+
 
 /* ═══════════════════════════════════════════════════════════════
    12. Buttons

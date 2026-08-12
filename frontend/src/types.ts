@@ -28,6 +28,34 @@ export interface UploadResponse {
 }
 
 // =============================================================================
+// SEC Auto-Fetch Types (POST /sec/fetch)
+// =============================================================================
+
+/** Request body for POST /sec/fetch — name a filing to pull from SEC EDGAR. */
+export interface SecFetchRequest {
+  ticker: string;
+  form_type: "10-K" | "10-Q";
+  year: number;
+  quarter?: number;   // required for 10-Q (1-3), omitted for 10-K
+}
+
+/** Provenance of the filing SEC auto-fetch actually retrieved. */
+export interface ResolvedFiling {
+  ticker: string;
+  form_type: string;
+  filing_date: string;          // YYYY-MM-DD
+  accession_number: string | null;
+  document_url: string;
+}
+
+/** Response from POST /sec/fetch — upload result plus what was fetched. */
+export interface SecFetchResponse {
+  total_files: number;
+  filings: FilingMeta[];
+  resolved_filing: ResolvedFiling;
+}
+
+// =============================================================================
 // Financials Endpoint Types (GET /financials)
 // =============================================================================
 

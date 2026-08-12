@@ -13,6 +13,8 @@
 
 import type {
   UploadResponse,
+  SecFetchRequest,
+  SecFetchResponse,
   FinancialTableResponse,
   FilingTextResponse,
   PeriodsResponse,
@@ -96,6 +98,26 @@ export async function uploadFiles(files: File[]): Promise<UploadResponse> {
     body: formData,
     // Note: Do NOT set Content-Type header — the browser sets it
     // automatically with the correct multipart boundary
+  });
+}
+
+/**
+ * Fetch a SEC filing automatically from EDGAR by ticker/form/period.
+ *
+ * The backend resolves the filing, renders it to PDF, and runs it through the
+ * same ingestion pipeline as a manual upload — so the result shape matches
+ * uploadFiles (per-file FilingMeta), plus provenance of what was retrieved.
+ *
+ * Note: this is slower than a normal upload (SEC lookup + headless-browser PDF
+ * render happen server-side), so callers should show a staged loading state.
+ */
+export async function fetchSecFiling(
+  req: SecFetchRequest
+): Promise<SecFetchResponse> {
+  return fetchJson<SecFetchResponse>(`${API_BASE}/sec/fetch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
   });
 }
 

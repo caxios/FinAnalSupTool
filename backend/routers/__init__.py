@@ -8,4 +8,5 @@ Endpoints stay thin: parse the request, call a service, return the response.
   - ``analysis``  — /analyze, /analyze/stream, /analysis/*
   - ``chat``      — /chat
   - ``media``     — /company, /media/*, /macro/*, /channels
+  - ``sec``       — /sec/fetch (automated SEC EDGAR retrieval → ingestion)
 """

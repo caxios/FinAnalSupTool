@@ -35,7 +35,7 @@ except Exception:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import document, analysis, chat, media
+from routers import document, analysis, chat, media, sec
 from services.storage import get_document_store
 
 
@@ -88,6 +88,7 @@ app.include_router(document.router)
 app.include_router(analysis.router)
 app.include_router(chat.router)
 app.include_router(media.router)
+app.include_router(sec.router)
 
 
 # =============================================================================

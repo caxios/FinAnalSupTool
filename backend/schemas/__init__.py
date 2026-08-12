@@ -23,6 +23,9 @@ from .domain_schemas import (
 from .api_schemas import (
     FilingMeta,
     UploadResponse,
+    SecFetchRequest,
+    ResolvedFiling,
+    SecFetchResponse,
     FinancialTableResponse,
     FilingTextResponse,
     ChatMessage,
@@ -50,6 +53,9 @@ __all__ = [
     # api
     "FilingMeta",
     "UploadResponse",
+    "SecFetchRequest",
+    "ResolvedFiling",
+    "SecFetchResponse",
     "FinancialTableResponse",
     "FilingTextResponse",
     "ChatMessage",

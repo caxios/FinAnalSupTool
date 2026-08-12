@@ -9,7 +9,7 @@ entities from ``domain_schemas``.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .domain_schemas import (
     CompanyInfo,
@@ -77,6 +77,75 @@ class UploadResponse(BaseModel):
 
     # Per-file processing results
     filings: list[FilingMeta]
+
+
+# ─────────────────────────────────────────────────────────────
+# SEC Auto-Fetch Endpoint Models (POST /sec/fetch)
+# ─────────────────────────────────────────────────────────────
+
+class SecFetchRequest(BaseModel):
+    """
+    Request body for POST /sec/fetch.
+
+    Instead of uploading a PDF, the user names the filing they want and the
+    backend pulls it straight from SEC EDGAR via ``findata``, renders it to PDF,
+    and runs it through the same ingestion pipeline as a manual upload.
+    """
+
+    ticker: str = Field(description="Stock ticker, e.g. 'AAPL' (case-insensitive)")
+    form_type: str = Field(
+        "10-K", description="SEC form type: '10-K' or '10-Q'"
+    )
+    year: int = Field(description="Fiscal year, e.g. 2024")
+    quarter: int | None = Field(
+        None,
+        description="Fiscal quarter (1-3), required for a 10-Q, ignored for a 10-K",
+    )
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("ticker must not be empty")
+        return v.upper()
+
+    @field_validator("form_type")
+    @classmethod
+    def _form_supported(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if v not in ("10-K", "10-Q"):
+            raise ValueError("form_type must be '10-K' or '10-Q'")
+        return v
+
+
+class ResolvedFiling(BaseModel):
+    """Provenance of the filing that SEC auto-fetch actually retrieved.
+
+    Because EDGAR filing rows carry a *filing date* (not the period of report),
+    this echoes back the concrete document that was matched so the user can
+    confirm they got the filing they intended.
+    """
+
+    ticker: str
+    form_type: str = Field(description="Form of the retrieved document")
+    filing_date: str = Field(description="SEC filing date, YYYY-MM-DD")
+    accession_number: str | None = None
+    document_url: str = Field(description="URL of the primary document rendered")
+
+
+class SecFetchResponse(BaseModel):
+    """
+    Response from POST /sec/fetch.
+
+    Mirrors :class:`UploadResponse` (so the frontend can render the result with
+    the same code path as a manual upload) and adds ``resolved_filing`` — what
+    was actually pulled from EDGAR.
+    """
+
+    total_files: int
+    filings: list[FilingMeta]
+    resolved_filing: ResolvedFiling
 
 
 # ─────────────────────────────────────────────────────────────
