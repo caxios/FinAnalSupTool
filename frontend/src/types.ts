@@ -41,6 +41,8 @@ export interface SecFetchRequest {
   form_type: "10-K" | "10-Q";
   start_year: number;
   end_year: number;
+  start_quarter?: number;   // 10-Q only (1-3); omit to start at Q1
+  end_quarter?: number;     // 10-Q only (1-3); omit to end at Q3
 }
 
 /** Provenance of one filing SEC auto-fetch actually retrieved. */

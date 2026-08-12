@@ -239,20 +239,27 @@ def plan_filings(
     form_type: str,
     start_year: int,
     end_year: int,
+    start_quarter: int | None = None,
+    end_quarter: int | None = None,
 ) -> list[PlannedFiling]:
-    """Resolve which filings to fetch for a fiscal-year *range* — no rendering.
+    """Resolve which filings to fetch for a fiscal-period *range* — no rendering.
 
     A single EDGAR metadata query is classified into fiscal periods, then
     filtered to ``[start_year, end_year]``. For a 10-K this yields one annual
     report per year; for a 10-Q it yields every available quarter (Q1–Q3) in the
-    range. The result is sorted oldest → newest so the caller can render/ingest
-    each period in chronological order.
+    range, optionally narrowed at the boundary years by ``start_quarter`` /
+    ``end_quarter`` (e.g. 2023 Q3 → 2024 Q2). The result is sorted oldest →
+    newest so the caller can render/ingest each period in chronological order.
 
     Args:
-        ticker:     Stock symbol (case-insensitive).
-        form_type:  ``"10-K"`` or ``"10-Q"``.
-        start_year: First fiscal year, inclusive.
-        end_year:   Last fiscal year, inclusive.
+        ticker:        Stock symbol (case-insensitive).
+        form_type:     ``"10-K"`` or ``"10-Q"``.
+        start_year:    First fiscal year, inclusive.
+        end_year:      Last fiscal year, inclusive.
+        start_quarter: First quarter (1-3) in ``start_year`` to include; 10-Q
+                       only. ``None`` includes from Q1.
+        end_quarter:   Last quarter (1-3) in ``end_year`` to include; 10-Q only.
+                       ``None`` includes through Q3.
 
     Raises:
         InvalidRequest, TickerNotFound, FilingNotFound, SecFetchError.
@@ -286,6 +293,26 @@ def plan_filings(
             f"start_year {start_year} is out of range "
             f"(SEC EDGAR covers 1994–{current_year})."
         )
+
+    # Quarter boundaries apply to 10-Q only; a 10-K has no quarter.
+    if form_type == "10-K":
+        start_quarter = end_quarter = None
+    else:
+        for label, qv in (("start_quarter", start_quarter), ("end_quarter", end_quarter)):
+            if qv is not None and qv not in (1, 2, 3):
+                raise InvalidRequest(
+                    f"{label} must be 1, 2, or 3 (Q4 is reported in the 10-K)."
+                )
+        if (
+            start_year == end_year
+            and start_quarter is not None
+            and end_quarter is not None
+            and start_quarter > end_quarter
+        ):
+            raise InvalidRequest(
+                f"start_quarter (Q{start_quarter}) must not be after "
+                f"end_quarter (Q{end_quarter}) within the same year."
+            )
 
     # ── Query EDGAR once for the whole range ─────────────────────────────
     # Window generously: reports for FY N are filed from N through N+1 (later
@@ -329,8 +356,14 @@ def plan_filings(
         fy, q = _classify_period_end(r, fye_month)
         if not (start_year <= fy <= end_year):
             continue
-        if form_type == "10-Q" and q not in (1, 2, 3):
-            continue  # Q4 is reported in the 10-K, never a 10-Q
+        if form_type == "10-Q":
+            if q not in (1, 2, 3):
+                continue  # Q4 is reported in the 10-K, never a 10-Q
+            # Precise quarter boundaries at the range's first/last fiscal year.
+            if start_quarter is not None and fy == start_year and q < start_quarter:
+                continue
+            if end_quarter is not None and fy == end_year and q > end_quarter:
+                continue
         # For a 10-K the quarter is irrelevant (one annual report per year); use
         # 0 so drift can't split one year's 10-K across two keys.
         key = (fy, 0 if form_type == "10-K" else q)

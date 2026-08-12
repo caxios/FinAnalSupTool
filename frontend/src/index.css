@@ -933,6 +933,28 @@ body {
   text-align: center;
 }
 
+/* One side of the range: a year input + (for 10-Q) a quarter dropdown */
+.sec-range-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.sec-range-group .sec-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sec-quarter-select {
+  flex: 0 0 auto;
+  width: auto;
+  padding-left: 8px;
+  padding-right: 8px;
+  text-align: left;
+}
+
 .sec-range-dash {
   color: var(--text-muted);
   font-weight: 600;

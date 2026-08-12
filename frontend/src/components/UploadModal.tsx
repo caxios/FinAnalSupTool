@@ -68,6 +68,9 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
   const [formType, setFormType] = useState<FormType>("10-K");
   const [startYear, setStartYear] = useState<number>(CURRENT_YEAR - 2);
   const [endYear, setEndYear] = useState<number>(CURRENT_YEAR - 1);
+  // Quarter bounds — only used (and sent) when formType === "10-Q".
+  const [startQuarter, setStartQuarter] = useState<number>(1);
+  const [endQuarter, setEndQuarter] = useState<number>(3);
   const [fetching, setFetching] = useState(false);
   const [stageIndex, setStageIndex] = useState(0);
 
@@ -139,6 +142,10 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
       setError(`Range is limited to ${MAX_YEAR_SPAN} years. Narrow it and retry.`);
       return;
     }
+    if (formType === "10-Q" && startYear === endYear && startQuarter > endQuarter) {
+      setError("Start quarter must not be after end quarter within the same year.");
+      return;
+    }
     setFetching(true);
     setError(null);
     try {
@@ -147,6 +154,10 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
         form_type: formType,
         start_year: startYear,
         end_year: endYear,
+        // Quarter bounds apply to 10-Q only.
+        ...(formType === "10-Q"
+          ? { start_quarter: startQuarter, end_quarter: endQuarter }
+          : {}),
       });
       setResults(response.filings);
       setSecMeta({
@@ -338,29 +349,63 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
                 </div>
 
                 <div className="sec-field">
-                  <span className="sec-label">Fiscal year range</span>
+                  <span className="sec-label">
+                    {formType === "10-Q" ? "Fiscal quarter range" : "Fiscal year range"}
+                  </span>
                   <div className="sec-range-row">
-                    <input
-                      type="number"
-                      className="sec-input"
-                      aria-label="Start year"
-                      min={1994}
-                      max={CURRENT_YEAR + 1}
-                      value={startYear}
-                      onChange={(e) => setStartYear(Number(e.target.value))}
-                      disabled={fetching}
-                    />
+                    <div className="sec-range-group">
+                      <input
+                        type="number"
+                        className="sec-input"
+                        aria-label="Start year"
+                        min={1994}
+                        max={CURRENT_YEAR + 1}
+                        value={startYear}
+                        onChange={(e) => setStartYear(Number(e.target.value))}
+                        disabled={fetching}
+                      />
+                      {formType === "10-Q" && (
+                        <select
+                          className="sec-input sec-quarter-select"
+                          aria-label="Start quarter"
+                          value={startQuarter}
+                          onChange={(e) => setStartQuarter(Number(e.target.value))}
+                          disabled={fetching}
+                        >
+                          <option value={1}>Q1</option>
+                          <option value={2}>Q2</option>
+                          <option value={3}>Q3</option>
+                        </select>
+                      )}
+                    </div>
+
                     <span className="sec-range-dash">–</span>
-                    <input
-                      type="number"
-                      className="sec-input"
-                      aria-label="End year"
-                      min={1994}
-                      max={CURRENT_YEAR + 1}
-                      value={endYear}
-                      onChange={(e) => setEndYear(Number(e.target.value))}
-                      disabled={fetching}
-                    />
+
+                    <div className="sec-range-group">
+                      <input
+                        type="number"
+                        className="sec-input"
+                        aria-label="End year"
+                        min={1994}
+                        max={CURRENT_YEAR + 1}
+                        value={endYear}
+                        onChange={(e) => setEndYear(Number(e.target.value))}
+                        disabled={fetching}
+                      />
+                      {formType === "10-Q" && (
+                        <select
+                          className="sec-input sec-quarter-select"
+                          aria-label="End quarter"
+                          value={endQuarter}
+                          onChange={(e) => setEndQuarter(Number(e.target.value))}
+                          disabled={fetching}
+                        >
+                          <option value={1}>Q1</option>
+                          <option value={2}>Q2</option>
+                          <option value={3}>Q3</option>
+                        </select>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -368,7 +413,7 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
                   Pulled live from SEC EDGAR (up to {MAX_YEAR_SPAN} years per
                   request).{" "}
                   {formType === "10-Q"
-                    ? "All available quarters (Q1–Q3) in the range are fetched."
+                    ? "Every quarter between the selected start and end quarter is fetched."
                     : "One annual report per year in the range is fetched."}
                 </p>
 
@@ -378,8 +423,11 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
                   <div className="sec-loading">
                     <span className="sec-spinner" />
                     <span className="sec-loading-text">
-                      Fetching {formType} filings for {startYear}–{endYear}. This
-                      may take a minute…
+                      Fetching {formType} filings for{" "}
+                      {formType === "10-Q"
+                        ? `${startYear} Q${startQuarter}–${endYear} Q${endQuarter}`
+                        : `${startYear}–${endYear}`}
+                      . This may take a minute…
                       <span className="sec-loading-stage">{SEC_STAGES[stageIndex]}</span>
                     </span>
                   </div>

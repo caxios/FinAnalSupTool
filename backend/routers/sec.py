@@ -57,7 +57,11 @@ async def fetch_and_ingest(
     retrieved. After this the frontend can run Deep Analysis exactly as it would
     for manually uploaded filings.
     """
-    range_label = f"{req.start_year}–{req.end_year}"
+    if req.form_type == "10-Q" and (req.start_quarter or req.end_quarter):
+        sq, eq = req.start_quarter or 1, req.end_quarter or 3
+        range_label = f"{req.start_year} Q{sq}–{req.end_year} Q{eq}"
+    else:
+        range_label = f"{req.start_year}–{req.end_year}"
 
     # ── Step 1: plan the range (single metadata query, blocking → threadpool) ──
     try:
@@ -67,6 +71,8 @@ async def fetch_and_ingest(
             req.form_type,
             req.start_year,
             req.end_year,
+            req.start_quarter,
+            req.end_quarter,
         )
     except sec_fetch.InvalidRequest as e:
         raise HTTPException(status_code=400, detail=str(e))

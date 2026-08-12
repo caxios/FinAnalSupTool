@@ -99,7 +99,9 @@ class SecFetchRequest(BaseModel):
 
     The request covers a *fiscal-year range* ``[start_year, end_year]`` (up to
     ``MAX_YEAR_SPAN`` years). For a 10-K that's one annual report per year; for a
-    10-Q it's every available quarter (Q1–Q3) within the range.
+    10-Q it's every available quarter (Q1–Q3) within the range — optionally
+    narrowed at the boundaries by ``start_quarter``/``end_quarter`` (e.g. from
+    2023 Q3 to 2024 Q2). Quarter bounds are ignored for a 10-K.
     """
 
     ticker: str = Field(description="Stock ticker, e.g. 'AAPL' (case-insensitive)")
@@ -108,6 +110,16 @@ class SecFetchRequest(BaseModel):
     )
     start_year: int = Field(description="First fiscal year (inclusive), e.g. 2021")
     end_year: int = Field(description="Last fiscal year (inclusive), e.g. 2024")
+    start_quarter: int | None = Field(
+        None,
+        description="First fiscal quarter (1-3) in start_year; 10-Q only. "
+                    "Omit to include from Q1.",
+    )
+    end_quarter: int | None = Field(
+        None,
+        description="Last fiscal quarter (1-3) in end_year; 10-Q only. "
+                    "Omit to include through Q3.",
+    )
 
     @field_validator("ticker")
     @classmethod
@@ -125,6 +137,13 @@ class SecFetchRequest(BaseModel):
             raise ValueError("form_type must be '10-K' or '10-Q'")
         return v
 
+    @field_validator("start_quarter", "end_quarter")
+    @classmethod
+    def _quarter_valid(cls, v: int | None) -> int | None:
+        if v is not None and v not in (1, 2, 3):
+            raise ValueError("quarter must be 1, 2, or 3 (Q4 is reported in the 10-K)")
+        return v
+
     @model_validator(mode="after")
     def _check_range(self) -> "SecFetchRequest":
         if self.start_year > self.end_year:
@@ -137,6 +156,17 @@ class SecFetchRequest(BaseModel):
             raise ValueError(
                 f"Requested range spans {span} years; the maximum is "
                 f"{MAX_YEAR_SPAN}. Narrow the range and try again."
+            )
+        # Within a single fiscal year, the start quarter can't come after the end.
+        if (
+            self.start_year == self.end_year
+            and self.start_quarter is not None
+            and self.end_quarter is not None
+            and self.start_quarter > self.end_quarter
+        ):
+            raise ValueError(
+                f"start_quarter (Q{self.start_quarter}) must not be after "
+                f"end_quarter (Q{self.end_quarter}) within the same year."
             )
         return self
 
