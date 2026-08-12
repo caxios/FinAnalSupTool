@@ -9,7 +9,7 @@ entities from ``domain_schemas``.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .domain_schemas import (
     CompanyInfo,
@@ -83,24 +83,31 @@ class UploadResponse(BaseModel):
 # SEC Auto-Fetch Endpoint Models (POST /sec/fetch)
 # ─────────────────────────────────────────────────────────────
 
+# The widest span (inclusive) a single /sec/fetch request may cover, to keep
+# SEC EDGAR traffic and server render time bounded. A 10-Q request over the full
+# span can still expand to ~15 filings (5 years × 3 quarters).
+MAX_YEAR_SPAN = 5
+
+
 class SecFetchRequest(BaseModel):
     """
     Request body for POST /sec/fetch.
 
-    Instead of uploading a PDF, the user names the filing they want and the
-    backend pulls it straight from SEC EDGAR via ``findata``, renders it to PDF,
-    and runs it through the same ingestion pipeline as a manual upload.
+    Instead of uploading a PDF, the user names the filing(s) they want and the
+    backend pulls them straight from SEC EDGAR via ``findata``, renders each to
+    PDF, and runs them through the same ingestion pipeline as a manual upload.
+
+    The request covers a *fiscal-year range* ``[start_year, end_year]`` (up to
+    ``MAX_YEAR_SPAN`` years). For a 10-K that's one annual report per year; for a
+    10-Q it's every available quarter (Q1–Q3) within the range.
     """
 
     ticker: str = Field(description="Stock ticker, e.g. 'AAPL' (case-insensitive)")
     form_type: str = Field(
         "10-K", description="SEC form type: '10-K' or '10-Q'"
     )
-    year: int = Field(description="Fiscal year, e.g. 2024")
-    quarter: int | None = Field(
-        None,
-        description="Fiscal quarter (1-3), required for a 10-Q, ignored for a 10-K",
-    )
+    start_year: int = Field(description="First fiscal year (inclusive), e.g. 2021")
+    end_year: int = Field(description="Last fiscal year (inclusive), e.g. 2024")
 
     @field_validator("ticker")
     @classmethod
@@ -118,17 +125,33 @@ class SecFetchRequest(BaseModel):
             raise ValueError("form_type must be '10-K' or '10-Q'")
         return v
 
+    @model_validator(mode="after")
+    def _check_range(self) -> "SecFetchRequest":
+        if self.start_year > self.end_year:
+            raise ValueError(
+                f"start_year ({self.start_year}) must not be after "
+                f"end_year ({self.end_year})."
+            )
+        span = self.end_year - self.start_year + 1
+        if span > MAX_YEAR_SPAN:
+            raise ValueError(
+                f"Requested range spans {span} years; the maximum is "
+                f"{MAX_YEAR_SPAN}. Narrow the range and try again."
+            )
+        return self
+
 
 class ResolvedFiling(BaseModel):
-    """Provenance of the filing that SEC auto-fetch actually retrieved.
+    """Provenance of one filing that SEC auto-fetch actually retrieved.
 
     Because EDGAR filing rows carry a *filing date* (not the period of report),
     this echoes back the concrete document that was matched so the user can
-    confirm they got the filing they intended.
+    confirm they got the filings they intended.
     """
 
     ticker: str
     form_type: str = Field(description="Form of the retrieved document")
+    period_label: str = Field(description="Fiscal period, e.g. 'FY2022' or 'FY2022 Q1'")
     filing_date: str = Field(description="SEC filing date, YYYY-MM-DD")
     accession_number: str | None = None
     document_url: str = Field(description="URL of the primary document rendered")
@@ -138,14 +161,23 @@ class SecFetchResponse(BaseModel):
     """
     Response from POST /sec/fetch.
 
-    Mirrors :class:`UploadResponse` (so the frontend can render the result with
-    the same code path as a manual upload) and adds ``resolved_filing`` — what
-    was actually pulled from EDGAR.
+    Mirrors :class:`UploadResponse` (so the frontend can render results with the
+    same code path as a manual upload) and, because a request can span several
+    periods, reports one :class:`FilingMeta` per attempted period plus the
+    provenance of each filing successfully pulled from EDGAR.
     """
 
-    total_files: int
-    filings: list[FilingMeta]
-    resolved_filing: ResolvedFiling
+    ticker: str
+    range_label: str = Field(description="Requested range, e.g. '2021–2024'")
+    total_files: int = Field(description="Number of periods attempted")
+    succeeded: int = Field(description="Number of periods ingested successfully")
+    filings: list[FilingMeta] = Field(
+        description="One entry per attempted period (success, partial, or failed)"
+    )
+    resolved_filings: list[ResolvedFiling] = Field(
+        default_factory=list,
+        description="Provenance of each filing retrieved from EDGAR",
+    )
 
 
 # ─────────────────────────────────────────────────────────────

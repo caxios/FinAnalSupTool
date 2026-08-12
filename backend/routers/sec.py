@@ -3,15 +3,16 @@ routers.sec
 ────────────
 Automated SEC EDGAR filing retrieval.
 
-  POST /sec/fetch — Resolve ticker + form + fiscal period to a filing on SEC
-                    EDGAR, render it to PDF, and run it through the *same*
-                    ingestion pipeline as a manual upload.
+  POST /sec/fetch — Resolve ticker + form + a *fiscal-year range* to filings on
+                    SEC EDGAR, render each to PDF, and run them through the
+                    *same* ingestion pipeline as a manual upload.
 
 This is the automated counterpart to ``POST /upload``: instead of the user
-finding, downloading, and dragging in a filing PDF, they name what they want and
-the backend fetches it. Once the PDF exists on disk it is handed to
-``services.ingestion.ingest_pdf`` unchanged — so every downstream feature
-(financial tables, text sections, Deep Analysis) works identically.
+finding, downloading, and dragging in filing PDFs, they name a company + form +
+year range and the backend fetches every matching filing. Once each PDF exists
+on disk it is handed to ``services.ingestion.ingest_pdf`` unchanged — so every
+downstream feature (financial tables, text sections, Deep Analysis) works
+identically. Longitudinal trend analysis just means requesting several years.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 
-from schemas import SecFetchRequest, SecFetchResponse, ResolvedFiling
+from schemas import SecFetchRequest, SecFetchResponse, ResolvedFiling, FilingMeta
 from services import sec_fetch
 from services.ingestion import ingest_pdf
 from services.storage import DocumentStore, get_document_store
@@ -37,81 +38,131 @@ async def fetch_and_ingest(
     store: DocumentStore = Depends(get_document_store),
 ):
     """
-    Fetch a filing from SEC EDGAR by ticker/form/period and ingest it.
+    Fetch every filing for a ticker/form over a fiscal-year range and ingest them.
 
     Steps:
-      1. Resolve + render the filing to PDF via ``findata`` (in a threadpool,
-         since it does blocking network I/O and spawns a Chromium subprocess).
-      2. Save the PDF into the store's temp dir (same place uploads live).
-      3. Run the shared ``ingest_pdf`` pipeline (tables + text extraction).
-      4. Rebuild the merged tables cache so GET /financials sees it.
+      1. Plan: one EDGAR metadata query resolves which filings fall in the range
+         (one 10-K per year, or every 10-Q quarter per year).
+      2. For each planned filing, sequentially (to respect SEC rate limits):
+         render it to PDF, save it beside uploads, and run the shared
+         ``ingest_pdf`` pipeline. Blocking work runs in a threadpool.
+      3. Rebuild the merged-tables cache once at the end.
 
-    Returns the standard upload result plus provenance of the retrieved filing.
-    After this succeeds the frontend can run Deep Analysis exactly as it would
-    for a manually uploaded filing.
+    Partial failures are graceful: a period that fails to render or ingest comes
+    back as a ``failed`` result while the others still succeed. If SEC starts
+    rate-limiting mid-run, the remaining periods are skipped (rather than
+    hammering EDGAR) and reported as failed.
+
+    Returns one result per attempted period plus the provenance of each filing
+    retrieved. After this the frontend can run Deep Analysis exactly as it would
+    for manually uploaded filings.
     """
-    # ── Step 1: fetch + render (blocking → offload to a worker thread) ──
+    range_label = f"{req.start_year}–{req.end_year}"
+
+    # ── Step 1: plan the range (single metadata query, blocking → threadpool) ──
     try:
-        fetched = await run_in_threadpool(
-            sec_fetch.fetch_filing_pdf,
+        planned = await run_in_threadpool(
+            sec_fetch.plan_filings,
             req.ticker,
             req.form_type,
-            req.year,
-            req.quarter,
+            req.start_year,
+            req.end_year,
         )
     except sec_fetch.InvalidRequest as e:
         raise HTTPException(status_code=400, detail=str(e))
     except sec_fetch.TickerNotFound as e:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Ticker not found on SEC EDGAR: {e}",
-        )
+        raise HTTPException(status_code=404, detail=f"Ticker not found on SEC EDGAR: {e}")
     except sec_fetch.FilingNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except sec_fetch.SecRateLimited as e:
-        # 503 + Retry-After hint: SEC is throttling automated traffic.
-        raise HTTPException(
-            status_code=503,
-            detail=str(e),
-            headers={"Retry-After": "120"},
-        )
-    except sec_fetch.RenderFailed as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not render the filing to PDF: {e}",
-        )
     except sec_fetch.SecFetchError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     logger.info(
-        f"[sec] fetched {fetched.ticker} {fetched.form_type} "
-        f"filed {fetched.filing_date} → {fetched.filename}"
+        f"[sec] {req.ticker} {req.form_type} {range_label}: "
+        f"{len(planned)} filing(s) planned"
     )
 
-    # ── Step 2: persist the PDF where uploads live ──
-    dest = store.upload_dir / fetched.filename
-    try:
-        dest.write_bytes(fetched.pdf_bytes)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to save the fetched filing to disk: {e}",
-        )
+    filings: list[FilingMeta] = []
+    resolved: list[ResolvedFiling] = []
+    rate_limited = False
 
-    # ── Step 3: shared ingestion pipeline ──
-    meta = await ingest_pdf(dest, fetched.filename, store)
+    # ── Step 2: render + ingest each period sequentially ──
+    for p in planned:
+        if rate_limited:
+            # SEC throttled us earlier this run — don't keep hitting EDGAR.
+            filings.append(FilingMeta(
+                filename=p.filename,
+                detected_period=p.period_label,
+                form_type=p.form_type,
+                status="failed",
+                message="Skipped: SEC rate-limited an earlier filing in this "
+                        "request. Wait a few minutes and retry a smaller range.",
+            ))
+            continue
 
-    # ── Step 4: refresh the merged-tables cache (as /upload does) ──
-    store.rebuild_merged_tables()
+        try:
+            fetched = await run_in_threadpool(sec_fetch.render_planned, p)
+        except sec_fetch.SecRateLimited as e:
+            rate_limited = True
+            filings.append(FilingMeta(
+                filename=p.filename,
+                detected_period=p.period_label,
+                form_type=p.form_type,
+                status="failed",
+                message=f"SEC rate-limited this request: {e}",
+            ))
+            continue
+        except sec_fetch.SecFetchError as e:
+            # Render failure for this one period — record and keep going.
+            filings.append(FilingMeta(
+                filename=p.filename,
+                detected_period=p.period_label,
+                form_type=p.form_type,
+                status="failed",
+                message=f"Could not retrieve {p.period_label}: {e}",
+            ))
+            continue
 
-    return SecFetchResponse(
-        total_files=1,
-        filings=[meta],
-        resolved_filing=ResolvedFiling(
+        # Persist beside uploads, then run the shared ingestion pipeline.
+        dest = store.upload_dir / fetched.filename
+        try:
+            dest.write_bytes(fetched.pdf_bytes)
+            meta = await ingest_pdf(dest, fetched.filename, store)
+        except Exception as e:  # noqa: BLE001 — isolate per-period ingestion
+            logger.error(f"[sec] ingest failed for {p.period_label}: {e}")
+            filings.append(FilingMeta(
+                filename=fetched.filename,
+                detected_period=p.period_label,
+                form_type=p.form_type,
+                status="failed",
+                message=f"Retrieved but failed to ingest {p.period_label}: {e}",
+            ))
+            continue
+
+        filings.append(meta)
+        resolved.append(ResolvedFiling(
             ticker=fetched.ticker,
             form_type=fetched.form_type,
+            period_label=fetched.period_label,
             filing_date=fetched.filing_date,
             accession_number=fetched.accession_number or None,
             document_url=fetched.document_url,
-        ),
+        ))
+
+    # ── Step 3: refresh the merged-tables cache once (as /upload does) ──
+    store.rebuild_merged_tables()
+
+    succeeded = sum(1 for f in filings if f.status in ("success", "partial"))
+    logger.info(
+        f"[sec] {req.ticker} {req.form_type} {range_label}: "
+        f"{succeeded}/{len(filings)} ingested"
+    )
+
+    return SecFetchResponse(
+        ticker=req.ticker,
+        range_label=range_label,
+        total_files=len(filings),
+        succeeded=succeeded,
+        filings=filings,
+        resolved_filings=resolved,
     )

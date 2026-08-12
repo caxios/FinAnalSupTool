@@ -3,7 +3,10 @@
  * ──────────
  * Top bar of the application.
  *
- * Displays the app title and an "Upload Files" button.
+ * Displays the app title and two action buttons:
+ *   • "Upload PDF"     — opens the modal in manual-upload mode
+ *   • "Fetch from SEC" — opens the modal in SEC auto-fetch mode
+ *
  * Also shows a count of how many filings are currently loaded,
  * giving the user quick feedback about the app state.
  */
@@ -11,6 +14,8 @@
 import { useState } from "react";
 import type { PeriodInfo, FilingMeta } from "../types";
 import UploadModal from "./UploadModal";
+
+type ModalMode = "upload" | "sec";
 
 interface HeaderProps {
   /** List of currently loaded filing periods (for showing count) */
@@ -20,8 +25,8 @@ interface HeaderProps {
 }
 
 export default function Header({ periods, onUploadComplete }: HeaderProps) {
-  // Controls whether the upload modal overlay is visible
-  const [showUpload, setShowUpload] = useState(false);
+  // null = modal closed; "upload" | "sec" = modal open in that mode
+  const [modalMode, setModalMode] = useState<ModalMode | null>(null);
 
   return (
     <>
@@ -29,7 +34,7 @@ export default function Header({ periods, onUploadComplete }: HeaderProps) {
         {/* App title */}
         <h1 className="app-title">Financial Analysis Tool</h1>
 
-        {/* Right side: filing count + upload button */}
+        {/* Right side: filing count + two action buttons */}
         <div className="header-actions">
           {/* Show how many filings are loaded */}
           {periods.length > 0 && (
@@ -38,23 +43,32 @@ export default function Header({ periods, onUploadComplete }: HeaderProps) {
             </span>
           )}
 
-          {/* Upload button opens the modal */}
+          {/* SEC auto-fetch button */}
+          <button
+            className="btn-sec-fetch"
+            onClick={() => setModalMode("sec")}
+          >
+            🔎 Fetch from SEC
+          </button>
+
+          {/* Manual PDF upload button */}
           <button
             className="btn-upload"
-            onClick={() => setShowUpload(true)}
+            onClick={() => setModalMode("upload")}
           >
-            📁 Upload Files
+            📁 Upload PDF
           </button>
         </div>
       </header>
 
-      {/* Upload modal overlay — only rendered when showUpload is true */}
-      {showUpload && (
+      {/* Upload modal overlay — only rendered when a mode is selected */}
+      {modalMode && (
         <UploadModal
-          onClose={() => setShowUpload(false)}
+          initialMode={modalMode}
+          onClose={() => setModalMode(null)}
           onUploadComplete={(filings) => {
             onUploadComplete(filings);
-            setShowUpload(false);
+            setModalMode(null);
           }}
         />
       )}

@@ -16,6 +16,8 @@ import type { FilingMeta, ResolvedFiling } from "../types";
 import { uploadFiles, fetchSecFiling } from "../api";
 
 interface UploadModalProps {
+  /** Which tab to open on: "upload" (manual PDF) or "sec" (SEC fetch) */
+  initialMode?: Mode;
   /** Close the modal without uploading */
   onClose: () => void;
   /** Callback with results — parent refreshes its data */
@@ -25,23 +27,35 @@ interface UploadModalProps {
 type Mode = "upload" | "sec";
 type FormType = "10-K" | "10-Q";
 
-// Staged messages shown, in order, while a SEC fetch is in flight. The request
-// is a single call, so we advance through these on a timer purely for feedback.
+// Staged messages shown, in order, while a SEC fetch is in flight. A range
+// request renders several PDFs server-side, so we advance through these on a
+// timer purely for feedback.
 const SEC_STAGES = [
   "Searching SEC EDGAR…",
-  "Rendering filing to PDF…",
+  "Rendering filings to PDF…",
   "Parsing & extracting financials…",
 ];
 
 const CURRENT_YEAR = new Date().getFullYear();
+// Must match the backend's MAX_YEAR_SPAN (schemas.api_schemas / sec_fetch).
+const MAX_YEAR_SPAN = 5;
 
-export default function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
+/** Provenance summary shown in the results view after a SEC range fetch. */
+interface SecMeta {
+  ticker: string;
+  rangeLabel: string;
+  succeeded: number;
+  total: number;
+  resolved: ResolvedFiling[];
+}
+
+export default function UploadModal({ initialMode = "upload", onClose, onUploadComplete }: UploadModalProps) {
   // Which input mode is active
-  const [mode, setMode] = useState<Mode>("upload");
+  const [mode, setMode] = useState<Mode>(initialMode);
 
   // ── Shared results (populated by either mode) ──
   const [results, setResults] = useState<FilingMeta[] | null>(null);
-  const [resolved, setResolved] = useState<ResolvedFiling | null>(null);
+  const [secMeta, setSecMeta] = useState<SecMeta | null>(null);
 
   // ── Mode A: manual upload state ──
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -52,8 +66,8 @@ export default function UploadModal({ onClose, onUploadComplete }: UploadModalPr
   // ── Mode B: SEC fetch form state ──
   const [ticker, setTicker] = useState("");
   const [formType, setFormType] = useState<FormType>("10-K");
-  const [year, setYear] = useState<number>(CURRENT_YEAR - 1);
-  const [quarter, setQuarter] = useState<number>(1);
+  const [startYear, setStartYear] = useState<number>(CURRENT_YEAR - 2);
+  const [endYear, setEndYear] = useState<number>(CURRENT_YEAR - 1);
   const [fetching, setFetching] = useState(false);
   const [stageIndex, setStageIndex] = useState(0);
 
@@ -117,18 +131,31 @@ export default function UploadModal({ onClose, onUploadComplete }: UploadModalPr
       setError("Enter a ticker symbol (e.g. AAPL).");
       return;
     }
+    if (startYear > endYear) {
+      setError("Start year must not be after end year.");
+      return;
+    }
+    if (endYear - startYear + 1 > MAX_YEAR_SPAN) {
+      setError(`Range is limited to ${MAX_YEAR_SPAN} years. Narrow it and retry.`);
+      return;
+    }
     setFetching(true);
     setError(null);
     try {
       const response = await fetchSecFiling({
         ticker: sym,
         form_type: formType,
-        year,
-        // Only send quarter for 10-Q — a 10-K has no quarter.
-        ...(formType === "10-Q" ? { quarter } : {}),
+        start_year: startYear,
+        end_year: endYear,
       });
       setResults(response.filings);
-      setResolved(response.resolved_filing);
+      setSecMeta({
+        ticker: response.ticker,
+        rangeLabel: response.range_label,
+        succeeded: response.succeeded,
+        total: response.total_files,
+        resolved: response.resolved_filings,
+      });
       onUploadComplete(response.filings);
     } catch (err) {
       setError(err instanceof Error ? err.message : "SEC fetch failed");
@@ -138,27 +165,50 @@ export default function UploadModal({ onClose, onUploadComplete }: UploadModalPr
   };
 
   const busy = uploading || fetching;
+  // While a fetch/upload runs, block closing the modal (esc/backdrop/✕).
+  const requestClose = () => { if (!busy) onClose(); };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={requestClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="modal-header">
           <h2>Add SEC Filings</h2>
-          <button className="btn-close" onClick={onClose}>✕</button>
+          <button
+            className="btn-close"
+            onClick={requestClose}
+            disabled={busy}
+            aria-label="Close"
+          >
+            ✕
+          </button>
         </div>
 
         {results ? (
           // ── Results (shared by both modes) ────────────────
           <div className="upload-results">
             <h3>Results</h3>
-            {resolved && (
+            {secMeta && (
               <div className="sec-resolved">
-                Retrieved <strong>{resolved.ticker} {resolved.form_type}</strong>{" "}
-                filed <strong>{resolved.filing_date}</strong> from SEC EDGAR.{" "}
-                <a href={resolved.document_url} target="_blank" rel="noreferrer">
-                  View source ↗
-                </a>
+                Retrieved <strong>{secMeta.succeeded} of {secMeta.total}</strong>{" "}
+                {secMeta.ticker} filing(s) for <strong>{secMeta.rangeLabel}</strong>{" "}
+                from SEC EDGAR.
+                {secMeta.resolved.length > 0 && (
+                  <div className="sec-resolved-list">
+                    {secMeta.resolved.map((rf, i) => (
+                      <a
+                        key={i}
+                        href={rf.document_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="sec-resolved-chip"
+                        title={`Filed ${rf.filing_date}`}
+                      >
+                        {rf.period_label} ↗
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {results.map((filing, i) => (
@@ -287,40 +337,39 @@ export default function UploadModal({ onClose, onUploadComplete }: UploadModalPr
                   </div>
                 </div>
 
-                <div className="sec-field-row">
-                  <label className="sec-field">
-                    <span className="sec-label">Fiscal year</span>
+                <div className="sec-field">
+                  <span className="sec-label">Fiscal year range</span>
+                  <div className="sec-range-row">
                     <input
                       type="number"
                       className="sec-input"
+                      aria-label="Start year"
                       min={1994}
                       max={CURRENT_YEAR + 1}
-                      value={year}
-                      onChange={(e) => setYear(Number(e.target.value))}
+                      value={startYear}
+                      onChange={(e) => setStartYear(Number(e.target.value))}
                       disabled={fetching}
                     />
-                  </label>
-
-                  {formType === "10-Q" && (
-                    <label className="sec-field">
-                      <span className="sec-label">Quarter</span>
-                      <select
-                        className="sec-input"
-                        value={quarter}
-                        onChange={(e) => setQuarter(Number(e.target.value))}
-                        disabled={fetching}
-                      >
-                        <option value={1}>Q1</option>
-                        <option value={2}>Q2</option>
-                        <option value={3}>Q3</option>
-                      </select>
-                    </label>
-                  )}
+                    <span className="sec-range-dash">–</span>
+                    <input
+                      type="number"
+                      className="sec-input"
+                      aria-label="End year"
+                      min={1994}
+                      max={CURRENT_YEAR + 1}
+                      value={endYear}
+                      onChange={(e) => setEndYear(Number(e.target.value))}
+                      disabled={fetching}
+                    />
+                  </div>
                 </div>
 
                 <p className="sec-note">
-                  Pulled live from SEC EDGAR. Q4 results appear in the annual 10-K,
-                  not a 10-Q.
+                  Pulled live from SEC EDGAR (up to {MAX_YEAR_SPAN} years per
+                  request).{" "}
+                  {formType === "10-Q"
+                    ? "All available quarters (Q1–Q3) in the range are fetched."
+                    : "One annual report per year in the range is fetched."}
                 </p>
 
                 {error && <p className="error-message">{error}</p>}
@@ -328,7 +377,11 @@ export default function UploadModal({ onClose, onUploadComplete }: UploadModalPr
                 {fetching ? (
                   <div className="sec-loading">
                     <span className="sec-spinner" />
-                    <span>{SEC_STAGES[stageIndex]}</span>
+                    <span className="sec-loading-text">
+                      Fetching {formType} filings for {startYear}–{endYear}. This
+                      may take a minute…
+                      <span className="sec-loading-stage">{SEC_STAGES[stageIndex]}</span>
+                    </span>
                   </div>
                 ) : (
                   <button

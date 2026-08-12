@@ -31,28 +31,36 @@ export interface UploadResponse {
 // SEC Auto-Fetch Types (POST /sec/fetch)
 // =============================================================================
 
-/** Request body for POST /sec/fetch — name a filing to pull from SEC EDGAR. */
+/**
+ * Request body for POST /sec/fetch — pull every filing for a ticker/form over a
+ * fiscal-year range from SEC EDGAR. For a 10-K that's one report per year; for a
+ * 10-Q it's every available quarter (Q1-Q3) in the range.
+ */
 export interface SecFetchRequest {
   ticker: string;
   form_type: "10-K" | "10-Q";
-  year: number;
-  quarter?: number;   // required for 10-Q (1-3), omitted for 10-K
+  start_year: number;
+  end_year: number;
 }
 
-/** Provenance of the filing SEC auto-fetch actually retrieved. */
+/** Provenance of one filing SEC auto-fetch actually retrieved. */
 export interface ResolvedFiling {
   ticker: string;
   form_type: string;
+  period_label: string;         // "FY2022" or "FY2022 Q1"
   filing_date: string;          // YYYY-MM-DD
   accession_number: string | null;
   document_url: string;
 }
 
-/** Response from POST /sec/fetch — upload result plus what was fetched. */
+/** Response from POST /sec/fetch — one result per attempted period. */
 export interface SecFetchResponse {
-  total_files: number;
+  ticker: string;
+  range_label: string;          // "2021–2024"
+  total_files: number;          // periods attempted
+  succeeded: number;            // periods ingested successfully
   filings: FilingMeta[];
-  resolved_filing: ResolvedFiling;
+  resolved_filings: ResolvedFiling[];
 }
 
 // =============================================================================

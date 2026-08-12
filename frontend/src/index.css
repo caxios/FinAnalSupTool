@@ -922,6 +922,66 @@ body {
   text-decoration: underline;
 }
 
+/* Year-range inputs (Start – End) */
+.sec-range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sec-range-row .sec-input {
+  text-align: center;
+}
+
+.sec-range-dash {
+  color: var(--text-muted);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* Multi-line staged loading text for range fetches */
+.sec-loading {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.sec-loading-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sec-loading-stage {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* Per-period provenance chips in the results view */
+.sec-resolved-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sec-resolved-chip {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  color: var(--accent-blue) !important;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.sec-resolved-chip:hover {
+  background: rgba(59, 130, 246, 0.2);
+  text-decoration: none !important;
+}
+
 
 /* ═══════════════════════════════════════════════════════════════
    12. Buttons
@@ -944,6 +1004,27 @@ body {
 .btn-upload:hover {
   opacity: 0.9;
   transform: translateY(-1px);
+}
+
+/* SEC auto-fetch button in the header */
+.btn-sec-fetch {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: white;
+  background: linear-gradient(135deg, #06b6d4, #0891b2);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity var(--transition-fast), transform var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+
+.btn-sec-fetch:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.35);
 }
 
 /* Primary action button (used in modals) */
