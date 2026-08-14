@@ -13,12 +13,17 @@ sees exactly the same grounded view the chat assistant does.
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from gemini_chat import build_context
+from rag import sec_rag
 
 from .base_agent import BaseAgent
 from .schemas.sec_filings import SECFilingsReport
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -148,9 +153,37 @@ class SECFilingsAgent(BaseAgent):
         merged_tables: dict[str, pd.DataFrame] = context.get("merged_tables", {}) or {}
         text_store: dict[str, dict] = context.get("text_store", {}) or {}
         filing_meta: dict[str, dict] = context.get("filing_meta", {}) or {}
+        ticker = (context.get("ticker") or "").strip() or None
+        run_id = str(context.get("run_id") or "adhoc")
 
         periods = _ordered_periods(filing_meta)
-        data_context = build_context(merged_tables, text_store, filing_meta)
+
+        # Filing text is used IN FULL by default. Only when the combined MD&A /
+        # Risk Factors / … across all periods overflows the model's optimal
+        # window do we chunk every section and retrieve the passages relevant to
+        # our fundamental analysis topics — so nothing is lost by position, and
+        # late-section detail (segments, tail risk factors) still reaches us.
+        # Any RAG failure returns None → build_context renders full text.
+        filing_text_override = None
+        try:
+            filing_text_override = await sec_rag.prepare_context(
+                text_store, periods,
+                queries=sec_rag.SEC_ANALYSIS_TOPICS,
+                ticker=ticker, run_id=run_id,
+            )
+        except Exception as e:  # noqa: BLE001 — RAG is best-effort; fall back to full text
+            logger.warning(f"SEC filings RAG failed, using full text: {e}")
+            filing_text_override = None
+        if filing_text_override:
+            logger.info(
+                "SEC filings agent using RAG-retrieved filing-text excerpts "
+                f"(~{sec_rag.estimate_total_tokens(text_store, periods):,} est. tokens of text)."
+            )
+
+        data_context = build_context(
+            merged_tables, text_store, filing_meta,
+            filing_text_override=filing_text_override,
+        )
         user_prompt = _USER_TEMPLATE.format(
             periods=", ".join(periods) or "(none)",
             context=data_context,

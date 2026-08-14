@@ -138,6 +138,9 @@ async def analyze_pipeline(
                 "merged_tables": doc_store.merged_tables,
                 "text_store": doc_store.text_store,
                 "filing_meta": doc_store.filing_meta,
+                # For scoping the filing-text RAG index/retrieval to this run.
+                "ticker": ticker,
+                "run_id": analysis_id,
             },
             capture=_cap("sec_filings"),
         )),

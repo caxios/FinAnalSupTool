@@ -36,7 +36,15 @@ _QUERY_TOPICS = [
 
 _PER_TOPIC = 3            # chunks retrieved per topic
 _MAX_RETRIEVED = 36       # overall cap on retrieved historical chunks
-_CURRENT_CAP_CHARS = 80_000
+
+# The current quarter is passed IN FULL whenever it fits the window (it carries
+# the most signal and is the baseline everything else is compared against). Only
+# a pathologically large current transcript is itself RAG-retrieved instead of
+# being truncated — so the crucial late-call Q&A is never dropped by a static
+# character cap. ~40k tokens ≈ 160k chars, well above a normal transcript.
+_CURRENT_FULL_TOKENS = 40_000
+_CURRENT_PER_TOPIC = 4    # current-quarter chunks retrieved per topic (RAG path)
+_CURRENT_MAX_RETRIEVED = 28
 
 
 async def prepare_context(
@@ -62,9 +70,10 @@ async def prepare_context(
     *older, current = fetched
     cur_q, cur_src, cur_text = current
 
-    # Index each older quarter's chunks (scoped to this run).
+    # Index EVERY quarter's chunks (scoped to this run), current included, so the
+    # current transcript can also be retrieved from if it's too large to stuff.
     indexed_any = False
-    for qlabel, _src, text in older:
+    for qlabel, _src, text in fetched:
         chunks = chunking.chunk_earnings_transcript(text, qlabel)
         for c in chunks:
             c["metadata"]["scope"] = scope
@@ -76,10 +85,42 @@ async def prepare_context(
     if not indexed_any:
         return None
 
-    parts: list[str] = [
-        f"=== CURRENT QUARTER: {cur_q} (source: {cur_src or 'unknown'}) — FULL TRANSCRIPT ===\n"
-        f"{cur_text[:_CURRENT_CAP_CHARS]}\n=== END {cur_q} ==="
-    ]
+    # ── Current quarter: full transcript when it fits, else its own topic-based
+    # retrieval (NEVER a truncation, so the end of the call is never lost). ──
+    if chunking.estimate_tokens(cur_text) <= _CURRENT_FULL_TOKENS:
+        parts: list[str] = [
+            f"=== CURRENT QUARTER: {cur_q} (source: {cur_src or 'unknown'}) — FULL TRANSCRIPT ===\n"
+            f"{cur_text}\n=== END {cur_q} ==="
+        ]
+    else:
+        cur_seen: set[str] = set()
+        cur_hits: list[dict] = []
+        for topic in _QUERY_TOPICS:
+            hits = await vector_store.query(
+                "earnings_transcripts", topic, n_results=_CURRENT_PER_TOPIC,
+                where={"$and": [{"scope": scope}, {"quarter": cur_q}]},
+            )
+            for h in hits:
+                key = h["text"][:120]
+                if key in cur_seen or len(cur_hits) >= _CURRENT_MAX_RETRIEVED:
+                    continue
+                cur_seen.add(key)
+                h["_topic"] = topic
+                cur_hits.append(h)
+        cur_body = "\n".join(
+            f"[topic: {h['_topic']}] {h['text']}" for h in cur_hits
+        ) or cur_text[:_CURRENT_FULL_TOKENS * 4]  # last-resort head slice if retrieval empty
+        parts = [
+            f"=== CURRENT QUARTER: {cur_q} (source: {cur_src or 'unknown'}) — "
+            f"KEY EXCERPTS (full transcript too large to include verbatim; "
+            f"chunked and retrieved by topic) ===\n"
+            f"{cur_body}\n=== END {cur_q} ==="
+        ]
+        logger.info(
+            f"Earnings RAG: current quarter {cur_q} too large "
+            f"(~{chunking.estimate_tokens(cur_text):,} est. tokens) — "
+            f"retrieved {len(cur_hits)} current-quarter chunk(s)."
+        )
 
     # Retrieve topic-relevant chunks from the older quarters only.
     seen: set[str] = set()

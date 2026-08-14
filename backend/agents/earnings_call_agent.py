@@ -9,9 +9,11 @@ longitudinal read: per-quarter substance plus explicit cross-quarter tracking of
 what management promised versus what they later delivered.
 
 Transcripts are large (~30-50K tokens each). Gemini's context window absorbs a
-handful of them, but each transcript is capped at `_MAX_TRANSCRIPT_CHARS` so a
-long period can't blow the request size — the cap is generous enough to keep
-prepared remarks AND the Q&A section, which is where the signal is.
+handful of them, so the default path passes each transcript IN FULL — prepared
+remarks AND the Q&A section (where the signal is), with nothing lost off the end.
+For genuinely large periods, RAG retrieval replaces full stuffing (see
+`rag/earnings_rag.py`), keeping the most-recent quarter in full and retrieving
+topic-relevant excerpts from the rest.
 """
 
 from __future__ import annotations
@@ -28,9 +30,8 @@ from .schemas.earnings_call import EarningsCallReport
 
 logger = logging.getLogger(__name__)
 
-# Per-transcript character budget (~20K tokens each).
-_MAX_TRANSCRIPT_CHARS = 80_000
 # Upper bound on quarters fetched, so an over-long range can't fan out forever.
+# (The large-period case is handled by RAG, not by truncating each transcript.)
 _MAX_QUARTERS = 8
 
 
@@ -264,13 +265,15 @@ class EarningsCallAgent(BaseAgent):
                 )
 
         if transcripts_block is None:
+            # Full-context path: pass every transcript IN FULL (no static cap).
+            # This runs for smaller periods, or when RAG is unavailable — in both
+            # cases full text is preferable to losing the end of a call. Truly
+            # large periods take the RAG branch above instead.
             blocks = []
             for qlabel, source, text in fetched:
-                body = text[:_MAX_TRANSCRIPT_CHARS]
-                truncated = " [TRANSCRIPT TRUNCATED]" if len(text) > _MAX_TRANSCRIPT_CHARS else ""
                 blocks.append(
                     f"=== TRANSCRIPT: {qlabel} (source: {source}) ===\n"
-                    f"{body}{truncated}\n"
+                    f"{text}\n"
                     f"=== END TRANSCRIPT: {qlabel} ==="
                 )
             transcripts_block = "\n\n".join(blocks)

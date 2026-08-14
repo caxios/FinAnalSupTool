@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from schemas import ChatRequest, ChatResponse
 from gemini_chat import build_context, ask_gemini, ask_persona, gemini_api_key
+from rag import sec_rag
 from agents import render_transcript, display_name, FIELD_AGENT_IDS
 from services.storage import (
     DocumentStore,
@@ -193,9 +194,28 @@ async def chat(
     # Assemble the grounding context from the current in-memory data, including
     # any media/macro data the user has fetched (so the AI sees all views).
     media_context = media_service.build_media_context(cache)
+
+    # Filing text is included in full — UNLESS it's too large for the window, in
+    # which case we chunk every section and retrieve only the passages relevant
+    # to THIS question (so no MD&A / Risk Factors detail is lost to a static cap).
+    ordered_periods = list(store.filing_meta.keys())
+    ticker = next(
+        (m.get("ticker") for m in store.filing_meta.values() if m.get("ticker")), None
+    )
+    filing_text_override = None
+    try:
+        filing_text_override = await sec_rag.prepare_context(
+            store.text_store, ordered_periods,
+            queries=[question],
+            ticker=ticker, run_id="chat",
+        )
+    except Exception:  # noqa: BLE001 — best-effort; fall back to full text
+        filing_text_override = None
+
     context = build_context(
         store.merged_tables, store.text_store, store.filing_meta,
         extra_context=media_context,
+        filing_text_override=filing_text_override,
     )
 
     # Short-circuit only when there's truly nothing to talk about — no filings

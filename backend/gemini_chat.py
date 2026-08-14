@@ -94,10 +94,11 @@ _GEMINI_URL = (
 _DEFAULT_MODEL = "gemini-2.5-flash"
 _HTTP_TIMEOUT = 90.0
 
-# Per-section character cap when assembling context. Filing text sections
-# (especially MD&A / Risk Factors) can be enormous; this keeps the prompt
-# bounded while still giving the model the substance to reason over.
-_SECTION_CHAR_CAP = 12_000
+# NOTE: Filing text sections are no longer truncated by a static character cap.
+# The whole section is passed in full, UNLESS the combined text is so large it
+# exceeds the model's optimal window — in which case the caller assembles a
+# RAG-retrieved excerpts block (see rag/sec_rag.py) and passes it as
+# `filing_text_override`, so nothing is lost by position, only by relevance.
 
 # Sliding window for chat history. The frontend resends the entire conversation
 # every turn, and the system prompt already carries the full filing context, so
@@ -159,11 +160,18 @@ def build_context(
     text_store: dict[str, dict],
     filing_meta: dict[str, dict],
     extra_context: str | None = None,
+    *,
+    filing_text_override: str | None = None,
 ) -> str:
     """
     Assemble the full data context that the assistant is allowed to reason over:
     financials + ratios + filing text, plus any `extra_context` (the latest
     media/macro data cached from Views 2 & 3, pre-formatted as Markdown).
+
+    Filing text is included IN FULL (no character cap). When the combined text is
+    too large for the model's optimal window, the caller passes a pre-assembled
+    RAG excerpts block as `filing_text_override`; it is then used verbatim in
+    place of rendering every section from `text_store`.
 
     Returns a single Markdown string. Empty stores yield a short notice.
     """
@@ -201,22 +209,28 @@ def build_context(
         parts.append("")
 
     # ── Filing text sections ──
-    has_text = False
-    for pk in ordered:
-        sections = text_store.get(pk, {})
-        available = {k: v for k, v in sections.items() if v}
-        if not available:
-            continue
+    if filing_text_override and filing_text_override.strip():
+        # RAG-retrieved excerpts assembled by the caller (the full sections were
+        # too large to stuff verbatim). Used as-is; no per-section rendering.
         has_text = True
-        parts.append(f"# Filing Text — {pk}")
-        for section_key, content in available.items():
-            label = SECTION_LABELS.get(section_key, section_key)
-            text = content.strip()
-            if len(text) > _SECTION_CHAR_CAP:
-                text = text[:_SECTION_CHAR_CAP] + "\n…[truncated]…"
-            parts.append(f"## {label}")
-            parts.append(text)
-            parts.append("")
+        parts.append(filing_text_override.strip())
+        parts.append("")
+    else:
+        has_text = False
+        for pk in ordered:
+            sections = text_store.get(pk, {})
+            available = {k: v for k, v in sections.items() if v}
+            if not available:
+                continue
+            has_text = True
+            parts.append(f"# Filing Text — {pk}")
+            for section_key, content in available.items():
+                label = SECTION_LABELS.get(section_key, section_key)
+                # Full section text — no static truncation. Oversized combined
+                # text is handled upstream via RAG (filing_text_override).
+                parts.append(f"## {label}")
+                parts.append(content.strip())
+                parts.append("")
 
     # ── Media / macro context (from Views 2 & 3, if the user has visited them) ──
     has_extra = bool(extra_context and extra_context.strip())
