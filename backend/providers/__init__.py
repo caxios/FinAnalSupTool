@@ -11,6 +11,9 @@ routers, services, and agents never talk to third-party SDKs directly:
   - ``price_provider``   — yfinance price history + technical indicators, and
                            the 10-Year Treasury yield (^TNX) for macro context
   - ``edgar_xbrl``       — SEC EDGAR XBRL facts → statement/ratio tables
+  - ``macro_data_provider`` — FRED API + yfinance macro indicators (CPI,
+                              unemployment, multi-tenor Treasury yields,
+                              VIX, yield spread) for the History Agent
 
 They are intentionally free of local (in-repo) imports so they can be reused
 anywhere without pulling in the app's state or service layers.

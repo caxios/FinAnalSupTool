@@ -123,7 +123,7 @@ def _agent_chat_persona(agent_id: str, debate_store: DebateStore) -> str:
             transcript=rendered,
         )
 
-    if agent_id in FIELD_AGENT_IDS:
+    if agent_id in FIELD_AGENT_IDS or agent_id == "macro_history":
         ctx = (debate.get("agent_contexts") or {}).get(agent_id)
         if not ctx:
             raise HTTPException(
@@ -143,7 +143,7 @@ def _agent_chat_persona(agent_id: str, debate_store: DebateStore) -> str:
     raise HTTPException(
         status_code=400,
         detail=f"Unknown agent_id '{agent_id}'. Use one of "
-               f"{sorted(FIELD_AGENT_IDS)}, 'manager', or omit it for the "
+               f"{sorted(FIELD_AGENT_IDS | {'macro_history'})}, 'manager', or omit it for the "
                f"general assistant.",
     )
 

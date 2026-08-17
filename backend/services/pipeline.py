@@ -33,9 +33,11 @@ from agents import (
     CompanyNewsAgent,
     MacroMarketAgent,
     YouTubeAgent,
+    MacroHistoryAgent,
     ManagerAgent,
     DebateTranscript,
     run_sequential_debate,
+    FIELD_AGENT_IDS,
 )
 from services.storage import DocumentStore, DebateStore
 from services import company_service
@@ -171,6 +173,15 @@ async def analyze_pipeline(
             if identified else no_company,
         ))
 
+    # The Macro History agent does NOT join the debate — it produces an
+    # independent advisory report. It still needs a company/ticker to infer
+    # the sector, so it follows the same guard as the other company agents.
+    planned.append((
+        "macro_history",
+        MacroHistoryAgent().analyze(dict(company_ctx), capture=_cap("macro_history"))
+        if identified else no_company,
+    ))
+
     total = len(planned)
     yield {"phase": 1, "status": "running", "agents_total": total, "agents_completed": 0}
 
@@ -222,12 +233,19 @@ async def analyze_pipeline(
                "agents_completed": done, "agents_total": total}
 
     # ── Phase 2: TRUE sequential debate over the agents that reported. ───────
+    # The debate roster is limited to FIELD agents — the Macro History agent
+    # does NOT participate (it produces an independent advisory report that
+    # the Manager receives alongside the debate).
+    debate_contexts = {
+        aid: ctx for aid, ctx in agent_contexts.items()
+        if aid in FIELD_AGENT_IDS
+    }
     transcript: DebateTranscript | None = None
-    if len(agent_contexts) >= 2:
+    if len(debate_contexts) >= 2:
         yield {"phase": 2, "status": "debating",
-               "participants": sorted(agent_contexts.keys())}
+               "participants": sorted(debate_contexts.keys())}
         try:
-            transcript = await run_sequential_debate(agent_contexts)
+            transcript = await run_sequential_debate(debate_contexts)
         except Exception as e:             # noqa: BLE001
             logger.error(f"Sequential debate failed: {e}")
             transcript = None

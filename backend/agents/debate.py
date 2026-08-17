@@ -85,6 +85,7 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
     "youtube_analysis": "Analyst-Commentary (YouTube) Analyst",
     "macro_market": "Macro & Market Analyst",
     "technical_analysis": "Technical (Price) Analyst",
+    "macro_history": "Macro History Analyst",
     "manager": "Lead Analyst (Manager)",
 }
 
