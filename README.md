@@ -1,101 +1,104 @@
-﻿<div align="center">
-  <h1>?뱢 FinAnalSupTool</h1>
+<div align="center">
+  <h1>📈 FinAnalSupTool</h1>
   <p><strong>Financial Analysis Support Tool</strong></p>
-  <p>FastAPI 쨌 React 쨌 Gemini API 쨌 LlamaIndex 쨌 LangChain</p>
+  <p>FastAPI · React · Gemini API · LlamaIndex · LangChain</p>
 </div>
 
 <br />
 
-## ?뱰 ?꾨줈?앺듃 ?뚭컻
+## 📖 Project Overview
 
-**FinAnalSupTool**? ?ъ슜??二쇰줈 ?ъ옄?? ?좊꼸由ъ뒪????媛 湲곗뾽???щТ ?곹깭, 嫄곗떆 寃쎌젣 吏?? ?쒖옣 ?щ━ ?깆쓣 醫낇빀?곸쑝濡?遺꾩꽍?????덈룄濡??뺣뒗 **AI 湲곕컲???щТ 遺꾩꽍 蹂댁“ ?꾧뎄**?낅땲?? ?ъ슜?먭? ?щТ?쒗몴(PDF ??, 湲곗뾽 ?ㅼ쟻 諛쒗몴(Earnings Call), ?좏뒠釉?愿???곸긽 ?깆쓣 ?쒓났?섎㈃ AI ?먯씠?꾪듃?ㅼ씠 ?대? ?ㅺ컖?꾨줈 遺꾩꽍?섏뿬 梨꾪똿 ?뺥깭濡??몄궗?댄듃瑜??쒓났?⑸땲??
+**FinAnalSupTool** is an **AI-powered financial analysis support tool** designed to help users (investors, analysts, etc.) comprehensively analyze a company's financial health, macroeconomic indicators, and market sentiment. By providing financial statements (PDFs), earnings calls, and related YouTube videos, users can leverage AI agents to analyze the data from multiple angles and gain valuable insights through an intuitive chat interface.
 
-## ??二쇱슂 湲곕뒫
+## ✨ Key Features
 
-- ?뮠 **AI 梨쀫큸 湲곕컲 ?ㅼ쨷 ?먯씠?꾪듃 遺꾩꽍**: ?ъ슜?먯쓽 吏덈Ц??留욎떠 媛???곸젅??AI ?먯씠?꾪듃(嫄곗떆 寃쎌젣, ?ㅼ쟻 諛쒗몴, 湲곗뾽 怨듭떆 遺꾩꽍 ??媛 ?묐떟???앹꽦?⑸땲??
-- ?뱞 **臾몄꽌 ?낅줈??諛?遺꾩꽍 (RAG)**: 湲곗뾽???щТ?쒗몴 PDF ?뚯씪 ?깆쓣 ?낅줈?쒗븯硫?踰≫꽣 DB(ChromaDB)????ν븯?? ?댄썑 吏덈Ц ???대떦 臾몄꽌瑜?湲곕컲?쇰줈 ?뺥솗???듬????쒓났?⑸땲??
-- ?뱤 **嫄곗떆 寃쎌젣 ?곗씠??遺꾩꽍**: 嫄곗떆 寃쎌젣 吏??Macro Data)瑜??쒓났諛쏆븘 湲곗뾽 遺꾩꽍怨??곌퀎???몄궗?댄듃瑜??살쓣 ???덉뒿?덈떎.
-- ?렏 **誘몃뵒???좏뒠釉? ?蹂?遺꾩꽍**: ?뱀젙 湲곗뾽???ㅼ쟻 諛쒗몴???좊꼸由ъ뒪??由щ럭 ???좏뒠釉??곸긽???蹂몄쓣 ?뚯떛?섍퀬 ?붿빟/遺꾩꽍?⑸땲??
-- ?뵊 **?쒖옣 ?щ━(Market Sentiment) 遺꾩꽍**: ?꾩옱 二쇱떇 ?쒖옣?대굹 ?뱀젙 醫낅ぉ??????쒖옣???꾨컲?곸씤 媛먯꽦(Sentiment)??遺꾩꽍??以띾땲??
+- 💬 **Multi-Agent AI Chatbot**: The system routes your questions to the most appropriate AI agent (Macro Economics, Earnings Calls, SEC Filings, etc.) to generate precise responses.
+- 📄 **Document Upload & Analysis (RAG)**: Upload financial statement PDFs to be processed and stored in a vector database (ChromaDB), enabling accurate answers based on the provided documents.
+- 📊 **Macroeconomic Data Analysis**: Analyze macroeconomic indicators and see how they relate to the target company.
+- 🎥 **Media (YouTube) Transcript Analysis**: Parse, summarize, and analyze transcripts from YouTube videos such as earnings calls or analyst reviews.
+- 🔎 **Market Sentiment Analysis**: Evaluate the overall market sentiment for specific stocks or the general market.
 
-## ?썱 湲곗닠 ?ㅽ깮
+## 🛠 Tech Stack
 
-### 諛깆뿏??(Backend)
-- **?꾨젅?꾩썙??*: FastAPI
-- **?몄뼱**: Python 3
-- **AI/LLM ?곕룞**: LangChain, LlamaIndex, Google Gemini API
-- **踰≫꽣 ?곗씠?곕쿋?댁뒪**: ChromaDB (濡쒖뺄 RAG 援ы쁽??
-- **二쇱슂 ?쇱씠釉뚮윭由?*: pdfplumber, PyMuPDF (PDF ?뚯떛), yfinance (湲덉쑖 ?곗씠??, youtube-transcript-api (?좏뒠釉??蹂?
+### Backend
+- **Framework**: FastAPI
+- **Language**: Python 3
+- **AI / LLM**: LangChain, LlamaIndex, Google Gemini API
+- **Vector Database**: ChromaDB (for local RAG implementation)
+- **Key Libraries**: `pdfplumber`, `PyMuPDF` (PDF parsing), `yfinance` (financial data), `youtube-transcript-api` (YouTube transcripts)
 
-### ?꾨줎?몄뿏??(Frontend)
-- **?꾨젅?꾩썙??*: React (Vite)
-- **?몄뼱**: TypeScript
-- **?쇱슦??*: React Router v7
+### Frontend
+- **Framework**: React (Vite)
+- **Language**: TypeScript
+- **Routing**: React Router v7
 
-## ?? ?ㅼ튂 諛??ㅽ뻾 諛⑸쾿
+## 🚀 Installation & Setup
 
-???꾨줈?앺듃??濡쒖뺄 媛쒕컻 諛??뚯뒪?몃? 紐⑹쟻?쇰줈 援ъ텞?섏뿀?듬땲?? Python怨?Node.js ?섍꼍???꾩슂?⑸땲??
+This project is built for local development and testing. You will need Python and Node.js installed on your machine.
 
-### 1. ?꾨줈?앺듃 ?대줎
-`ash
+### 1. Clone the Repository
+```bash
 git clone https://github.com/your-username/FinAnalSupTool.git
 cd FinAnalSupTool
-`
+```
 
-### 2. 諛깆뿏??(Backend) ?ㅼ젙 諛??ㅽ뻾
-`ash
+### 2. Backend Setup
+```bash
 cd backend
-`
-#### ?꾩닔 ?⑦궎吏 ?ㅼ튂
-`ash
+```
+#### Install Dependencies
+```bash
 pip install -r requirements.txt
-`
-#### ?섍꼍 蹂???ㅼ젙
-ackend ?붾젆?좊━??.env ?뚯씪???앹꽦?섍퀬 ?꾩슂??API ?ㅻ? ?낅젰?⑸땲??
-`env
+```
+#### Environment Variables
+Create a `.env` file in the `backend` directory and add the required API keys:
+```env
 GEMINI_API_KEY=your_gemini_api_key_here
 TAVILY_API_KEY=your_tavily_api_key_here
 YOUTUBE_API_KEY=your_youtube_api_key_here
-`
-#### ?쒕쾭 ?ㅽ뻾
-`ash
+```
+#### Run the Server
+```bash
 uvicorn main:app --reload --port 8000
-`
-- API 臾몄꽌??http://localhost:8000/docs ?먯꽌 ?뺤씤?????덉뒿?덈떎.
+```
+- API documentation will be available at `http://localhost:8000/docs`.
 
-### 3. ?꾨줎?몄뿏??(Frontend) ?ㅼ젙 諛??ㅽ뻾
-???곕??먯쓣 ?닿퀬 ?ㅼ쓬???ㅽ뻾?⑸땲??
-`ash
+### 3. Frontend Setup
+Open a new terminal window and run the following:
+```bash
 cd frontend
-`
-#### ?⑦궎吏 ?ㅼ튂
-`ash
+```
+#### Install Dependencies
+```bash
 npm install
-# ?먮뒗 yarn install
-`
-#### 媛쒕컻 ?쒕쾭 ?ㅽ뻾
-`ash
+# or yarn install
+```
+#### Run the Development Server
+```bash
 npm run dev
-`
-- 釉뚮씪?곗??먯꽌 ?쒖떆?섎뒗 濡쒖뺄?몄뒪??二쇱냼(?쇰컲?곸쑝濡?http://localhost:5173)濡??묒냽?⑸땲??
+```
+- Access the frontend in your browser at the provided localhost address (typically `http://localhost:5173`).
 
-## ?뱚 ?꾨줈?앺듃 援ъ“
+## 📁 Project Structure
 
-`
+```
 FinAnalSupTool/
-?쒋?? backend/                  # FastAPI 諛깆뿏????  ?쒋?? agents/               # 媛?遺꾩빞蹂?AI ?먯씠?꾪듃 (嫄곗떆寃쎌젣, ?ㅼ쟻諛쒗몴 ??
-??  ?쒋?? parsers/              # 臾몄꽌 諛??곗씠???뚯떛 濡쒖쭅
-??  ?쒋?? providers/            # ?몃? ?곗씠???쒓났???곕룞 (Macro data ??
-??  ?쒋?? rag/                  # RAG(寃??利앷컯 ?앹꽦) 泥섎━ 濡쒖쭅
-??  ?쒋?? routers/              # API ?붾뱶?ъ씤???쇱슦??(臾몄꽌, 梨꾪똿, 遺꾩꽍 ??
-??  ?쒋?? services/             # 鍮꾩쫰?덉뒪 濡쒖쭅 諛??몃찓紐⑤━ ??μ냼
-??  ?쒋?? main.py               # FastAPI ?좏뵆由ъ??댁뀡 吏꾩엯????  ?붴?? requirements.txt      # Python ?섏〈??紐⑸줉
-?쒋?? frontend/                 # React (Vite) ?꾨줎?몄뿏????  ?쒋?? src/                  # ?뚯뒪 肄붾뱶 諛?UI 而댄룷?뚰듃
-??  ?쒋?? package.json          # Node ?섏〈??紐⑸줉
-??  ?붴?? vite.config.ts        # Vite 鍮뚮뱶 ?ㅼ젙
-?붴?? implementation_plan/      # ?꾨줈?앺듃 ?ㅺ퀎 諛?援ы쁽 怨꾪쉷 臾몄꽌
-`
+├── backend/                  # FastAPI backend application
+│   ├── agents/               # AI Agents (Macro, Earnings, Debate, etc.)
+│   ├── parsers/              # Document and data parsing logic
+│   ├── providers/            # External data providers (Macro data, etc.)
+│   ├── rag/                  # RAG (Retrieval-Augmented Generation) logic
+│   ├── routers/              # API endpoint routers (documents, chat, analysis)
+│   ├── services/             # Business logic and in-memory storage
+│   ├── main.py               # FastAPI application entry point
+│   └── requirements.txt      # Python dependencies
+├── frontend/                 # React (Vite) frontend application
+│   ├── src/                  # Source code and UI components
+│   ├── package.json          # Node dependencies
+│   └── vite.config.ts        # Vite configuration
+└── implementation_plan/      # Project design and implementation plan documents
+```
 
-## ?좑툘 二쇱쓽 ?ы빆 (Disclaimer)
-- 蹂??꾧뎄??**濡쒖뺄?몄뒪???꾨줈?좏???*?쇰줈, ?쒕쾭 ?ъ떆?????낅줈?쒕맂 ?곗씠??諛??몃찓紐⑤━ ??μ냼媛 珥덇린?붾맗?덈떎. ?꾨줈?뺤뀡 ?섍꼍?먯꽌???ъ슜? 沅뚯옣?섏? ?딆뒿?덈떎.
-- 蹂??꾧뎄媛 ?쒓났?섎뒗 AI 遺꾩꽍 寃곌낵???ъ옄 沅뚯쑀???щТ??議곗뼵???꾨땲硫? 李멸퀬?⑹쑝濡쒕쭔 ?ъ슜?섏떆湲?諛붾엻?덈떎.
+## ⚠️ Disclaimer
+- This tool is a **localhost prototype**. Uploaded data and in-memory storage are cleared upon server restart. It is not recommended for production environments.
+- The AI-generated analysis provided by this tool does not constitute investment advice or financial recommendations. Please use it for reference purposes only.
