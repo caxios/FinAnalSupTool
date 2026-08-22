@@ -338,10 +338,15 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
                         className={`sec-chip ${formType === ft ? "sec-chip-active" : ""}`}
                         onClick={() => setFormType(ft)}
                         disabled={fetching}
+                        title={
+                          ft === "10-K"
+                            ? "Annual report. Q4 financials are reported here — the SEC does not issue a separate Q4 10-Q."
+                            : "Quarterly report (Q1–Q3 only). Q4 is covered by the annual 10-K."
+                        }
                       >
                         {ft}
                         <span className="sec-chip-hint">
-                          {ft === "10-K" ? "Annual" : "Quarterly"}
+                          {ft === "10-K" ? "Annual / Q4" : "Quarterly"}
                         </span>
                       </button>
                     ))}
@@ -413,8 +418,8 @@ export default function UploadModal({ initialMode = "upload", onClose, onUploadC
                   Pulled live from SEC EDGAR (up to {MAX_YEAR_SPAN} years per
                   request).{" "}
                   {formType === "10-Q"
-                    ? "Every quarter between the selected start and end quarter is fetched."
-                    : "One annual report per year in the range is fetched."}
+                    ? "Every quarter between the selected start and end quarter is fetched. Only Q1–Q3 are available — the SEC does not file a Q4 10-Q, so Q4 financials come from that year's annual 10-K instead."
+                    : "One annual report per year in the range is fetched. The 10-K also contains the company's Q4 results."}
                 </p>
 
                 {error && <p className="error-message">{error}</p>}

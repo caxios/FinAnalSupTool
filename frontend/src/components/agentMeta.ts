@@ -12,6 +12,7 @@ export const AGENT_ORDER: string[] = [
   "company_news",
   "youtube_analysis",
   "macro_market",
+  "macro_history",
   "technical_analysis",
 ];
 
@@ -21,6 +22,7 @@ export const AGENT_NAMES: Record<string, string> = {
   company_news: "Company News",
   youtube_analysis: "Analyst Videos",
   macro_market: "Macro & Market",
+  macro_history: "Macro History",
   technical_analysis: "Technical (Price)",
   manager: "Manager (Synthesis)",
 };
@@ -31,6 +33,7 @@ export const AGENT_ICONS: Record<string, string> = {
   company_news: "📰",
   youtube_analysis: "▶️",
   macro_market: "🌐",
+  macro_history: "🏛️",
   technical_analysis: "📈",
   manager: "🧭",
 };

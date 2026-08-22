@@ -950,9 +950,19 @@ body {
 .sec-quarter-select {
   flex: 0 0 auto;
   width: auto;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-left: 10px;
+  /* Reserve room for the native dropdown arrow so it never overlaps the label. */
+  padding-right: 26px;
   text-align: left;
+  text-align-last: left;
+}
+
+/* Explicit min-width so the full quarter label (e.g. "Q1") is always visible.
+   Two-class specificity (0,2,0) is required to beat `.sec-range-group .sec-input
+   { min-width: 0 }` above — the select carries both classes, and the generic
+   rule otherwise collapsed its content box until only "Q" fit before the arrow. */
+.sec-range-group .sec-quarter-select {
+  min-width: 6rem;
 }
 
 .sec-range-dash {
