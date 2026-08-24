@@ -39,7 +39,12 @@ export const AGENT_ICONS: Record<string, string> = {
 };
 
 /** Map a bullish/bearish/neutral stance to a tone class suffix. */
-export function stanceTone(stance: string): "positive" | "negative" | "neutral" {
+export function stanceTone(stance: string | number): "positive" | "negative" | "neutral" {
+  if (typeof stance === "number") {
+    if (stance <= 40) return "negative";
+    if (stance >= 61) return "positive";
+    return "neutral";
+  }
   const s = (stance || "").toLowerCase();
   if (s.includes("bull")) return "positive";
   if (s.includes("bear")) return "negative";
@@ -49,4 +54,16 @@ export function stanceTone(stance: string): "positive" | "negative" | "neutral" 
 /** Map a manager recommendation to a tone class suffix. */
 export function recommendationTone(rec: string): "positive" | "negative" | "neutral" {
   return stanceTone(rec);
+}
+
+/** Format a stance score into a human-readable label. */
+export function formatStance(stance: string | number): string {
+  if (typeof stance === "number") {
+    if (stance <= 20) return `Strong Bearish (${stance})`;
+    if (stance <= 40) return `Bearish (${stance})`;
+    if (stance <= 60) return `Neutral (${stance})`;
+    if (stance <= 80) return `Bullish (${stance})`;
+    return `Strong Bullish (${stance})`;
+  }
+  return stance;
 }

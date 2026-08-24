@@ -94,13 +94,13 @@ You output ONLY a single JSON object matching this structure:
       ],
       "business_substance": {
         "key_developments": [
-          {"area": "<segment/business area>", "detail": "<substantive development with numbers cited on the call>", "significance": "high|medium|low"}
+          {"area": "<segment/business area>", "detail": "<substantive development, MUST include exact numbers/metrics cited on the call>", "significance": "high|medium|low"}
         ],
         "strategic_shifts": ["<stated change in strategy or priorities>"]
       },
       "forward_guidance": {
         "direction": "raised|maintained|lowered|initiated|withdrawn|not_provided",
-        "detail": "<what was guided and to what numbers>"
+        "detail": "<what was guided and to what EXACT numbers>"
       }
     }
   ],
@@ -160,6 +160,7 @@ Q&A ANALYSIS:
   the note.
 
 RULES:
+- STRICT QUANTITATIVE RULE: Do not use vague summaries like "growth was strong". You MUST embed exact numbers, guidance targets, percentages, and dollar amounts explicitly in `detail`, `note`, and `promise`/`outcome` strings.
 - Ground EVERY claim in the transcript text provided. Never use outside knowledge
   about the company's results, and never invent figures.
 - Only quarters present in the data may appear in `quarters_analyzed`.

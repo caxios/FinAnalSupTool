@@ -8,7 +8,7 @@
  */
 
 import type { DebateTranscript } from "../types";
-import { AGENT_NAMES, stanceTone } from "./agentMeta";
+import { AGENT_NAMES, stanceTone, formatStance } from "./agentMeta";
 
 export default function DebateLog({ debate }: { debate: DebateTranscript | null }) {
   if (!debate || debate.history.length === 0) {
@@ -34,7 +34,7 @@ export default function DebateLog({ debate }: { debate: DebateTranscript | null 
                 {AGENT_NAMES[turn.agent_id] ?? turn.agent_id}
               </span>
               <span className={`stance-tag stance-${stanceTone(turn.stance)}`}>
-                {turn.stance}
+                {formatStance(turn.stance)}
               </span>
             </div>
             <p className="debate-argument">{turn.argument}</p>

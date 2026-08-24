@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 class AgentArgument(BaseModel):
     """One agent's contribution to one debate turn."""
     agent_id: str = Field(..., description="Speaking agent's id")
-    stance: Literal["bullish", "bearish", "neutral"] = Field(
-        ..., description="The agent's current stance on the investment case"
+    stance: int | str = Field(
+        ..., description="The agent's current stance (0-100 score, or legacy string)"
     )
     argument: str = Field(
         ..., description="The agent's contribution — reacts to prior turns"
@@ -65,6 +65,7 @@ class DebateTranscript(BaseModel):
 # =============================================================================
 
 # Speaking order for every debate round. Fundamentals lead, momentum closes.
+# The order is inteded(by my personal view), since technical/macro might have an impact on fundamentals.
 DEBATE_ORDER: list[str] = [
     "sec_filings",
     "earnings_call",
@@ -99,9 +100,9 @@ def display_name(agent_id: str) -> str:
 # transcript (~80K chars) sent on every one of its turns is pure waste — the
 # agent has already distilled its report, and this slice is only to let it quote
 # specifics. 30K chars keeps prepared remarks + Q&A within reach.
-_RAW_CAP = 30_000
-_DEFAULT_ROUNDS = 2
-_TURN_MAX_TOKENS = 2048
+_RAW_CAP = 30_000 # context length cap per agent
+_DEFAULT_ROUNDS = 3
+_TURN_MAX_TOKENS = 4096 # max output token for each agent for each debate round
 
 
 # =============================================================================
@@ -148,14 +149,21 @@ forward. Specifically:
 - Stay strictly within your domain and your data. Do NOT invent figures, and do
   NOT speak to evidence you were not given. If your data cannot address a point,
   say so plainly instead of guessing.
-- Take a clear `stance` (bullish / bearish / neutral) that reflects what YOUR
-  evidence supports — do not soften it just to seem agreeable.
+- STRICT QUANTITATIVE RULE: Never make vague claims. You MUST embed exact numbers (dollar amounts, percentages, multiples) directly in your `argument` string, drawing from your raw data.
+- Take a clear `stance` as a numeric score from 0 to 100 representing your conviction.
+  Interpretation guide:
+  - 0 to 20: Strong Bearish
+  - 21 to 40: Bearish
+  - 41 to 60: Neutral
+  - 61 to 80: Bullish
+  - 81 to 100: Strong Bullish
+  Reflect what YOUR evidence supports — do not soften it just to seem agreeable.
 
 Output ONLY a single JSON object:
 {{
   "agent_id": "{agent_id}",
-  "stance": "bullish|bearish|neutral",
-  "argument": "<3-6 sentences: your reaction + your point, citing specifics>",
+  "stance": <integer between 0 and 100>,
+  "argument": "<3-6 sentences: your reaction + your point. STRICT RULE: You MUST embed exact numbers/metrics directly in this text>",
   "cited_evidence": ["<exact number/quote from YOUR raw data>", "..."]
 }}
 
@@ -223,12 +231,29 @@ def build_debate_prompt(
 # Consensus detection
 # =============================================================================
 
+def _get_stance_bucket(stance: int | str) -> str:
+    """Map a 0-100 score or legacy string to a standardized 5-tier bucket."""
+    if isinstance(stance, str):
+        s = stance.lower()
+        if "strong" in s and "bull" in s: return "strong bullish"
+        if "bull" in s: return "bullish"
+        if "strong" in s and "bear" in s: return "strong bearish"
+        if "bear" in s: return "bearish"
+        return "neutral"
+    
+    # It's a number
+    if stance <= 20: return "strong bearish"
+    if stance <= 40: return "bearish"
+    if stance <= 60: return "neutral"
+    if stance <= 80: return "bullish"
+    return "strong bullish"
+
 def _detect_consensus(transcript: DebateTranscript, participants: int) -> bool:
     """
     Consensus = the LAST round's stances broadly agree.
 
     We look only at the final round (the debate's settled state) and call it a
-    consensus when a single stance holds at least two-thirds of that round's
+    consensus when a single stance bucket holds at least two-thirds of that round's
     speakers. A two-sided final round is explicitly NOT consensus.
     """
     if participants <= 0 or not transcript.history:
@@ -238,7 +263,8 @@ def _detect_consensus(transcript: DebateTranscript, participants: int) -> bool:
         return False
     counts: dict[str, int] = {}
     for arg in final_round:
-        counts[arg.stance] = counts.get(arg.stance, 0) + 1
+        bucket = _get_stance_bucket(arg.stance)
+        counts[bucket] = counts.get(bucket, 0) + 1
     top = max(counts.values())
     return top / len(final_round) >= 2 / 3
 

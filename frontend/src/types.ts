@@ -256,7 +256,7 @@ export interface ThreeAxisScores {
 /** One agent's contribution to the sequential debate. */
 export interface DebateArgument {
   agent_id: string;
-  stance: "bullish" | "bearish" | "neutral" | string;
+  stance: number | string;
   argument: string;
   cited_evidence: string[];
 }

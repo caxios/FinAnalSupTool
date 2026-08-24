@@ -43,8 +43,8 @@ You output ONLY a single JSON object matching this structure:
   "conviction": "high|medium|low",
   "overall_score": <int 0-100>,
   "executive_summary": "<2-4 sentence bottom line for a decision-maker>",
-  "bull_case": ["<strongest point FOR, attributed to the evidence>", ...],
-  "bear_case": ["<strongest point AGAINST, attributed to the evidence>", ...],
+  "bull_case": ["<strongest point FOR, MUST include concrete numbers/figures from evidence (e.g., '$10B revenue', '+15% margin')>", ...],
+  "bear_case": ["<strongest point AGAINST, MUST include concrete numbers/figures from evidence>", ...],
   "key_debates": [
     {"topic": "<contested point>",
      "positions_summary": "<the opposing views, briefly>",
@@ -52,7 +52,7 @@ You output ONLY a single JSON object matching this structure:
      "resolution": "<your call on this point>"}
   ],
   "consensus_points": ["<where analysts independently agreed>", ...],
-  "key_risks": ["<what would most threaten the thesis>", ...],
+  "key_risks": ["<what would most threaten the thesis, MUST cite specific values (e.g., 'High cash burn of $500M in Q3')>", ...],
   "recommended_actions": ["<concrete next step or metric to monitor>", ...],
   "agents_considered": ["<agent ids whose reports you used>", ...]
 }
@@ -78,6 +78,7 @@ HOW TO WEIGH:
   agreement → high; a close call or thin/conflicting inputs → low.
 
 RULES:
+- STRICT QUANTITATIVE RULE: Never write vague, qualitative claims if numbers are available. E.g., DO NOT write "High cash burn". Instead, YOU MUST write "High cash burn ($500M operating loss in Q3, leaving only $200M in cash)". Include percentages, dollar amounts, multiples, etc. in `key_risks`, `bull_case`, and `bear_case`.
 - Base every statement on the reports and the transcript. Never introduce facts
   or numbers that do not appear there.
 - If an evidence domain is missing (an agent produced no report), acknowledge the
