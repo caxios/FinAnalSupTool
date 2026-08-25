@@ -14,6 +14,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { ChatMessage } from "../types";
 import { askChat } from "../api";
+import { useDashboard } from "../context/DashboardContext";
 import { AGENT_ORDER, AGENT_NAMES } from "./agentMeta";
 
 interface ChatPanelProps {
@@ -95,6 +96,7 @@ function renderMarkdown(text: string): React.ReactNode[] {
 }
 
 export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
+  const { activeTicker } = useDashboard();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -114,6 +116,14 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     setMessages([]);
     setError(null);
   }
+
+  // Switching companies swaps the grounding data, so start a fresh
+  // conversation — otherwise earlier answers about the previous company would
+  // read as if they were about this one.
+  useEffect(() => {
+    setMessages([]);
+    setError(null);
+  }, [activeTicker]);
 
   // Auto-scroll to the newest message.
   useEffect(() => {
@@ -139,7 +149,8 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       const res = await askChat(
         q,
         history,
-        selectedAgent === "general" ? undefined : selectedAgent
+        selectedAgent === "general" ? undefined : selectedAgent,
+        activeTicker
       );
       setMessages([...nextMessages, { role: "assistant", content: res.answer }]);
     } catch (err) {
@@ -167,7 +178,9 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const personaName =
     selectedAgent === "manager" ? "Manager" : AGENT_NAMES[selectedAgent] ?? "agent";
   const emptyLead = isGeneral
-    ? "Ask about the financials, ratios, or filing text of your uploaded filings."
+    ? activeTicker
+      ? `Ask about ${activeTicker}'s financials, ratios, or filing text.`
+      : "Select a company in the header to ask about its filings, or ask about macro/market data."
     : selectedAgent === "manager"
     ? "Chat with the Manager about the synthesized verdict and how the debate resolved. Run a Deep Analysis first."
     : `Chat with the ${personaName} agent — scoped to its own data and the debate transcript. Run a Deep Analysis first.`;

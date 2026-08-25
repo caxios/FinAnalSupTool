@@ -42,18 +42,18 @@ router = APIRouter(tags=["analysis"])
 
 @router.post("/analyze")
 async def run_analysis(
-    request: AnalyzeRequest = AnalyzeRequest(),
+    request: AnalyzeRequest,
     store: DocumentStore = Depends(get_document_store),
     debate_store: DebateStore = Depends(get_debate_store),
 ):
     """
-    Run the full three-phase MAS pipeline and return the final report.
+    Run the full three-phase MAS pipeline for ONE company and return the report.
 
     Phase 1 (six agents, rate-limited) → Phase 2 (sequential debate) → Phase 3
     (manager synthesis + 3-axis gap scoring). The run is saved to history. For
     live per-phase progress on the ~60-120s pipeline, use POST /analyze/stream.
     """
-    analyze_preconditions(store)
+    analyze_preconditions(store, request.ticker)
     final: dict = {}
     async for event in analyze_pipeline(request, store, debate_store):
         if event.get("status") == "complete":
@@ -67,7 +67,7 @@ async def run_analysis(
 
 @router.post("/analyze/stream")
 async def run_analysis_stream(
-    request: AnalyzeRequest = AnalyzeRequest(),
+    request: AnalyzeRequest,
     store: DocumentStore = Depends(get_document_store),
     debate_store: DebateStore = Depends(get_debate_store),
 ):
@@ -77,7 +77,7 @@ async def run_analysis_stream(
     debate and synthesis phases, then a final `complete` event carrying the full
     report. Each SSE line is `data: {json}`.
     """
-    analyze_preconditions(store)
+    analyze_preconditions(store, request.ticker)
 
     async def event_generator():
         try:

@@ -30,9 +30,15 @@ interface VideoListProps {
   data: VideoResponse | null;
   loading: boolean;
   error: string | null;
+  /**
+   * Company these videos belong to, so a fetched transcript is cached under it
+   * for the assistant. Omit on the macro view — those videos belong to no
+   * single company.
+   */
+  ticker?: string | null;
 }
 
-function VideoCard({ video }: { video: Video }) {
+function VideoCard({ video, ticker }: { video: Video; ticker?: string | null }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
@@ -48,7 +54,7 @@ function VideoCard({ video }: { video: Video }) {
     setLoading(true);
     setErr(null);
     try {
-      setTranscript(await getTranscript(video.video_id));
+      setTranscript(await getTranscript(video.video_id, ticker));
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load transcript.");
     } finally {
@@ -114,7 +120,7 @@ function VideoCard({ video }: { video: Video }) {
   );
 }
 
-export default function VideoList({ data, loading, error }: VideoListProps) {
+export default function VideoList({ data, loading, error, ticker }: VideoListProps) {
   const videos = data?.videos ?? [];
   // 10 videos per page; reset to page 1 when the fetched set changes.
   const pager = usePagination(videos, 10, videos[0]?.video_id ?? videos.length);
@@ -143,7 +149,7 @@ export default function VideoList({ data, loading, error }: VideoListProps) {
     <>
       <div className="video-grid">
         {pager.pageItems.map((v) => (
-          <VideoCard key={v.video_id} video={v} />
+          <VideoCard key={v.video_id} video={v} ticker={ticker} />
         ))}
       </div>
       <Pagination

@@ -7,9 +7,13 @@ The conversational assistant:
 
 Two modes, selected by the request's ``agent_id``:
   - general (default) → the cross-view assistant, grounded in the merged
-    financials, filing text, and any media/macro data fetched this session.
-  - a field agent id or 'manager' → an ISOLATED persona built from the last
-    /analyze run (data-isolation rules enforced in ``_agent_chat_persona``).
+    financials, filing text, and media fetched for the requested company (plus
+    the shared macro data).
+  - a field agent id or 'manager' → an ISOLATED persona built from that
+    company's last /analyze run (rules enforced in ``_agent_chat_persona``).
+
+Both modes are scoped by the request's ``ticker``, so a session holding several
+companies never mixes one company's evidence into another's answer.
 """
 
 from __future__ import annotations
@@ -90,22 +94,25 @@ Ground rules:
 === END TRANSCRIPT ==="""
 
 
-def _agent_chat_persona(agent_id: str, debate_store: DebateStore) -> str:
+def _agent_chat_persona(
+    agent_id: str, debate_store: DebateStore, ticker: str
+) -> str:
     """
-    Build the ISOLATED system prompt for a single-agent chat from the last
-    /analyze run. Enforces the data-isolation rules: a field agent sees only its
-    own raw data + report + the debate transcript; the Manager sees all reports +
-    the transcript but no raw data.
+    Build the ISOLATED system prompt for a single-agent chat from that COMPANY's
+    last /analyze run. Enforces the data-isolation rules: a field agent sees only
+    its own raw data + report + the debate transcript; the Manager sees all
+    reports + the transcript but no raw data.
 
     Raises HTTPException with a helpful message when the persona can't be served
-    (no analysis yet, agent didn't report, or unknown id).
+    (no analysis yet for this company, agent didn't report, or unknown id).
     """
-    debate = debate_store.data
+    debate = debate_store.get(ticker)
     if not debate:
         raise HTTPException(
             status_code=409,
-            detail="No analysis has been run yet. Run POST /analyze first, then "
-                   "you can chat with an individual agent.",
+            detail=f"No analysis has been run for '{ticker}' yet. Run POST "
+                   f"/analyze for it first, then you can chat with an "
+                   f"individual agent.",
         )
 
     transcript = debate.get("transcript")
@@ -156,16 +163,19 @@ async def chat(
     debate_store: DebateStore = Depends(get_debate_store),
 ):
     """
-    Answer a natural-language question about the uploaded filings using Gemini.
+    Answer a natural-language question about ONE company's filings using Gemini.
 
-    The general assistant is grounded strictly in the app's own data — the merged
-    financial statements + ratios, the extracted filing text, and any media/macro
-    data fetched this session. The full context is re-assembled on each call, so
-    freshly uploaded filings are always in scope.
+    The general assistant is grounded strictly in the app's own data for
+    ``request.ticker`` — that company's merged financial statements + ratios,
+    its extracted filing text, and its media — plus the shared macro data. The
+    context is re-assembled on each call, so freshly uploaded filings are always
+    in scope. Omitting the ticker gives a macro-only conversation.
     """
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    ticker = (request.ticker or "").strip().upper() or None
 
     # Fail fast with a clear message if the key isn't configured.
     if not gemini_api_key():
@@ -183,7 +193,14 @@ async def chat(
     # assistant below.
     agent_id = (request.agent_id or "").strip().lower()
     if agent_id and agent_id != "general":
-        system_prompt = _agent_chat_persona(agent_id, debate_store)  # raises if unavailable
+        if not ticker:
+            raise HTTPException(
+                status_code=400,
+                detail="A ticker is required to chat with an agent persona: it "
+                       "selects which company's analysis run to talk about.",
+            )
+        # raises if unavailable
+        system_prompt = _agent_chat_persona(agent_id, debate_store, ticker)
         history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
             answer = await ask_persona(question, history, system_prompt)
@@ -191,36 +208,45 @@ async def chat(
             raise HTTPException(status_code=502, detail=str(e))
         return ChatResponse(answer=answer)
 
-    # Assemble the grounding context from the current in-memory data, including
-    # any media/macro data the user has fetched (so the AI sees all views).
-    media_context = media_service.build_media_context(cache)
+    # Assemble the grounding context from this company's in-memory data, plus the
+    # media/macro data fetched for it (so the AI sees all views for ONE company).
+    media_context = media_service.build_media_context(cache, ticker)
+
+    # Only the named company's filings are in scope. Without a ticker the
+    # assistant is macro-only (no filing data at all).
+    # Look up without creating: an unknown ticker must not register an empty
+    # store, it just means there's no filing data to ground the answer in.
+    company = (
+        store.get_company_store(ticker)
+        if ticker and store.has_company(ticker) else None
+    )
+    merged_tables = company.merged_tables if company else {}
+    text_store = company.text_store if company else {}
+    filing_meta = company.filing_meta if company else {}
 
     # Filing text is included in full — UNLESS it's too large for the window, in
     # which case we chunk every section and retrieve only the passages relevant
     # to THIS question (so no MD&A / Risk Factors detail is lost to a static cap).
-    ordered_periods = list(store.filing_meta.keys())
-    ticker = next(
-        (m.get("ticker") for m in store.filing_meta.values() if m.get("ticker")), None
-    )
     filing_text_override = None
-    try:
-        filing_text_override = await sec_rag.prepare_context(
-            store.text_store, ordered_periods,
-            queries=[question],
-            ticker=ticker, run_id="chat",
-        )
-    except Exception:  # noqa: BLE001 — best-effort; fall back to full text
-        filing_text_override = None
+    if text_store:
+        try:
+            filing_text_override = await sec_rag.prepare_context(
+                text_store, list(filing_meta.keys()),
+                queries=[question],
+                ticker=ticker, run_id="chat",
+            )
+        except Exception:  # noqa: BLE001 — best-effort; fall back to full text
+            filing_text_override = None
 
     context = build_context(
-        store.merged_tables, store.text_store, store.filing_meta,
+        merged_tables, text_store, filing_meta,
         extra_context=media_context,
         filing_text_override=filing_text_override,
     )
 
     # Short-circuit only when there's truly nothing to talk about — no filings
     # AND no media/macro data has been fetched (the Macro view needs no upload).
-    if not store.filing_meta and not media_context.strip():
+    if not filing_meta and not media_context.strip():
         return ChatResponse(
             answer="No data yet. Upload SEC 10-K / 10-Q PDFs on the Dashboard, "
                    "or open the Company Media / Macro Sentiment views to pull in "

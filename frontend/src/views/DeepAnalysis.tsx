@@ -110,8 +110,10 @@ function signalChipClass(tone: string | null | undefined): string {
 }
 
 export default function DeepAnalysis() {
-  const { company, periods } = useDashboard();
-  const ticker = company?.ticker ?? null;
+  const { company, periods, activeTicker } = useDashboard();
+  // The header's selection is authoritative — a company store can exist before
+  // its identity resolves from XBRL, and the pipeline is keyed on this ticker.
+  const ticker = activeTicker ?? company?.ticker ?? null;
 
   const [startDate, setStartDate] = useState(isoDaysAgo(365));
   const [endDate, setEndDate] = useState(isoDaysAgo(0));
@@ -140,11 +142,19 @@ export default function DeepAnalysis() {
     loadHistory();
   }, [loadHistory]);
 
+  // Switching companies must not leave the previous company's report on screen.
+  useEffect(() => {
+    setResult(null);
+    setViewingPast(null);
+    setError(null);
+    setProgress(IDLE_PROGRESS);
+  }, [ticker]);
+
   // Cancel any in-flight stream on unmount.
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const handleRun = useCallback(async () => {
-    if (running) return;
+    if (running || !ticker) return;
     setError(null);
     setViewingPast(null);
     setResult(null);
@@ -179,7 +189,9 @@ export default function DeepAnalysis() {
     };
 
     try {
-      const res = await runAnalysisStream(startDate, endDate, onEvent, controller.signal);
+      const res = await runAnalysisStream(
+        ticker, startDate, endDate, onEvent, controller.signal
+      );
       setResult(res);
       setProgress((prev) => ({ ...prev, phase: "done" }));
       loadHistory();
@@ -192,7 +204,7 @@ export default function DeepAnalysis() {
       setRunning(false);
       abortRef.current = null;
     }
-  }, [running, startDate, endDate, loadHistory]);
+  }, [running, ticker, startDate, endDate, loadHistory]);
 
   const openPastRun = useCallback(async (runId: string) => {
     setError(null);
@@ -228,7 +240,10 @@ export default function DeepAnalysis() {
       }
     : null;
 
+  // Can't analyze without a company selected, or with no filings for it.
+  const noCompany = !ticker;
   const noFilings = periods.length === 0;
+  const cannotRun = noCompany || noFilings;
 
   return (
     <div className="view-scroll deep-analysis">
@@ -268,12 +283,17 @@ export default function DeepAnalysis() {
               <button
                 className="run-btn"
                 onClick={handleRun}
-                disabled={running || noFilings}
+                disabled={running || cannotRun}
               >
                 {running ? "Running…" : "Run Analysis"}
               </button>
             </div>
-            {noFilings ? (
+            {noCompany ? (
+              <p className="setup-note warn">
+                Please select a company to analyze — use the switcher in the
+                header, or upload a 10-K / 10-Q on the Dashboard.
+              </p>
+            ) : noFilings ? (
               <p className="setup-note warn">
                 Upload a 10-K / 10-Q on the Dashboard first — the analysis is
                 anchored to the filed company.
@@ -287,7 +307,10 @@ export default function DeepAnalysis() {
                     minutes.
                   </>
                 ) : (
-                  "The pipeline takes ~1–2 minutes."
+                  <>
+                    Analyzing <strong>{ticker}</strong> · the pipeline takes ~1–2
+                    minutes.
+                  </>
                 )}
               </p>
             )}

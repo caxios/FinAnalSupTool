@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from schemas import SecFetchRequest, SecFetchResponse, ResolvedFiling, FilingMeta
 from services import sec_fetch
-from services.ingestion import ingest_pdf
+from services.ingestion import ingest_pdf, staging_path
 from services.storage import DocumentStore, get_document_store
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,7 @@ async def fetch_and_ingest(
 
     filings: list[FilingMeta] = []
     resolved: list[ResolvedFiling] = []
+    affected_tickers: set[str] = set()
     rate_limited = False
 
     # ── Step 2: render + ingest each period sequentially ──
@@ -129,8 +130,9 @@ async def fetch_and_ingest(
             ))
             continue
 
-        # Persist beside uploads, then run the shared ingestion pipeline.
-        dest = store.upload_dir / fetched.filename
+        # Stage the PDF, then run the shared ingestion pipeline (which routes it
+        # into the resolved company's store).
+        dest = staging_path(fetched.filename)
         try:
             dest.write_bytes(fetched.pdf_bytes)
             meta = await ingest_pdf(dest, fetched.filename, store)
@@ -146,6 +148,8 @@ async def fetch_and_ingest(
             continue
 
         filings.append(meta)
+        if meta.ticker:
+            affected_tickers.add(meta.ticker)
         resolved.append(ResolvedFiling(
             ticker=fetched.ticker,
             form_type=fetched.form_type,
@@ -155,8 +159,9 @@ async def fetch_and_ingest(
             document_url=fetched.document_url,
         ))
 
-    # ── Step 3: refresh the merged-tables cache once (as /upload does) ──
-    store.rebuild_merged_tables()
+    # ── Step 3: refresh the merged-tables cache once per company touched ──
+    for tk in affected_tickers:
+        store.get_company_store(tk).rebuild_merged_tables()
 
     succeeded = sum(1 for f in filings if f.status in ("success", "partial"))
     logger.info(

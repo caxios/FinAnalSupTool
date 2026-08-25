@@ -32,9 +32,11 @@ type ViewMode = "pdf" | "text";
 interface LowerPaneProps {
   /** Available filing periods (from GET /periods) */
   periods: PeriodInfo[];
+  /** Company whose filings to show; null when none is selected */
+  ticker: string | null;
 }
 
-export default function LowerPane({ periods }: LowerPaneProps) {
+export default function LowerPane({ periods, ticker }: LowerPaneProps) {
   // Currently selected period key (e.g., "2023-10K")
   const [selectedPeriod, setSelectedPeriod] = useState<string>("");
   // Currently selected section tab
@@ -48,33 +50,38 @@ export default function LowerPane({ periods }: LowerPaneProps) {
   // Error message
   const [error, setError] = useState<string | null>(null);
 
-  // Auto-select the first period when periods list changes
-  // (e.g., after initial load or after a new upload)
+  // Keep the selected period valid for the CURRENT company. Switching companies
+  // swaps the whole period list, so a period key held over from the previous one
+  // would request a filing this company doesn't have.
   useEffect(() => {
-    if (periods.length > 0 && !selectedPeriod) {
+    if (periods.length === 0) {
+      if (selectedPeriod) setSelectedPeriod("");
+      return;
+    }
+    if (!periods.some((p) => p.period_key === selectedPeriod)) {
       setSelectedPeriod(periods[0].period_key);
     }
   }, [periods, selectedPeriod]);
 
-  // Build the PDF iframe URL — recalculates when period or section changes
+  // Build the PDF iframe URL — recalculates when company, period, or section changes
   const pdfUrl = useMemo(() => {
-    if (!selectedPeriod) return "";
-    return getFilingPdfUrl(selectedPeriod, activeSection);
-  }, [selectedPeriod, activeSection]);
+    if (!ticker || !selectedPeriod) return "";
+    return getFilingPdfUrl(ticker, selectedPeriod, activeSection);
+  }, [ticker, selectedPeriod, activeSection]);
 
-  // Fetch text data when in text mode and period/section changes
+  // Fetch text data when in text mode and company/period/section changes
   useEffect(() => {
     // Only fetch text when in text mode
-    if (viewMode !== "text" || !selectedPeriod) return;
+    if (viewMode !== "text" || !selectedPeriod || !ticker) return;
 
     let cancelled = false;
 
-    async function fetchText() {
+    async function fetchText(tk: string) {
       setLoading(true);
       setError(null);
 
       try {
-        const result = await getFilingText(selectedPeriod, activeSection);
+        const result = await getFilingText(tk, selectedPeriod, activeSection);
         if (!cancelled) {
           setTextData(result);
         }
@@ -88,9 +95,9 @@ export default function LowerPane({ periods }: LowerPaneProps) {
       }
     }
 
-    fetchText();
+    fetchText(ticker);
     return () => { cancelled = true; };
-  }, [selectedPeriod, activeSection, viewMode]);
+  }, [ticker, selectedPeriod, activeSection, viewMode]);
 
   return (
     <div className="pane lower-pane">
@@ -152,10 +159,12 @@ export default function LowerPane({ periods }: LowerPaneProps) {
 
       {/* Content area */}
       <div className="pane-body">
-        {/* No periods uploaded yet */}
+        {/* No company selected, or none of its filings loaded yet */}
         {periods.length === 0 && (
           <div className="pane-status pane-empty">
-            Upload SEC filing PDFs to see content here.
+            {ticker
+              ? "Upload SEC filing PDFs to see content here."
+              : "Select a company to view its filing text."}
           </div>
         )}
 

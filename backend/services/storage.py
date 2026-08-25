@@ -13,6 +13,14 @@ globals. Wrapping the state in small classes and injecting them via
 so swapping these for a real database (PostgreSQL/Redis) later is a matter of
 re-implementing these classes and their providers — no endpoint changes.
 
+Per-company isolation
+─────────────────────
+State is isolated per company (ticker) instead of sharing one global namespace.
+A :class:`CompanyStore` owns everything extracted for a single company; the
+:class:`DocumentStore` is now a thin *registry* of those per-ticker stores.
+:class:`DebateStore` and :class:`MediaCache` are likewise keyed by ticker, so two
+companies analyzed in the same session never bleed into each other's context.
+
 Everything here is still in-memory and process-local: restarting the server
 clears all data, exactly as before.
 """
@@ -32,19 +40,24 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# DocumentStore — everything extracted from uploaded filings
+# CompanyStore — everything extracted from ONE company's uploaded filings
 # =============================================================================
 
-class DocumentStore:
+class CompanyStore:
     """
-    Holds all per-period data extracted from uploaded SEC filings, keyed by a
-    unique ``period_key`` (e.g. "FY2025", "Aug 2025", or an XBRL fiscal label).
+    Holds all per-period data extracted from a single company's SEC filings,
+    keyed by a unique ``period_key`` (e.g. "FY2025", "Aug 2025", or an XBRL
+    fiscal label).
 
-    Also owns the temp directory the raw PDFs are saved to, so section pages can
-    be re-extracted on demand by GET /filing-pdf.
+    Also owns the temp directory that company's raw PDFs are saved to, so
+    section pages can be re-extracted on demand by GET /filing-pdf. Each company
+    gets its own temp directory (``prefix=f"finanalst_{ticker}_"``) so filenames
+    never collide across companies.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ticker: str) -> None:
+        self.ticker = ticker
+
         # Extracted text sections per period.
         # {"2023-10K": {"mda": "text...", "footnotes": "text...", ...}}
         self.text_store: dict[str, dict[str, str | None]] = {}
@@ -68,9 +81,12 @@ class DocumentStore:
         # {"2023-10K": [(page_num, char_start, char_end), ...]}
         self.page_map_store: dict[str, list[tuple[int, int, int]]] = {}
 
-        # Uploaded PDFs live here temporarily; cleaned up on shutdown.
-        self.upload_dir: Path = Path(tempfile.mkdtemp(prefix="finanalst_"))
-        logger.info(f"Upload temp directory: {self.upload_dir}")
+        # This company's uploaded PDFs live here; cleaned up on shutdown. The
+        # ticker is baked into the prefix so two companies can hold filings with
+        # the same filename without overwriting each other.
+        safe = "".join(c for c in ticker if c.isalnum()) or "NA"
+        self.upload_dir: Path = Path(tempfile.mkdtemp(prefix=f"finanalst_{safe}_"))
+        logger.info(f"[{ticker}] Upload temp directory: {self.upload_dir}")
 
     # ── period-key derivation ────────────────────────────────────────────
     @staticmethod
@@ -139,53 +155,134 @@ class DocumentStore:
             merged[key] = self.order_period_columns(merged[key])
         self.merged_tables = merged
         logger.info(
-            f"Rebuilt merged tables for {len(self.table_store)} period(s), "
-            f"ratios for {len(self.metrics_store)} period(s)"
+            f"[{self.ticker}] Rebuilt merged tables for {len(self.table_store)} "
+            f"period(s), ratios for {len(self.metrics_store)} period(s)"
         )
 
 
 # =============================================================================
-# MediaCache — most recent media/macro data fetched by Views 2 & 3
+# DocumentStore — registry of per-company CompanyStores
 # =============================================================================
+
+class DocumentStore:
+    """
+    A registry that isolates each company's extracted filing data in its own
+    :class:`CompanyStore`, keyed by ticker.
+
+    The routers no longer read filing data straight off this object; they ask for
+    the relevant company's store via :meth:`get_company_store` and work with that.
+    """
+
+    def __init__(self) -> None:
+        self.companies: dict[str, CompanyStore] = {}
+
+    @staticmethod
+    def _normalize(ticker: str) -> str:
+        """Canonical registry key for a ticker (upper-cased, trimmed)."""
+        return (ticker or "").strip().upper()
+
+    def get_company_store(self, ticker: str) -> CompanyStore:
+        """
+        Return the :class:`CompanyStore` for ``ticker``, creating (and
+        registering) a fresh one on first access.
+        """
+        key = self._normalize(ticker)
+        store = self.companies.get(key)
+        if store is None:
+            store = CompanyStore(key)
+            self.companies[key] = store
+            logger.info(f"Registered new company store for '{key}'")
+        return store
+
+    def has_company(self, ticker: str) -> bool:
+        """
+        Whether ``ticker`` already has a store — WITHOUT creating one.
+
+        Routers use this to 404 on an unknown ticker instead of silently
+        registering an empty store for a typo'd symbol.
+        """
+        return self._normalize(ticker) in self.companies
+
+    def list_tickers(self) -> list[str]:
+        """All tickers with a registered store (sorted for stable output)."""
+        return sorted(self.companies.keys())
+
+
+# =============================================================================
+# MediaCache — most recent media/macro data fetched by Views 2 & 3, per company
+# =============================================================================
+
+# Reserved cache key for data that belongs to NO single company: the macro view's
+# news, videos, and market sentiment. Not a real ticker, so it can never collide
+# with one.
+MACRO_SCOPE = "__MACRO__"
+
 
 class MediaCache:
     """
     Caches the most recent media/macro data (news, videos, sentiment,
     transcripts) so the AI assistant's context can reference it — this is what
-    lets the assistant "see" all views. Cleared on restart.
+    lets the assistant "see" all views. Keyed by ticker so each company keeps its
+    own media; cleared on restart.
 
-    ``data`` keys: "company_news", "company_videos", "macro_news",
-    "macro_videos", "sentiment"; plus "transcripts" (video_id → {text}).
+    Per-company entries hold "company_news", "company_videos", and "transcripts"
+    (video_id → {text}). Market-wide data ("macro_news", "macro_videos",
+    "sentiment") is stored once under :data:`MACRO_SCOPE`, since it isn't tied to
+    any one company.
     """
 
     def __init__(self) -> None:
-        self.data: dict = {"transcripts": {}}
+        self.data: dict[str, dict] = {}
 
-    @property
-    def transcripts(self) -> dict:
-        return self.data["transcripts"]
+    @staticmethod
+    def _normalize(ticker: str) -> str:
+        return (ticker or "").strip().upper()
+
+    def get(self, ticker: str) -> dict:
+        """
+        Return the per-ticker media dict, creating an empty one (with an empty
+        ``transcripts`` map) on first access.
+        """
+        key = self._normalize(ticker)
+        entry = self.data.get(key)
+        if entry is None:
+            entry = {"transcripts": {}}
+            self.data[key] = entry
+        return entry
+
+    def transcripts(self, ticker: str) -> dict:
+        """The per-ticker transcripts map (video_id → {"text": ...})."""
+        return self.get(ticker)["transcripts"]
 
 
 # =============================================================================
-# DebateStore — the most recent /analyze run (for role-based chat)
+# DebateStore — the most recent /analyze run per company (for role-based chat)
 # =============================================================================
 
 class DebateStore:
     """
-    Holds the most recent /analyze run so the role-based chat can talk to a
-    single agent (or the Manager) in isolation. Overwritten on each /analyze.
+    Holds the most recent /analyze run PER COMPANY so the role-based chat can
+    talk to a single agent (or the Manager) in isolation. A new run for a ticker
+    overwrites only that ticker's record.
 
-    ``data`` keys: "reports", "agent_contexts", "transcript", "manager",
-    "period", "company".
+    Each per-ticker payload's keys: "reports", "agent_contexts", "transcript",
+    "manager", "period", "company".
     """
 
     def __init__(self) -> None:
-        self.data: dict = {}
+        self.data: dict[str, dict] = {}
 
-    def replace(self, payload: dict) -> None:
-        """Atomically swap in a fresh run's data (clears the previous run)."""
-        self.data.clear()
-        self.data.update(payload)
+    @staticmethod
+    def _normalize(ticker: str) -> str:
+        return (ticker or "").strip().upper()
+
+    def replace(self, ticker: str, payload: dict) -> None:
+        """Atomically swap in a fresh run's data for one ticker."""
+        self.data[self._normalize(ticker)] = payload
+
+    def get(self, ticker: str) -> dict:
+        """This ticker's most recent run, or an empty dict if none yet."""
+        return self.data.get(self._normalize(ticker), {})
 
 
 # =============================================================================

@@ -14,7 +14,7 @@ import LowerPane from "../components/LowerPane";
 import { useDashboard } from "../context/DashboardContext";
 
 export default function FilingDashboard() {
-  const { periods, refreshKey } = useDashboard();
+  const { periods, refreshKey, activeTicker } = useDashboard();
 
   // Percentage of vertical space given to the upper pane (drag to resize).
   const [splitRatio, setSplitRatio] = useState(50);
@@ -52,7 +52,7 @@ export default function FilingDashboard() {
       className={`split-container ${isDragging ? "split-dragging" : ""}`}
     >
       <div style={{ height: `${splitRatio}%` }}>
-        <UpperPane refreshKey={refreshKey} />
+        <UpperPane refreshKey={refreshKey} ticker={activeTicker} />
       </div>
 
       <div className="split-handle" onMouseDown={handleMouseDown}>
@@ -60,7 +60,7 @@ export default function FilingDashboard() {
       </div>
 
       <div style={{ height: `${100 - splitRatio}%` }}>
-        <LowerPane periods={periods} />
+        <LowerPane periods={periods} ticker={activeTicker} />
       </div>
     </div>
   );

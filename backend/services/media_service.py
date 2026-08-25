@@ -9,12 +9,21 @@ across all views. Only includes what the user has actually fetched this session.
 from __future__ import annotations
 
 from schemas import NewsResponse, VideoResponse, SentimentResponse
-from services.storage import MediaCache
+from services.storage import MACRO_SCOPE, MediaCache
 
 
-def build_media_context(cache: MediaCache) -> str:
-    """Render the cached media/macro data as a Markdown block for the assistant."""
-    data = cache.data
+def build_media_context(cache: MediaCache, ticker: str | None = None) -> str:
+    """
+    Render the cached media/macro data as a Markdown block for the assistant.
+
+    Company data comes from ``ticker``'s cache entry only — so one company's news
+    and transcripts never leak into another's answer. Market-wide macro data is
+    shared and always included. Pass ``ticker=None`` for a macro-only context.
+    """
+    company_data = cache.get(ticker) if ticker else {}
+    macro_data = cache.get(MACRO_SCOPE)
+    # Company keys win; macro keys fill in the market-wide sections.
+    data = {**macro_data, **company_data}
     parts: list[str] = []
 
     cn: NewsResponse | None = data.get("company_news")

@@ -66,9 +66,11 @@ function downloadCsv(data: FinancialTableResponse): void {
 interface UpperPaneProps {
   /** Incremented after upload to trigger data refresh */
   refreshKey: number;
+  /** Company whose financials to show; null when none is selected */
+  ticker: string | null;
 }
 
-export default function UpperPane({ refreshKey }: UpperPaneProps) {
+export default function UpperPane({ refreshKey, ticker }: UpperPaneProps) {
   // Currently selected tab
   const [activeTab, setActiveTab] = useState("balance_sheet");
   // Financial table data from the backend
@@ -78,16 +80,24 @@ export default function UpperPane({ refreshKey }: UpperPaneProps) {
   // Error message if fetch fails
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch financial data whenever the active tab or refreshKey changes
+  // Fetch financial data whenever the company, active tab, or refreshKey changes
   useEffect(() => {
     let cancelled = false;  // Prevent state updates after unmount
 
-    async function fetchData() {
+    // No company selected — clear rather than showing the previous one's data.
+    if (!ticker) {
+      setData(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    async function fetchData(tk: string) {
       setLoading(true);
       setError(null);
 
       try {
-        const result = await getFinancials(activeTab);
+        const result = await getFinancials(tk, activeTab);
         if (!cancelled) {
           setData(result);
         }
@@ -101,11 +111,11 @@ export default function UpperPane({ refreshKey }: UpperPaneProps) {
       }
     }
 
-    fetchData();
+    fetchData(ticker);
 
     // Cleanup: cancel if component unmounts or deps change before fetch completes
     return () => { cancelled = true; };
-  }, [activeTab, refreshKey]);
+  }, [ticker, activeTab, refreshKey]);
 
   return (
     <div className="pane upper-pane">
@@ -179,7 +189,9 @@ export default function UpperPane({ refreshKey }: UpperPaneProps) {
         {/* Empty state — no data and no error */}
         {!loading && !error && (!data || data.rows.length === 0) && (
           <div className="pane-status pane-empty">
-            Upload SEC filing PDFs to see financial data here.
+            {ticker
+              ? "Upload SEC filing PDFs to see financial data here."
+              : "Select a company to view its financial data."}
           </div>
         )}
       </div>

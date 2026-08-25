@@ -83,10 +83,30 @@ def analysis_window(request: AnalyzeRequest | None = None) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
-def analyze_preconditions(doc_store: DocumentStore) -> None:
-    """Guardrails shared by the sync and streaming analyze endpoints."""
-    if not doc_store.filing_meta:
-        raise HTTPException(status_code=404, detail="No filings uploaded yet.")
+def analyze_preconditions(doc_store: DocumentStore, ticker: str) -> None:
+    """
+    Guardrails shared by the sync and streaming analyze endpoints.
+
+    Verifies the requested company actually has filings ingested — analyzing a
+    ticker the user never uploaded would otherwise run six agents over an empty
+    store and produce a confidently empty report.
+    """
+    if not ticker or not ticker.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="A ticker is required: it selects which company to analyze.",
+        )
+    if not doc_store.has_company(ticker):
+        available = doc_store.list_tickers()
+        raise HTTPException(
+            status_code=404,
+            detail=f"No filings uploaded for '{ticker}'. "
+                   f"Available: {available or '(none)'}.",
+        )
+    if not doc_store.get_company_store(ticker).filing_meta:
+        raise HTTPException(
+            status_code=404, detail=f"No filings uploaded yet for '{ticker}'."
+        )
     if not gemini_api_key():
         raise HTTPException(
             status_code=503,
@@ -103,14 +123,24 @@ async def analyze_pipeline(
     """
     The full three-phase MAS pipeline, as an async GENERATOR of progress events.
 
+    Reads ONLY ``request.ticker``'s company store, so a session holding several
+    companies analyzes exactly the one asked for.
+
     The last event is ``{"status": "complete", "result": <full payload>}``.
     """
     start_date, end_date = analysis_window(request)
     # Unique id for this run — scopes the earnings RAG index so runs don't mix.
     analysis_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
-    primary = company_service.primary_company(doc_store)
-    ticker = primary.ticker if primary else None
+    # The request names WHICH company to analyze; everything below reads from
+    # that company's isolated store, so no other company's filings are in scope.
+    requested_ticker = request.ticker.strip().upper()
+    company_store = doc_store.get_company_store(requested_ticker)
+
+    primary = company_service.primary_company(company_store)
+    # Prefer the ticker resolved from the filings themselves; fall back to the
+    # requested one (e.g. filings ingested without a CIK match).
+    ticker = (primary.ticker if primary and primary.ticker else requested_ticker)
     company_name = primary.name if primary else None
     # Every agent except the SEC one works from the company identity; the shared
     # payload keeps their contexts identical.
@@ -137,9 +167,9 @@ async def analyze_pipeline(
     planned: list[tuple[str, object]] = [
         ("sec_filings", SECFilingsAgent().analyze(
             {
-                "merged_tables": doc_store.merged_tables,
-                "text_store": doc_store.text_store,
-                "filing_meta": doc_store.filing_meta,
+                "merged_tables": company_store.merged_tables,
+                "text_store": company_store.text_store,
+                "filing_meta": company_store.filing_meta,
                 # For scoping the filing-text RAG index/retrieval to this run.
                 "ticker": ticker,
                 "run_id": analysis_id,
@@ -272,8 +302,9 @@ async def analyze_pipeline(
         if hasattr(manager_result, "model_dump") else manager_result
     )
 
-    # Persist for the role-based chat (overwrites any previous run).
-    debate_store.replace({
+    # Persist for the role-based chat (overwrites this company's previous run
+    # only — other companies' runs stay intact).
+    debate_store.replace(ticker, {
         "reports": reports,
         "agent_contexts": agent_contexts,
         "transcript": transcript,
@@ -294,6 +325,7 @@ async def analyze_pipeline(
 
     result = {
         "run_id": run_id,
+        "ticker": ticker,
         "analysis_period": f"{start_date}..{end_date}",
         "company": primary.model_dump() if primary else None,
         "agents_total": total,

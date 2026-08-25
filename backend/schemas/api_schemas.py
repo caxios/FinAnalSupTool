@@ -50,6 +50,14 @@ class FilingMeta(BaseModel):
         description="Detected form type: '10-K' or '10-Q'",
     )
 
+    # Ticker the filing was routed to (its company's isolated store). None when
+    # the company couldn't be resolved (the filing lands in the 'UNKNOWN' store)
+    # or when ingestion failed before routing.
+    ticker: str | None = Field(
+        None,
+        description="Ticker of the company store this filing was routed to",
+    )
+
     # Processing outcome: "success" (tables + text), "partial" (only one),
     # or "failed" (neither)
     status: str = Field(
@@ -294,6 +302,14 @@ class ChatRequest(BaseModel):
     """
 
     question: str = Field(description="The user's current question")
+    ticker: str | None = Field(
+        None,
+        description=(
+            "Company to ground the answer in. Its filings + media are the ONLY "
+            "company data the assistant sees. Omit for a macro-only conversation "
+            "(no company data in scope); required to chat with an agent persona."
+        ),
+    )
     history: list[ChatMessage] = Field(
         default_factory=list,
         description="Prior conversation turns (oldest first), excluding the current question",
@@ -414,11 +430,18 @@ class AnalyzeRequest(BaseModel):
     window, which quarters' earnings transcripts are pulled, the news search
     windows, and the video publish window.
 
-    Both fields are optional; omitting them (or posting no body at all) falls
-    back to a trailing 18-month window, which is long enough for a reliable
-    SMA200 and several quarters of transcripts.
+    ``ticker`` selects WHICH company is analyzed — each company's filings live in
+    an isolated store, so the pipeline must be told which one to read.
+
+    The date fields are optional; omitting them falls back to a trailing
+    18-month window, which is long enough for a reliable SMA200 and several
+    quarters of transcripts.
     """
 
+    ticker: str = Field(
+        description="Ticker of the company to analyze, e.g. 'AAPL'. Must have "
+                    "filings ingested for it.",
+    )
     start_date: str | None = Field(
         None, description="Analysis period start, YYYY-MM-DD (e.g. '2025-01-01')"
     )

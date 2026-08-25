@@ -122,39 +122,49 @@ export async function fetchSecFiling(
 }
 
 /**
- * Fetch merged financial table data for a specific statement type.
+ * Fetch merged financial table data for one company and statement type.
  *
+ * @param ticker        - Company whose filings to read, e.g. "AAPL"
  * @param statementType - One of: "balance_sheet", "income_statement", "cash_flow"
  */
 export async function getFinancials(
+  ticker: string,
   statementType: string
 ): Promise<FinancialTableResponse> {
   return fetchJson<FinancialTableResponse>(
-    `${API_BASE}/financials?statement_type=${encodeURIComponent(statementType)}`
+    `${API_BASE}/financials?ticker=${encodeURIComponent(ticker)}` +
+      `&statement_type=${encodeURIComponent(statementType)}`
   );
 }
 
 /**
- * Fetch extracted text for a specific section of a specific filing period.
+ * Fetch extracted text for a specific section of one company's filing period.
  *
+ * @param ticker  - Company whose filings to read, e.g. "AAPL"
  * @param period  - Filing period key, e.g., "2023-10K"
  * @param section - Section key: "mda", "footnotes", "supplementary", etc.
  */
 export async function getFilingText(
+  ticker: string,
   period: string,
   section: string
 ): Promise<FilingTextResponse> {
   return fetchJson<FilingTextResponse>(
-    `${API_BASE}/filing-text?period=${encodeURIComponent(period)}&section=${encodeURIComponent(section)}`
+    `${API_BASE}/filing-text?ticker=${encodeURIComponent(ticker)}` +
+      `&period=${encodeURIComponent(period)}&section=${encodeURIComponent(section)}`
   );
 }
 
 /**
- * Fetch the list of all uploaded filing periods.
+ * Fetch one company's uploaded filing periods.
  * Used to populate the period dropdown in the Lower Pane.
+ *
+ * @param ticker - Company to list periods for, e.g. "AAPL"
  */
-export async function getPeriods(): Promise<PeriodsResponse> {
-  return fetchJson<PeriodsResponse>(`${API_BASE}/periods`);
+export async function getPeriods(ticker: string): Promise<PeriodsResponse> {
+  return fetchJson<PeriodsResponse>(
+    `${API_BASE}/periods?ticker=${encodeURIComponent(ticker)}`
+  );
 }
 
 /**
@@ -163,11 +173,19 @@ export async function getPeriods(): Promise<PeriodsResponse> {
  * This returns a URL string (not a fetch call) because the frontend
  * loads it directly in an <iframe src="...">.
  *
+ * @param ticker  - Company whose filing to read, e.g. "AAPL"
  * @param period  - Filing period key, e.g., "2023-10K"
  * @param section - Section key: "mda", "footnotes", etc.
  */
-export function getFilingPdfUrl(period: string, section: string): string {
-  return `${API_BASE}/filing-pdf?period=${encodeURIComponent(period)}&section=${encodeURIComponent(section)}`;
+export function getFilingPdfUrl(
+  ticker: string,
+  period: string,
+  section: string
+): string {
+  return (
+    `${API_BASE}/filing-pdf?ticker=${encodeURIComponent(ticker)}` +
+    `&period=${encodeURIComponent(period)}&section=${encodeURIComponent(section)}`
+  );
 }
 
 /**
@@ -181,16 +199,25 @@ export function getFilingPdfUrl(period: string, section: string): string {
  *                    general cross-view assistant. Field agents see only their own
  *                    data + the debate transcript; the manager sees all reports +
  *                    the transcript.
+ * @param ticker   - Company to ground the answer in. Its filings + media are the
+ *                    only company data in scope. Required for agent personas;
+ *                    omit for a macro-only conversation.
  */
 export async function askChat(
   question: string,
   history: ChatMessage[],
-  agentId?: string
+  agentId?: string,
+  ticker?: string | null
 ): Promise<ChatResponse> {
   return fetchJson<ChatResponse>(`${API_BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, history, agent_id: agentId }),
+    body: JSON.stringify({
+      question,
+      history,
+      agent_id: agentId,
+      ticker: ticker ?? undefined,
+    }),
   });
 }
 
@@ -198,9 +225,20 @@ export async function askChat(
 // Company / Media / Macro
 // =============================================================================
 
-/** The company/companies derived from uploaded filings. */
-export async function getCompany(): Promise<CompanyResponse> {
-  return fetchJson<CompanyResponse>(`${API_BASE}/company`);
+/**
+ * EVERY company with ingested filings, across all per-company stores.
+ * Backs the header's company switcher — each entry's `ticker` is the key the
+ * ticker-scoped endpoints expect.
+ */
+export async function getCompanies(): Promise<CompanyResponse> {
+  return fetchJson<CompanyResponse>(`${API_BASE}/companies`);
+}
+
+/** The company derived from ONE ticker's uploaded filings. */
+export async function getCompany(ticker: string): Promise<CompanyResponse> {
+  return fetchJson<CompanyResponse>(
+    `${API_BASE}/company?ticker=${encodeURIComponent(ticker)}`
+  );
 }
 
 /**
@@ -222,9 +260,20 @@ function rangeQuery(range?: NewsRange, maxResults?: number): string {
   return qs ? `?${qs}` : "";
 }
 
-/** Company-specific news feed (View 2). Up to 30 articles within `range`. */
-export async function getCompanyNews(range?: NewsRange): Promise<NewsResponse> {
-  return fetchJson<NewsResponse>(`${API_BASE}/media/news${rangeQuery(range, 30)}`);
+/** Prefix a ticker onto a range query string built by `rangeQuery`. */
+function withTicker(qs: string, ticker: string): string {
+  const t = `ticker=${encodeURIComponent(ticker)}`;
+  return qs ? `?${t}&${qs.slice(1)}` : `?${t}`;
+}
+
+/** One company's news feed (View 2). Up to 30 articles within `range`. */
+export async function getCompanyNews(
+  ticker: string,
+  range?: NewsRange
+): Promise<NewsResponse> {
+  return fetchJson<NewsResponse>(
+    `${API_BASE}/media/news${withTicker(rangeQuery(range, 30), ticker)}`
+  );
 }
 
 /** Append a channel_id filter to an existing query string. */
@@ -234,30 +283,43 @@ function withChannel(qs: string, channelId?: string): string {
   return `${qs}${sep}channel_id=${encodeURIComponent(channelId)}`;
 }
 
-/** Company analysis videos (View 2), filtered to `range` and optional channel. */
+/** One company's analysis videos (View 2), filtered to `range` and channel. */
 export async function getCompanyVideos(
+  ticker: string,
   range?: NewsRange,
   channelId?: string
 ): Promise<VideoResponse> {
   return fetchJson<VideoResponse>(
-    `${API_BASE}/media/videos${withChannel(rangeQuery(range, 50), channelId)}`
+    `${API_BASE}/media/videos` +
+      withChannel(withTicker(rangeQuery(range, 50), ticker), channelId)
   );
 }
 
-/** Fetch a YouTube video's full transcript (captions permitting). */
-export async function getTranscript(videoId: string): Promise<TranscriptResponse> {
+/**
+ * Fetch a YouTube video's full transcript (captions permitting).
+ *
+ * `ticker` scopes the cached excerpt to that company so the assistant doesn't
+ * see another company's videos; omit it for a macro video.
+ */
+export async function getTranscript(
+  videoId: string,
+  ticker?: string | null
+): Promise<TranscriptResponse> {
+  const t = ticker ? `&ticker=${encodeURIComponent(ticker)}` : "";
   return fetchJson<TranscriptResponse>(
-    `${API_BASE}/media/transcript?video_id=${encodeURIComponent(videoId)}`
+    `${API_BASE}/media/transcript?video_id=${encodeURIComponent(videoId)}${t}`
   );
 }
 
-/** Best-effort earnings material for a fiscal quarter (View 2). */
+/** Best-effort earnings material for one company and fiscal quarter (View 2). */
 export async function getEarnings(
+  ticker: string,
   year: number,
   quarter: number
 ): Promise<EarningsResponse> {
   return fetchJson<EarningsResponse>(
-    `${API_BASE}/media/earnings?year=${year}&quarter=${quarter}`
+    `${API_BASE}/media/earnings?ticker=${encodeURIComponent(ticker)}` +
+      `&year=${year}&quarter=${quarter}`
   );
 }
 
@@ -331,30 +393,36 @@ export async function getMarketSentiment(): Promise<SentimentResponse> {
 // =============================================================================
 
 interface AnalyzeBody {
+  ticker: string;
   start_date?: string;
   end_date?: string;
 }
 
-function analyzeBody(startDate?: string, endDate?: string): AnalyzeBody {
-  const body: AnalyzeBody = {};
+function analyzeBody(
+  ticker: string,
+  startDate?: string,
+  endDate?: string
+): AnalyzeBody {
+  const body: AnalyzeBody = { ticker };
   if (startDate) body.start_date = startDate;
   if (endDate) body.end_date = endDate;
   return body;
 }
 
 /**
- * Run the full MAS pipeline (non-streaming). Returns the final report once the
- * whole ~60-120s pipeline completes. Prefer `runAnalysisStream` for live
- * per-agent progress.
+ * Run the full MAS pipeline for one company (non-streaming). Returns the final
+ * report once the whole ~60-120s pipeline completes. Prefer `runAnalysisStream`
+ * for live per-agent progress.
  */
 export async function runAnalysis(
+  ticker: string,
   startDate?: string,
   endDate?: string
 ): Promise<AnalyzeResult> {
   return fetchJson<AnalyzeResult>(`${API_BASE}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(analyzeBody(startDate, endDate)),
+    body: JSON.stringify(analyzeBody(ticker, startDate, endDate)),
   });
 }
 
@@ -367,6 +435,7 @@ export async function runAnalysis(
  * stream reports an error. Pass an `AbortSignal` to cancel the request.
  */
 export async function runAnalysisStream(
+  ticker: string,
   startDate: string | undefined,
   endDate: string | undefined,
   onEvent: (event: AnalyzeProgressEvent) => void,
@@ -375,7 +444,7 @@ export async function runAnalysisStream(
   const response = await fetch(`${API_BASE}/analyze/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(analyzeBody(startDate, endDate)),
+    body: JSON.stringify(analyzeBody(ticker, startDate, endDate)),
     signal,
   });
 

@@ -36,6 +36,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import document, analysis, chat, media, sec
+from services import ingestion
 from services.storage import get_document_store
 
 
@@ -98,10 +99,15 @@ app.include_router(sec.router)
 @app.on_event("shutdown")
 async def cleanup():
     """
-    Remove the temporary upload directory when the server shuts down.
+    Remove the temporary upload directories when the server shuts down.
     This prevents leftover PDF files from accumulating on disk.
+
+    Each company has its own temp dir (see ``CompanyStore``), plus one shared
+    ingestion staging dir — clean up all of them.
     """
-    upload_dir = get_document_store().upload_dir
-    if upload_dir.exists():
-        shutil.rmtree(upload_dir, ignore_errors=True)
-        logger.info(f"Cleaned up temp dir: {upload_dir}")
+    dirs = [cs.upload_dir for cs in get_document_store().companies.values()]
+    dirs.append(ingestion.STAGING_DIR)
+    for d in dirs:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+            logger.info(f"Cleaned up temp dir: {d}")

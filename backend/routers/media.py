@@ -37,6 +37,8 @@ from providers import news_provider, youtube_provider
 import channel_store
 from market_sentiment import compute_market_sentiment
 from services.storage import (
+    MACRO_SCOPE,
+    CompanyStore,
     DocumentStore,
     MediaCache,
     get_document_store,
@@ -45,6 +47,18 @@ from services.storage import (
 from services import company_service
 
 router = APIRouter(tags=["media"])
+
+
+def _company_or_404(store: DocumentStore, ticker: str) -> CompanyStore:
+    """Resolve a ticker to its store, or 404 listing what IS available."""
+    if not store.has_company(ticker):
+        available = store.list_tickers()
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data for ticker '{ticker}'. "
+                   f"Available: {available or '(none — upload filings first)'}.",
+        )
+    return store.get_company_store(ticker)
 
 
 # =============================================================================
@@ -147,13 +161,27 @@ def _valid_scope(scope: str) -> str:
 
 
 # =============================================================================
-# GET /company
+# GET /companies  &  GET /company
 # =============================================================================
 
+@router.get("/companies", response_model=CompanyResponse)
+async def get_companies(store: DocumentStore = Depends(get_document_store)):
+    """
+    Every company with ingested filings, across all per-ticker stores.
+
+    This is what the frontend's company switcher is built from — each entry's
+    `ticker` is the key to pass to the ticker-scoped endpoints.
+    """
+    return company_service.list_companies(store)
+
+
 @router.get("/company", response_model=CompanyResponse)
-async def get_company(store: DocumentStore = Depends(get_document_store)):
-    """Return the company/companies derived from the uploaded filings."""
-    return company_service.derive_companies(store)
+async def get_company(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
+    store: DocumentStore = Depends(get_document_store),
+):
+    """Return the company derived from ONE ticker's uploaded filings."""
+    return company_service.derive_companies(_company_or_404(store, ticker))
 
 
 # =============================================================================
@@ -162,6 +190,7 @@ async def get_company(store: DocumentStore = Depends(get_document_store)):
 
 @router.get("/media/news", response_model=NewsResponse)
 async def media_news(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
     start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
     end: str | None = Query(None, description="Custom range end, YYYY-MM-DD"),
@@ -169,13 +198,13 @@ async def media_news(
     store: DocumentStore = Depends(get_document_store),
     cache: MediaCache = Depends(get_media_cache),
 ):
-    """Recent news for the uploaded company (Tavily, finance domains)."""
-    primary = company_service.primary_company(store)
+    """Recent news for one uploaded company (Tavily, finance domains)."""
+    primary = company_service.primary_company(_company_or_404(store, ticker))
     if primary is None or not (primary.name or primary.ticker):
         return NewsResponse(
             configured=bool(news_provider.tavily_api_key()),
             scope="company",
-            message="No company detected yet. Upload a 10-K/10-Q first.",
+            message=f"No company identity resolved for '{ticker}'.",
         )
     result = await news_provider.search_company_news(
         primary.name or primary.ticker or "", primary.ticker,
@@ -185,7 +214,7 @@ async def media_news(
         configured=result.configured, scope="company", company=primary,
         articles=_news_models(result.articles), message=result.message,
     )
-    cache.data["company_news"] = resp
+    cache.get(ticker)["company_news"] = resp
     return resp
 
 
@@ -195,6 +224,7 @@ async def media_news(
 
 @router.get("/media/videos", response_model=VideoResponse)
 async def media_videos(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     channel_id: str | None = Query(None, description="Saved channel id, or omit/'all'"),
     days: int | None = Query(None, description="Look-back window in days (preset ranges)"),
     start: str | None = Query(None, description="Custom range start, YYYY-MM-DD"),
@@ -204,18 +234,18 @@ async def media_videos(
     cache: MediaCache = Depends(get_media_cache),
 ):
     """
-    YouTube analysis videos for the uploaded company.
+    YouTube analysis videos for one uploaded company.
 
     - `channel_id` set → videos from that channel matching the company.
     - omitted / "all" → merged across saved channels (company-filtered); if no
       channels are saved, falls back to a keyword search by company name.
     """
-    primary = company_service.primary_company(store)
+    primary = company_service.primary_company(_company_or_404(store, ticker))
     if primary is None or not (primary.name or primary.ticker):
         return VideoResponse(
             configured=bool(youtube_provider.youtube_api_key()),
             scope="company",
-            message="No company detected yet. Upload a 10-K/10-Q first.",
+            message=f"No company identity resolved for '{ticker}'.",
         )
     label = primary.name or primary.ticker or ""
     after, before = _video_time_bounds(days, start, end)
@@ -239,7 +269,7 @@ async def media_videos(
         configured=result.configured, scope="company",
         videos=_video_models(result.videos), message=result.message,
     )
-    cache.data["company_videos"] = resp
+    cache.get(ticker)["company_videos"] = resp
     return resp
 
 
@@ -250,6 +280,9 @@ async def media_videos(
 @router.get("/media/transcript", response_model=TranscriptResponse)
 async def media_transcript(
     video_id: str = Query(..., description="YouTube video id"),
+    ticker: str | None = Query(
+        None, description="Company this video belongs to; omit for a macro video"
+    ),
     cache: MediaCache = Depends(get_media_cache),
 ):
     """Fetch a video's full transcript (no key needed; captions permitting)."""
@@ -259,8 +292,9 @@ async def media_transcript(
             available=False, video_id=video_id, message=tr.message
         )
 
-    # Cache a slice of the transcript text so the AI assistant can reference it.
-    cache.transcripts[video_id] = {"text": tr.text[:4000]}
+    # Cache a slice of the transcript text so the AI assistant can reference it,
+    # scoped to the company it belongs to (or the shared macro scope).
+    cache.transcripts(ticker or MACRO_SCOPE)[video_id] = {"text": tr.text[:4000]}
     return TranscriptResponse(
         available=True, video_id=video_id, text=tr.text,
         language=tr.language, summary=None,
@@ -341,24 +375,25 @@ async def rename_channel(
 
 @router.get("/media/earnings", response_model=EarningsResponse)
 async def media_earnings(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     year: int = Query(..., description="Calendar/fiscal year, e.g. 2026"),
     quarter: int = Query(..., ge=1, le=4, description="Quarter 1-4"),
     store: DocumentStore = Depends(get_document_store),
     cache: MediaCache = Depends(get_media_cache),
 ):
     """
-    Earnings-call transcript for a chosen quarter (e.g. 2026 Q1).
+    Earnings-call transcript for one company and quarter (e.g. 2026 Q1).
 
     Fetches the full transcript from investing.com first, falling back to
     Motley Fool (fool.com) if investing.com has none. Returns a graceful
     not-found / not-configured payload otherwise.
     """
-    primary = company_service.primary_company(store)
+    primary = company_service.primary_company(_company_or_404(store, ticker))
     if primary is None or not (primary.name or primary.ticker):
         return EarningsResponse(
             configured=bool(news_provider.tavily_api_key()),
             year=year, quarter=quarter,
-            message="No company detected yet. Upload a 10-K/10-Q first.",
+            message=f"No company identity resolved for '{ticker}'.",
         )
 
     doc = await news_provider.search_earnings_transcript(
@@ -372,7 +407,9 @@ async def media_earnings(
     )
     # Cache a slice so the AI assistant can reference the latest earnings call.
     if doc.found and doc.text:
-        cache.transcripts[f"earnings-{year}Q{quarter}"] = {"text": doc.text[:4000]}
+        cache.transcripts(ticker)[f"earnings-{year}Q{quarter}"] = {
+            "text": doc.text[:4000]
+        }
     return resp
 
 
@@ -396,7 +433,7 @@ async def macro_news(
         configured=result.configured, scope="macro",
         articles=_news_models(result.articles), message=result.message,
     )
-    cache.data["macro_news"] = resp
+    cache.get(MACRO_SCOPE)["macro_news"] = resp
     return resp
 
 
@@ -441,7 +478,7 @@ async def macro_videos(
         configured=result.configured, scope="macro",
         videos=_video_models(result.videos), message=result.message,
     )
-    cache.data["macro_videos"] = resp
+    cache.get(MACRO_SCOPE)["macro_videos"] = resp
     return resp
 
 
@@ -461,5 +498,5 @@ async def macro_sentiment(cache: MediaCache = Depends(get_media_cache)):
         ],
         headline_count=r.headline_count, message=r.message,
     )
-    cache.data["sentiment"] = resp
+    cache.get(MACRO_SCOPE)["sentiment"] = resp
     return resp

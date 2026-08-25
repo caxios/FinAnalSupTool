@@ -70,30 +70,37 @@ function EarningsSection({
 }
 
 export default function CompanyMedia() {
-  const { company, refreshKey } = useDashboard();
+  const { company, refreshKey, activeTicker } = useDashboard();
 
   const [newsRange, setNewsRange] = useState<NewsRange>(defaultRange(30));
   const [videoRange, setVideoRange] = useState<NewsRange>(defaultRange(30));
   const [channel, setChannel] = useState("all");
   const [quarter, setQuarter] = useState<QuarterValue>(defaultQuarter());
 
-  const cik = company?.cik ?? null;
+  // Every fetch is keyed on activeTicker, so switching companies in the header
+  // re-runs them and no other company's media can linger on screen.
   const news = useAsync(
-    () => getCompanyNews(newsRange),
-    [cik, refreshKey, JSON.stringify(newsRange)]
+    () => (activeTicker ? getCompanyNews(activeTicker, newsRange) : Promise.resolve(null)),
+    [activeTicker, refreshKey, JSON.stringify(newsRange)]
   );
   const videos = useAsync(
-    () => getCompanyVideos(videoRange, channel),
-    [cik, refreshKey, JSON.stringify(videoRange), channel]
+    () =>
+      activeTicker
+        ? getCompanyVideos(activeTicker, videoRange, channel)
+        : Promise.resolve(null),
+    [activeTicker, refreshKey, JSON.stringify(videoRange), channel]
   );
   const earnings = useAsync(
-    () => getEarnings(quarter.year, quarter.quarter),
-    [cik, refreshKey, quarter.year, quarter.quarter]
+    () =>
+      activeTicker
+        ? getEarnings(activeTicker, quarter.year, quarter.quarter)
+        : Promise.resolve(null),
+    [activeTicker, refreshKey, quarter.year, quarter.quarter]
   );
 
   const companyLabel = company
     ? `${company.name ?? "Unknown company"}${company.ticker ? ` (${company.ticker})` : ""}`
-    : null;
+    : activeTicker;
 
   return (
     <div className="view-scroll">
@@ -108,15 +115,15 @@ export default function CompanyMedia() {
         )}
       </div>
 
-      {!company && (
+      {!activeTicker && (
         <MediaNotice
           icon="📄"
-          title="No company yet"
-          message="Upload an SEC filing on the Dashboard — the company is detected from it, then news, videos, and earnings appear here."
+          title="No company selected"
+          message="Upload an SEC filing on the Dashboard, then pick a company in the header — its news, videos, and earnings appear here."
         />
       )}
 
-      {company && (
+      {activeTicker && (
         <>
           <section className="view-section">
             <h2 className="section-title">📰 News</h2>
@@ -134,7 +141,12 @@ export default function CompanyMedia() {
               <DateRangeSelector value={videoRange} onChange={setVideoRange} />
               <ChannelBar scope="company" value={channel} onChange={setChannel} />
             </div>
-            <VideoList data={videos.data} loading={videos.loading} error={videos.error} />
+            <VideoList
+              data={videos.data}
+              loading={videos.loading}
+              error={videos.error}
+              ticker={activeTicker}
+            />
           </section>
 
           <section className="view-section">

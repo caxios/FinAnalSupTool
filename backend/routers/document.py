@@ -36,12 +36,29 @@ from parsers.pdf_utils import (
     SECTION_MAP_10K,
     SECTION_MAP_10Q,
 )
-from services.ingestion import ingest_pdf
-from services.storage import DocumentStore, get_document_store
+from services.ingestion import ingest_pdf, staging_path
+from services.storage import CompanyStore, DocumentStore, get_document_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["document"])
+
+
+def _company_or_404(store: DocumentStore, ticker: str) -> CompanyStore:
+    """
+    Resolve a ticker to its :class:`CompanyStore`, or 404 with what IS available.
+
+    Deliberately does not auto-create: a typo'd symbol must not register an empty
+    store and then look like a company with no data.
+    """
+    if not store.has_company(ticker):
+        available = store.list_tickers()
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data for ticker '{ticker}'. "
+                   f"Available: {available or '(none — upload filings first)'}.",
+        )
+    return store.get_company_store(ticker)
 
 
 # =============================================================================
@@ -67,13 +84,17 @@ async def upload_filings(
         UploadResponse with per-file metadata and processing status.
     """
     results: list[FilingMeta] = []
+    # Tickers touched this batch — each gets its merged-tables cache rebuilt once
+    # at the end (ingest_pdf routes each filing to its own company store).
+    affected_tickers: set[str] = set()
 
     for upload_file in files:
         filename = upload_file.filename or "unknown.pdf"
         logger.info(f"Processing upload: {filename}")
 
-        # ── Step 1: Save uploaded file to temp directory ──────
-        dest = store.upload_dir / filename
+        # ── Step 1: Stage the uploaded file; ingest_pdf relocates it into the
+        # resolved company's temp dir once the ticker is known. ──
+        dest = staging_path(filename)
         try:
             content = await upload_file.read()
             dest.write_bytes(content)
@@ -86,13 +107,17 @@ async def upload_filings(
             ))
             continue
 
-        # ── Steps 2-5: Extract tables + text and persist into the store. ──
+        # ── Steps 2-5: Extract tables + text and persist into the company store. ──
         # Shared with POST /sec/fetch so both entry points ingest identically.
-        results.append(await ingest_pdf(dest, filename, store))
+        meta = await ingest_pdf(dest, filename, store)
+        results.append(meta)
+        if meta.ticker:
+            affected_tickers.add(meta.ticker)
 
-    # After processing all files, rebuild the merged tables cache
-    # so GET /financials reflects the newly uploaded data
-    store.rebuild_merged_tables()
+    # Rebuild the merged tables cache for each company touched this batch, so
+    # GET /financials reflects the newly uploaded data.
+    for tk in affected_tickers:
+        store.get_company_store(tk).rebuild_merged_tables()
 
     return UploadResponse(total_files=len(results), filings=results)
 
@@ -103,6 +128,7 @@ async def upload_filings(
 
 @router.get("/financials", response_model=FinancialTableResponse)
 async def get_financials(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     statement_type: str = Query(
         "balance_sheet",
         description="One of: balance_sheet, income_statement, cash_flow, ratios",
@@ -110,11 +136,11 @@ async def get_financials(
     store: DocumentStore = Depends(get_document_store),
 ):
     """
-    Return the merged financial table for a given statement type.
+    Return one company's merged financial table for a given statement type.
 
-    The table merges the same statement type across all uploaded filing periods
-    using a pandas outer join. Columns represent filing periods; rows are line
-    items. "ratios" is a synthetic statement computed from raw XBRL metrics.
+    The table merges the same statement type across all of that company's filing
+    periods using a pandas outer join. Columns represent filing periods; rows are
+    line items. "ratios" is a synthetic statement computed from raw XBRL metrics.
     """
     # Validate the statement_type parameter
     valid_types = ["balance_sheet", "income_statement", "cash_flow", "ratios"]
@@ -125,27 +151,31 @@ async def get_financials(
                    f"Must be one of: {valid_types}",
         )
 
-    # Check if any data has been uploaded
-    if not store.merged_tables:
+    company = _company_or_404(store, ticker)
+
+    # Check if any data has been extracted for this company
+    if not company.merged_tables:
         raise HTTPException(
             status_code=404,
-            detail="No financial data available. Upload filing PDFs first via POST /upload.",
+            detail=f"No financial data available for {ticker}. "
+                   f"Upload filing PDFs first via POST /upload.",
         )
 
     # Get the merged DataFrame for this statement type
-    df = store.merged_tables.get(statement_type)
+    df = company.merged_tables.get(statement_type)
 
     if df is None or df.empty:
         if statement_type == "ratios":
             raise HTTPException(
                 status_code=404,
-                detail="No financial ratios available. Ratios are computed from "
-                       "SEC XBRL data, which was not available for the uploaded "
-                       "filings (the company could not be matched to an EDGAR CIK).",
+                detail=f"No financial ratios available for {ticker}. Ratios are "
+                       "computed from SEC XBRL data, which was not available for "
+                       "the uploaded filings (the company could not be matched to "
+                       "an EDGAR CIK).",
             )
         raise HTTPException(
             status_code=404,
-            detail=f"No '{statement_type}' tables were found in the uploaded filings. "
+            detail=f"No '{statement_type}' tables were found in {ticker}'s filings. "
                    f"The PDF may not contain recognizable "
                    f"{statement_type.replace('_', ' ')} tables.",
         )
@@ -167,6 +197,7 @@ async def get_financials(
 
 @router.get("/filing-text", response_model=FilingTextResponse)
 async def get_filing_text(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     period: str = Query(..., description="Filing period key, e.g. '2023-10K'"),
     section: str = Query(..., description="Section key: 'mda', 'footnotes', 'supplementary', 'risk_factors', 'business'"),
     store: DocumentStore = Depends(get_document_store),
@@ -177,17 +208,19 @@ async def get_filing_text(
     The frontend calls this when the user selects a period from the
     dropdown and a tab in the Lower Pane.
     """
-    # Check if the requested period exists in our data
-    if period not in store.text_store:
-        available = list(store.text_store.keys()) if store.text_store else []
+    company = _company_or_404(store, ticker)
+
+    # Check if the requested period exists in this company's data
+    if period not in company.text_store:
+        available = list(company.text_store.keys())
         raise HTTPException(
             status_code=404,
-            detail=f"Period '{period}' not found. "
+            detail=f"Period '{period}' not found for {ticker}. "
                    f"Available periods: {available}. "
                    f"Upload the corresponding filing PDF first via POST /upload.",
         )
 
-    sections = store.text_store[period]
+    sections = company.text_store[period]
 
     # Validate the section key
     valid_sections = list(SECTION_LABELS.keys())
@@ -203,7 +236,7 @@ async def get_filing_text(
     # If the section exists in the map but its content is None,
     # the regex didn't find it in the PDF
     if content is None:
-        meta = store.filing_meta.get(period, {})
+        meta = company.filing_meta.get(period, {})
         form_type = meta.get("form_type", "unknown")
 
         raise HTTPException(
@@ -229,18 +262,23 @@ async def get_filing_text(
 
 @router.get("/periods")
 async def list_periods(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     store: DocumentStore = Depends(get_document_store),
 ):
     """
-    List all uploaded filing periods and their metadata.
+    List one company's uploaded filing periods and their metadata.
 
     The frontend calls this on page load and after each upload to
     populate the period dropdown in the Lower Pane.
     """
-    if not store.filing_meta:
-        return {"periods": []}
+    # An unknown ticker here is an empty list rather than a 404: the frontend
+    # polls this while switching companies, before any filing has been ingested.
+    if not store.has_company(ticker):
+        return {"ticker": ticker, "periods": []}
 
+    company = store.get_company_store(ticker)
     return {
+        "ticker": ticker,
         "periods": [
             {
                 "period_key": key,
@@ -248,8 +286,8 @@ async def list_periods(
                 "period": meta.get("period"),
                 "filename": meta.get("filename"),
             }
-            for key, meta in store.filing_meta.items()
-        ]
+            for key, meta in company.filing_meta.items()
+        ],
     }
 
 
@@ -259,6 +297,7 @@ async def list_periods(
 
 @router.get("/filing-pdf")
 async def get_filing_pdf(
+    ticker: str = Query(..., description="Company ticker, e.g. 'AAPL'"),
     period: str = Query(..., description="Filing period key, e.g. '2023-10K'"),
     section: str = Query(..., description="Section key: 'mda', 'footnotes', etc."),
     store: DocumentStore = Depends(get_document_store),
@@ -270,12 +309,14 @@ async def get_filing_pdf(
     to PDF page numbers via the stored page-offset map, extracts those pages into
     a new mini-PDF, and streams it back for the frontend's iframe viewer.
     """
-    # Validate period exists
-    if period not in store.filing_meta:
-        available = list(store.filing_meta.keys()) if store.filing_meta else []
+    company = _company_or_404(store, ticker)
+
+    # Validate period exists for this company
+    if period not in company.filing_meta:
+        available = list(company.filing_meta.keys())
         raise HTTPException(
             status_code=404,
-            detail=f"Period '{period}' not found. Available: {available}",
+            detail=f"Period '{period}' not found for {ticker}. Available: {available}",
         )
 
     # Validate section key
@@ -287,18 +328,18 @@ async def get_filing_pdf(
         )
 
     # Check that we have page offset data for this period
-    if period not in store.page_map_store:
+    if period not in company.page_map_store:
         raise HTTPException(
             status_code=404,
             detail=f"No page map data for period '{period}'. Re-upload the filing.",
         )
 
     # Get the full text and page offsets
-    page_offsets = store.page_map_store[period]
-    meta = store.filing_meta[period]
+    page_offsets = company.page_map_store[period]
+    meta = company.filing_meta[period]
     form_type = meta.get("form_type", "10-K")
 
-    pdf_path = store.upload_dir / meta["filename"]
+    pdf_path = company.upload_dir / meta["filename"]
     if not pdf_path.exists():
         raise HTTPException(
             status_code=404,

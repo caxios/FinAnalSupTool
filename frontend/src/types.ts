@@ -17,6 +17,7 @@ export interface FilingMeta {
   filename: string;
   detected_period: string | null;  // e.g., "2023-10K"
   form_type: string | null;        // "10-K" or "10-Q"
+  ticker: string | null;           // Company store this filing was routed to
   status: "success" | "partial" | "failed";
   message: string | null;          // Human-readable status detail
 }
@@ -100,8 +101,9 @@ export interface PeriodInfo {
   filename: string | null;
 }
 
-/** Response from GET /periods. */
+/** Response from GET /periods — scoped to one company. */
 export interface PeriodsResponse {
+  ticker: string;
   periods: PeriodInfo[];
 }
 
