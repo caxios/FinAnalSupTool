@@ -11,6 +11,8 @@ Two modes, selected by the request's ``agent_id``:
     the shared macro data).
   - a field agent id or 'manager' → an ISOLATED persona built from that
     company's last /analyze run (rules enforced in ``_agent_chat_persona``).
+  - 'trading_coach' → the coach, grounded in the user's trading journal
+    rather than in a debate record (see ``_coach_chat_persona``).
 
 Both modes are scoped by the request's ``ticker``, so a session holding several
 companies never mixes one company's evidence into another's answer.
@@ -34,7 +36,7 @@ from services.storage import (
     get_media_cache,
     get_debate_store,
 )
-from services import media_service
+from services import media_service, journal_analysis
 
 router = APIRouter(tags=["chat"])
 
@@ -94,6 +96,69 @@ Ground rules:
 === END TRANSCRIPT ==="""
 
 
+
+_COACH_CHAT_TEMPLATE = """You are the user's Trading Coach. You do not pick stocks — you help this user
+see their own decision-making clearly, using their real trading journal.
+
+Ground rules:
+- NEVER invent a past trade. Every date you mention must appear in the journal
+  below. If the journal is empty, say so.
+- NEVER invent a number. Cite only what is in the data below.
+- If the behavioural summary says the history is insufficient, say the history is
+  too short to establish a pattern rather than generalizing from a few trades.
+- Be direct but not moralizing. A good decision deserves to be told it is good.
+- Be concise and use Markdown.
+
+=== THE USER'S TRADING JOURNAL (real logged trades + outcomes) ===
+{journal}
+=== END JOURNAL ===
+
+=== BEHAVIOURAL SUMMARY (computed) ===
+{patterns}
+=== END SUMMARY ===
+
+=== FUNDAMENTAL ANALYST REPORT (if a Deep Analysis was run) ===
+{fundamental}
+=== END FUNDAMENTAL ===
+
+=== TECHNICAL ANALYST REPORT (if a Deep Analysis was run) ===
+{technical}
+=== END TECHNICAL ==="""
+
+
+async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> str:
+    """
+    Build the coach persona.
+
+    Unlike every other persona this one is NOT built from a debate record — the
+    coach's subject is the user's journal, which exists whether or not any
+    analysis has been run. The company reports are folded in when available, so
+    "why did I sell?" can be answered against the fundamentals too.
+    """
+    journal = await journal_analysis.trade_outcomes(limit=25)
+    patterns = await journal_analysis.pattern_summary()
+
+    sec_report = technical_report = None
+    if ticker:
+        record = debate_store.get(ticker) or {}
+        reports = record.get("reports") or {}
+        sec_report = reports.get("sec_filings")
+        technical_report = reports.get("technical_analysis")
+
+    def dump(x):
+        return (json.dumps(x, ensure_ascii=False, indent=2, default=str)
+                if x else "(Not available — no Deep Analysis has been run.)")
+
+    return _COACH_CHAT_TEMPLATE.format(
+        journal=dump(journal) if journal else
+                "(The journal is EMPTY. The user has logged no trades; do not "
+                "cite any past trade.)",
+        patterns=dump(patterns),
+        fundamental=dump(sec_report),
+        technical=dump(technical_report),
+    )
+
+
 def _agent_chat_persona(
     agent_id: str, debate_store: DebateStore, ticker: str
 ) -> str:
@@ -130,7 +195,7 @@ def _agent_chat_persona(
             transcript=rendered,
         )
 
-    if agent_id in FIELD_AGENT_IDS or agent_id == "macro_history":
+    if agent_id in FIELD_AGENT_IDS or agent_id in ("macro_history", "quant_risk"):
         ctx = (debate.get("agent_contexts") or {}).get(agent_id)
         if not ctx:
             raise HTTPException(
@@ -150,8 +215,8 @@ def _agent_chat_persona(
     raise HTTPException(
         status_code=400,
         detail=f"Unknown agent_id '{agent_id}'. Use one of "
-               f"{sorted(FIELD_AGENT_IDS | {'macro_history'})}, 'manager', or omit it for the "
-               f"general assistant.",
+               f"{sorted(FIELD_AGENT_IDS | {'macro_history', 'quant_risk'})}, "
+               f"'manager', 'trading_coach', or omit it for the general assistant.",
     )
 
 
@@ -193,14 +258,20 @@ async def chat(
     # assistant below.
     agent_id = (request.agent_id or "").strip().lower()
     if agent_id and agent_id != "general":
-        if not ticker:
-            raise HTTPException(
-                status_code=400,
-                detail="A ticker is required to chat with an agent persona: it "
-                       "selects which company's analysis run to talk about.",
-            )
-        # raises if unavailable
-        system_prompt = _agent_chat_persona(agent_id, debate_store, ticker)
+        # The coach is the one persona that does NOT need a ticker or a prior
+        # analysis: its subject is the user's own journal, which exists from the
+        # first logged trade. A ticker just adds the company reports on top.
+        if agent_id == "trading_coach":
+            system_prompt = await _coach_chat_persona(debate_store, ticker)
+        else:
+            if not ticker:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A ticker is required to chat with an agent persona: "
+                           "it selects which company's analysis run to talk about.",
+                )
+            # raises if unavailable
+            system_prompt = _agent_chat_persona(agent_id, debate_store, ticker)
         history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
             answer = await ask_persona(question, history, system_prompt)

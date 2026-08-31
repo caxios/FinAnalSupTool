@@ -22,9 +22,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 
-from schemas import SecFetchRequest, SecFetchResponse, ResolvedFiling, FilingMeta
-from services import sec_fetch
-from services.ingestion import ingest_pdf, staging_path
+from schemas import SecFetchRequest, SecFetchResponse
+from services import sec_fetch, sec_ingest
 from services.storage import DocumentStore, get_document_store
 
 logger = logging.getLogger(__name__)
@@ -63,16 +62,18 @@ async def fetch_and_ingest(
     else:
         range_label = f"{req.start_year}–{req.end_year}"
 
-    # ── Step 1: plan the range (single metadata query, blocking → threadpool) ──
+    # The whole plan → render → ingest sequence lives in `services.sec_ingest`,
+    # shared with the portfolio's baseline auto-fetch. This router only maps the
+    # domain exceptions onto HTTP status codes.
     try:
-        planned = await run_in_threadpool(
-            sec_fetch.plan_filings,
-            req.ticker,
-            req.form_type,
-            req.start_year,
-            req.end_year,
-            req.start_quarter,
-            req.end_quarter,
+        result = await sec_ingest.fetch_and_ingest_range(
+            ticker=req.ticker,
+            form_type=req.form_type,
+            start_year=req.start_year,
+            end_year=req.end_year,
+            start_quarter=req.start_quarter,
+            end_quarter=req.end_quarter,
+            store=store,
         )
     except sec_fetch.InvalidRequest as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -85,95 +86,14 @@ async def fetch_and_ingest(
 
     logger.info(
         f"[sec] {req.ticker} {req.form_type} {range_label}: "
-        f"{len(planned)} filing(s) planned"
-    )
-
-    filings: list[FilingMeta] = []
-    resolved: list[ResolvedFiling] = []
-    affected_tickers: set[str] = set()
-    rate_limited = False
-
-    # ── Step 2: render + ingest each period sequentially ──
-    for p in planned:
-        if rate_limited:
-            # SEC throttled us earlier this run — don't keep hitting EDGAR.
-            filings.append(FilingMeta(
-                filename=p.filename,
-                detected_period=p.period_label,
-                form_type=p.form_type,
-                status="failed",
-                message="Skipped: SEC rate-limited an earlier filing in this "
-                        "request. Wait a few minutes and retry a smaller range.",
-            ))
-            continue
-
-        try:
-            fetched = await run_in_threadpool(sec_fetch.render_planned, p)
-        except sec_fetch.SecRateLimited as e:
-            rate_limited = True
-            filings.append(FilingMeta(
-                filename=p.filename,
-                detected_period=p.period_label,
-                form_type=p.form_type,
-                status="failed",
-                message=f"SEC rate-limited this request: {e}",
-            ))
-            continue
-        except sec_fetch.SecFetchError as e:
-            # Render failure for this one period — record and keep going.
-            filings.append(FilingMeta(
-                filename=p.filename,
-                detected_period=p.period_label,
-                form_type=p.form_type,
-                status="failed",
-                message=f"Could not retrieve {p.period_label}: {e}",
-            ))
-            continue
-
-        # Stage the PDF, then run the shared ingestion pipeline (which routes it
-        # into the resolved company's store).
-        dest = staging_path(fetched.filename)
-        try:
-            dest.write_bytes(fetched.pdf_bytes)
-            meta = await ingest_pdf(dest, fetched.filename, store)
-        except Exception as e:  # noqa: BLE001 — isolate per-period ingestion
-            logger.error(f"[sec] ingest failed for {p.period_label}: {e}")
-            filings.append(FilingMeta(
-                filename=fetched.filename,
-                detected_period=p.period_label,
-                form_type=p.form_type,
-                status="failed",
-                message=f"Retrieved but failed to ingest {p.period_label}: {e}",
-            ))
-            continue
-
-        filings.append(meta)
-        if meta.ticker:
-            affected_tickers.add(meta.ticker)
-        resolved.append(ResolvedFiling(
-            ticker=fetched.ticker,
-            form_type=fetched.form_type,
-            period_label=fetched.period_label,
-            filing_date=fetched.filing_date,
-            accession_number=fetched.accession_number or None,
-            document_url=fetched.document_url,
-        ))
-
-    # ── Step 3: refresh the merged-tables cache once per company touched ──
-    for tk in affected_tickers:
-        store.get_company_store(tk).rebuild_merged_tables()
-
-    succeeded = sum(1 for f in filings if f.status in ("success", "partial"))
-    logger.info(
-        f"[sec] {req.ticker} {req.form_type} {range_label}: "
-        f"{succeeded}/{len(filings)} ingested"
+        f"{result.succeeded}/{len(result.filings)} ingested"
     )
 
     return SecFetchResponse(
         ticker=req.ticker,
         range_label=range_label,
-        total_files=len(filings),
-        succeeded=succeeded,
-        filings=filings,
-        resolved_filings=resolved,
+        total_files=len(result.filings),
+        succeeded=result.succeeded,
+        filings=result.filings,
+        resolved_filings=result.resolved,
     )

@@ -9,4 +9,6 @@ Endpoints stay thin: parse the request, call a service, return the response.
   - ``chat``      — /chat
   - ``media``     — /company, /media/*, /macro/*, /channels
   - ``sec``       — /sec/fetch (automated SEC EDGAR retrieval → ingestion)
+  - ``portfolio`` — /portfolio/* (holdings + trading journal)
+  - ``coach``     — /coach/review (pre-trade coaching)
 """

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -359,3 +361,337 @@ async def fetch_treasury_yield(
     on empty/invalid data so the caller can degrade gracefully.
     """
     return await asyncio.to_thread(_compute_yield, start_date, end_date, ticker)
+
+
+# =============================================================================
+# Execution & Current Prices — the trading journal's price automation
+# =============================================================================
+# Blueprint §1: the user logs only a transaction *time* and *quantity*; the fill
+# price is derived here. Everything above serves analysis (daily bars are plenty);
+# these two functions serve bookkeeping, where the bar containing the trade
+# matters, so they need intraday resolution and their own fallbacks.
+
+# How far back each interval is actually available from Yahoo. The 1-minute
+# limit is the real constraint on this feature: a trade logged more than ~30 days
+# late can only ever get an approximate fill.
+_INTRADAY_LIMITS: tuple[tuple[str, int], ...] = (
+    ("1m", 29),      # ~30 days of 1-minute bars
+    ("1h", 700),     # ~730 days of hourly bars
+    ("1d", 36500),   # daily bars go back effectively forever
+)
+
+# How much history to pull around the target timestamp for each interval. Wide
+# enough to survive a weekend or a market holiday, narrow enough to stay cheap.
+_WINDOW_DAYS: dict[str, tuple[int, int]] = {
+    "1m": (4, 2),
+    "1h": (10, 2),
+    "1d": (21, 5),
+}
+
+_RESOLUTION_LABELS = {
+    "1m": "1-minute bar",
+    "1h": "1-hour bar",
+    "1d": "daily close",
+}
+
+
+@dataclass
+class ExecutionPrice:
+    """A resolved fill price, plus how precisely it could be resolved."""
+
+    ticker: str
+    price: float
+    resolution: str            # "1m" | "1h" | "1d"
+    bar_time: str              # ISO-8601 UTC timestamp of the bar actually used
+    requested_at: str          # the timestamp the caller asked about
+    is_approximate: bool       # True unless an exact 1-minute bar was found
+    message: str               # human-readable note for the UI
+
+
+def _to_utc(dt: datetime) -> datetime:
+    """Normalize to an aware UTC datetime; naive input is assumed to be UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _bar_at_or_before(df: pd.DataFrame, target: datetime):
+    """
+    The last bar at or before ``target``, or ``None``.
+
+    Markets close. A trade stamped 02:00 on a Sunday has no bar of its own, so
+    the nearest *prior* bar is the honest answer — the last price the market
+    actually printed before that moment.
+    """
+    if df is None or df.empty:
+        return None
+    idx = df.index
+    # yfinance returns tz-aware timestamps for intraday and (usually) naive for
+    # daily. Normalize both to UTC so the comparison below is meaningful.
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    else:
+        idx = idx.tz_convert("UTC")
+    df = df.copy()
+    df.index = idx
+
+    prior = df[df.index <= pd.Timestamp(target)]
+    if not prior.empty:
+        return prior.iloc[-1], prior.index[-1]
+    # Target predates every bar we fetched (e.g. a trade on the ticker's first
+    # trading day). Use the earliest bar available rather than failing.
+    return df.iloc[0], df.index[0]
+
+
+def _compute_execution_price(ticker: str, executed_at: datetime) -> ExecutionPrice:
+    """Blocking fetch + resolve (run in a thread by the async wrapper)."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        raise ValueError("A ticker symbol is required.")
+
+    target = _to_utc(executed_at)
+    now = datetime.now(timezone.utc)
+    if target > now + timedelta(minutes=5):
+        # Small tolerance for clock skew between the user's machine and ours.
+        raise ValueError(
+            f"Trade time {target.isoformat()} is in the future - a fill price "
+            f"cannot be looked up for a trade that has not happened yet."
+        )
+
+    age_days = (now - target).days
+    attempted: list[str] = []
+
+    for interval, max_age in _INTRADAY_LIMITS:
+        if age_days > max_age:
+            continue   # Yahoo will not serve this interval that far back
+        back, fwd = _WINDOW_DAYS[interval]
+        start = (target - timedelta(days=back)).date()
+        end = min(target + timedelta(days=fwd), now).date() + timedelta(days=1)
+        attempted.append(interval)
+
+        try:
+            raw = yf.Ticker(t).history(
+                interval=interval, start=start, end=end, auto_adjust=True,
+            )
+        except Exception as e:  # noqa: BLE001 - try the next, coarser interval
+            logger.warning(f"[price] {t} {interval} fetch failed: {e}")
+            continue
+
+        if raw is None or raw.empty:
+            continue
+        df = _flatten_columns(raw, t)
+        if "Close" not in df:
+            continue
+        df = df[df["Close"].notna()]
+
+        found = _bar_at_or_before(df, target)
+        if found is None:
+            continue
+        bar, bar_time = found
+        price = float(bar["Close"])
+        if not price > 0:
+            continue
+
+        # The bar's CLOSE is the fill. For a 1-minute bar it is within a minute
+        # of the stated time, which is closer than a retail fill is knowable;
+        # open or VWAP would be equally defensible and no more accurate.
+        gap = abs((bar_time.to_pydatetime() - target).total_seconds())
+        exact = interval == "1m" and gap <= 120
+        label = _RESOLUTION_LABELS[interval]
+
+        if exact:
+            message = f"Filled from the {label} at {bar_time.isoformat()}."
+        elif interval == "1m":
+            message = (
+                f"Nearest {label} was {int(gap // 60)} minute(s) from the stated "
+                f"time - the market was likely closed at that exact moment."
+            )
+        else:
+            reason = (
+                "1-minute data is only available for about the last 30 days"
+                if age_days > 29 else "finer intervals returned no data"
+            )
+            message = (
+                f"Approximate fill from the {label} at {bar_time.isoformat()} "
+                f"({reason})."
+            )
+
+        return ExecutionPrice(
+            ticker=t,
+            price=round(price, 4),
+            resolution=interval,
+            bar_time=bar_time.to_pydatetime().isoformat(),
+            requested_at=target.isoformat(),
+            is_approximate=not exact,
+            message=message,
+        )
+
+    raise ValueError(
+        f"No price data found for '{t}' around {target.isoformat()} "
+        f"(tried: {', '.join(attempted) or 'no usable interval'}). Check the "
+        f"ticker symbol and the trade time."
+    )
+
+
+async def fetch_execution_price(ticker: str, executed_at: datetime) -> ExecutionPrice:
+    """
+    Resolve what a trade actually filled at, given only when it happened.
+
+    Tries 1-minute bars first and degrades to hourly, then to the daily close,
+    reporting which resolution it landed on so the UI can label an approximate
+    fill honestly. Raises ValueError for a future timestamp or an unknown ticker
+    (the router maps that to a 400).
+
+    Blocking yfinance work runs in a worker thread, matching
+    :func:`fetch_technical_data`.
+    """
+    return await asyncio.to_thread(_compute_execution_price, ticker, executed_at)
+
+
+# -- Current price, with a short TTL cache -----------------------------------
+# Rendering a 20-row portfolio must not become 20 network round-trips on every
+# refresh. 60s is well inside yfinance's own ~15-minute delay, so the cache
+# costs no meaningful freshness.
+
+_CURRENT_TTL_SECONDS = 60.0
+_current_cache: dict[str, tuple[float, float]] = {}   # ticker -> (price, fetched_at)
+
+
+def _compute_current_price(ticker: str) -> float:
+    """Blocking latest-price fetch."""
+    t = (ticker or "").strip().upper()
+    raw = yf.Ticker(t).history(period="5d", interval="1d", auto_adjust=True)
+    if raw is None or raw.empty:
+        raise ValueError(f"No recent price data for '{t}'.")
+    df = _flatten_columns(raw, t)
+    close = df["Close"].dropna() if "Close" in df else pd.Series(dtype=float)
+    if close.empty:
+        raise ValueError(f"No usable close price for '{t}'.")
+    return round(float(close.iloc[-1]), 4)
+
+
+async def fetch_current_price(ticker: str, use_cache: bool = True) -> float:
+    """
+    Latest close for a ticker, cached for ~60 seconds.
+
+    Raises ValueError if the ticker has no price data - callers valuing a
+    portfolio should catch it per-ticker so one delisted symbol does not blank
+    the whole page.
+    """
+    t = (ticker or "").strip().upper()
+    now = time.monotonic()
+    if use_cache:
+        hit = _current_cache.get(t)
+        if hit and (now - hit[1]) < _CURRENT_TTL_SECONDS:
+            return hit[0]
+
+    price = await asyncio.to_thread(_compute_current_price, t)
+    _current_cache[t] = (price, now)
+    return price
+
+
+async def fetch_current_prices(tickers: list[str]) -> dict[str, float | None]:
+    """
+    Current prices for many tickers at once, fetched concurrently.
+
+    A ticker whose lookup fails maps to ``None`` instead of raising: valuing a
+    portfolio is best-effort per row, and one bad symbol must not fail the rest.
+    """
+    unique = sorted({(t or "").strip().upper() for t in tickers if t})
+    if not unique:
+        return {}
+
+    results = await asyncio.gather(
+        *(fetch_current_price(t) for t in unique), return_exceptions=True
+    )
+    out: dict[str, float | None] = {}
+    for t, r in zip(unique, results):
+        if isinstance(r, Exception):
+            logger.warning(f"[price] current price unavailable for {t}: {r}")
+            out[t] = None
+        else:
+            out[t] = r
+    return out
+
+
+# =============================================================================
+# Multi-Ticker Price History — portfolio risk math
+# =============================================================================
+# The quant-risk agent needs every holding's returns on a COMMON set of dates:
+# a covariance matrix built from misaligned series is meaningless. Everything
+# above fetches one ticker at a time; this fetches many and aligns them.
+
+# A ticker with far less history than the rest would, on an inner join, truncate
+# the whole matrix to its own short life. Dropping it costs one position's
+# detail; keeping it costs every position's history.
+_MIN_COVERAGE_RATIO = 0.6
+
+
+def _fetch_price_history(
+    tickers: list[str], start: str, end: str
+) -> tuple[pd.DataFrame, list[str]]:
+    """Blocking multi-ticker fetch. Returns (aligned closes, dropped tickers)."""
+    unique = sorted({(t or "").strip().upper() for t in tickers if t and t.strip()})
+    if not unique:
+        return pd.DataFrame(), []
+
+    raw = yf.download(
+        unique, start=start, end=end,
+        auto_adjust=True, progress=False, group_by="column",
+    )
+    if raw is None or raw.empty:
+        return pd.DataFrame(), unique
+
+    # With several tickers yfinance returns MultiIndex columns (field, ticker);
+    # with one it returns plain OHLCV names.
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Close" not in raw.columns.get_level_values(0):
+            return pd.DataFrame(), unique
+        closes = raw["Close"]
+    else:
+        if "Close" not in raw.columns:
+            return pd.DataFrame(), unique
+        closes = raw[["Close"]].rename(columns={"Close": unique[0]})
+
+    closes = closes.dropna(axis=1, how="all")
+    dropped = [t for t in unique if t not in closes.columns]
+
+    if closes.empty:
+        return pd.DataFrame(), unique
+
+    # Drop short-history tickers BEFORE aligning, so one late IPO cannot shorten
+    # everyone else's window.
+    best = int(closes.notna().sum().max())
+    if best > 0:
+        thin = [
+            c for c in closes.columns
+            if int(closes[c].notna().sum()) < best * _MIN_COVERAGE_RATIO
+        ]
+        for c in thin:
+            logger.warning(
+                f"[risk] dropping {c}: only {int(closes[c].notna().sum())} of "
+                f"{best} observations — too short to align."
+            )
+        if thin and len(thin) < len(closes.columns):
+            closes = closes.drop(columns=thin)
+            dropped.extend(thin)
+
+    # Inner join: keep only dates every remaining ticker traded on.
+    aligned = closes.dropna(how="any")
+    return aligned, sorted(set(dropped))
+
+
+async def fetch_price_history(
+    tickers: list[str], start: str, end: str
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Daily closes for several tickers, aligned to their common trading dates.
+
+    Returns ``(DataFrame indexed by date with one column per ticker, dropped)``.
+    ``dropped`` lists tickers excluded for having no data or too little history
+    to align — the caller should surface them rather than pretend the portfolio
+    was fully covered.
+
+    Blocking work runs in a worker thread, matching the other fetchers here.
+    """
+    return await asyncio.to_thread(_fetch_price_history, tickers, start, end)

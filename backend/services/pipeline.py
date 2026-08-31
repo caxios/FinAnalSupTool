@@ -4,8 +4,9 @@ services.pipeline
 The three-phase Multi-Agent System (MAS) analysis orchestration, extracted from
 the HTTP layer so the routers stay thin and the logic lives in exactly one place.
 
-  Phase 1 — Independent analysis: the six field agents run concurrently, capped
-            at two Gemini calls at a time (avoids 429s).
+  Phase 1 — Independent analysis: the field agents run concurrently, capped at
+            two Gemini calls at a time (avoids 429s). The portfolio-wide Quant
+            Risk agent then runs, since it needs Phase 1's macro regime read.
   Phase 2 — True sequential debate over the agents that reported.
   Phase 3 — Manager synthesis + programmatic 3-axis gap scoring, then the run is
             persisted to history.
@@ -34,13 +35,14 @@ from agents import (
     MacroMarketAgent,
     YouTubeAgent,
     MacroHistoryAgent,
+    QuantRiskAgent,
     ManagerAgent,
     DebateTranscript,
     run_sequential_debate,
     FIELD_AGENT_IDS,
 )
 from services.storage import DocumentStore, DebateStore
-from services import company_service
+from services import company_service, portfolio_service
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +214,9 @@ async def analyze_pipeline(
         if identified else no_company,
     ))
 
-    total = len(planned)
+    # The Quant Risk agent runs after the others (it needs the macro regime),
+    # but it counts toward the total so the progress bar doesn't jump at the end.
+    total = len(planned) + 1
     yield {"phase": 1, "status": "running", "agents_total": total, "agents_completed": 0}
 
     reports: dict[str, dict] = {}          # successful reports only (feed 2 & 3)
@@ -262,10 +266,59 @@ async def analyze_pipeline(
         yield {"phase": 1, "status": "agent_done", "agent": aid, "ok": ok,
                "agents_completed": done, "agents_total": total}
 
+    # ── Quant Risk: portfolio-wide, and it needs Phase 1's macro read. ──────
+    # It runs here rather than alongside the others because blueprint §2 requires
+    # conditioning the risk numbers on the macro regime, which only exists once
+    # the Macro agent has reported. Like MacroHistoryAgent it does NOT debate:
+    # every debating agent argues about one company, and a portfolio-level claim
+    # cannot rebut a company-level one.
+    try:
+        holdings = portfolio_service.list_holdings()
+    except Exception as e:  # noqa: BLE001 — a portfolio read must not fail a run
+        logger.warning(f"Could not read the portfolio for risk analysis: {e}")
+        holdings = []
+
+    if holdings:
+        try:
+            risk_report = await QuantRiskAgent().analyze(
+                {
+                    "holdings": holdings,
+                    "macro_report": reports.get("macro_market"),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+                capture=_cap("quant_risk"),
+            )
+            payload = risk_report.model_dump()
+            reports["quant_risk"] = payload
+            slots["quant_risk"] = {"report": payload}
+            agent_contexts["quant_risk"] = {
+                "raw_data": captures.get("quant_risk", {}).get("raw_data", ""),
+                "report": payload,
+            }
+            done += 1
+            yield {"phase": 1, "status": "agent_done", "agent": "quant_risk",
+                   "ok": True, "agents_completed": done, "agents_total": total}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Quant risk agent failed: {e}")
+            slots["quant_risk"] = {"error": str(e)}
+            done += 1
+            yield {"phase": 1, "status": "agent_done", "agent": "quant_risk",
+                   "ok": False, "agents_completed": done, "agents_total": total}
+    else:
+        slots["quant_risk"] = {
+            "error": "No positions in the portfolio; portfolio risk analysis was "
+                     "skipped. Add holdings on the Portfolio view to enable it."
+        }
+        done += 1
+        yield {"phase": 1, "status": "agent_done", "agent": "quant_risk",
+               "ok": False, "skipped": True,
+               "agents_completed": done, "agents_total": total}
+
     # ── Phase 2: TRUE sequential debate over the agents that reported. ───────
-    # The debate roster is limited to FIELD agents — the Macro History agent
-    # does NOT participate (it produces an independent advisory report that
-    # the Manager receives alongside the debate).
+    # The debate roster is limited to FIELD agents — the Macro History and
+    # Quant Risk agents do NOT participate (each produces an independent
+    # advisory report that the Manager receives alongside the debate).
     debate_contexts = {
         aid: ctx for aid, ctx in agent_contexts.items()
         if aid in FIELD_AGENT_IDS

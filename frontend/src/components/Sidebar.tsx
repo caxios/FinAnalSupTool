@@ -1,7 +1,7 @@
 /**
  * Sidebar.tsx
  * ───────────
- * Left navigation rail. Switches between the three SPA views via react-router
+ * Left navigation rail. Switches between the SPA views via react-router
  * `NavLink`s (no full-page reload). Active route gets an accent highlight.
  */
 
@@ -19,6 +19,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/media", label: "Company Media", icon: "📰", hint: "News, videos, earnings" },
   { to: "/macro", label: "Macro Sentiment", icon: "🌐", hint: "Market-wide trends" },
   { to: "/analysis", label: "Deep Analysis", icon: "🧭", hint: "Multi-agent report" },
+  { to: "/portfolio", label: "Portfolio", icon: "💼", hint: "Holdings & journal" },
 ];
 
 export default function Sidebar() {

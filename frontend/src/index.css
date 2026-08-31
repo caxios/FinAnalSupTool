@@ -27,6 +27,8 @@
  *  11. Upload Modal
  *  12. Buttons
  *  13. Status Messages
+ *  14. Portfolio & Trading Journal
+ *  15. Trading Coach Review
  */
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2643,4 +2645,348 @@ body {
   .deep-layout { grid-template-columns: 1fr; }
   .deep-history { position: static; }
   .report-two-col { grid-template-columns: 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   14. Portfolio & Trading Journal
+   ═══════════════════════════════════════════════════════════════ */
+
+.section-head-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+
+.btn-secondary-sm {
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  color: var(--text-secondary); border-radius: 8px; padding: 6px 12px;
+  font-size: 12px; font-weight: 500; cursor: pointer; transition: all 200ms;
+}
+.btn-secondary-sm:hover {
+  border-color: var(--border-active); color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* ── Holdings table ───────────────────────────────────────── */
+
+.portfolio-table tbody td { font-variant-numeric: tabular-nums; }
+
+.portfolio-row { cursor: pointer; }
+.portfolio-row:hover td { background: var(--bg-hover); }
+
+/* The active company is the join with the other views — make it obvious. */
+.portfolio-row-active td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-blue);
+}
+.portfolio-row-active td { background: rgba(59, 130, 246, 0.06); }
+
+.portfolio-ticker { font-weight: 600; color: var(--text-primary); }
+
+/* "unpriced" must not read as "$0.00". */
+.portfolio-unpriced {
+  color: var(--text-muted); font-style: italic; font-size: 12px;
+}
+
+.portfolio-totals {
+  display: flex; flex-wrap: wrap; gap: 20px; margin-top: 14px; padding: 14px 16px;
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+.portfolio-total { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
+.portfolio-total-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.portfolio-total-value {
+  font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.portfolio-footnote {
+  margin-top: 8px; font-size: 12px; color: var(--text-muted);
+}
+
+/* ── Shared form controls ─────────────────────────────────── */
+
+.trade-field { display: flex; flex-direction: column; gap: 6px; flex: 1 1 180px; }
+.trade-field-narrow { flex: 0 1 140px; }
+
+.trade-label {
+  font-size: 12px; font-weight: 500; color: var(--text-secondary);
+}
+.trade-label-emphasis {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+}
+
+.trade-input {
+  background: var(--bg-secondary); border: 1px solid var(--border-subtle);
+  color: var(--text-primary); border-radius: 8px; padding: 8px 10px;
+  font-size: 13px; font-family: inherit; transition: border-color 200ms;
+}
+.trade-input:focus { outline: none; border-color: var(--border-active); }
+.trade-input:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Native select arrows overlap the label without reserved space on the right. */
+.trade-side-select,
+.trade-filter-select {
+  padding-right: 26px; text-align: left; text-align-last: left;
+}
+.trade-filter-select { min-width: 10rem; }
+
+.trade-help { font-size: 11px; color: var(--text-muted); }
+
+/* ── Trade form ───────────────────────────────────────────── */
+
+.trade-form {
+  display: flex; flex-direction: column; gap: 14px; padding: 16px;
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+.trade-form-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.trade-form-hint { font-size: 12px; color: var(--text-muted); margin: -4px 0 0; }
+
+/* The rationale is the centerpiece of the journal, so it gets real room. */
+.trade-field-rationale { flex: 1 1 100%; }
+.trade-textarea {
+  background: var(--bg-secondary); border: 1px solid var(--border-subtle);
+  color: var(--text-primary); border-radius: 8px; padding: 10px 12px;
+  font-size: 13px; font-family: inherit; line-height: 1.6; resize: vertical;
+  min-height: 96px; transition: border-color 200ms;
+}
+.trade-textarea:focus { outline: none; border-color: var(--border-active); }
+.trade-textarea::placeholder { color: var(--text-muted); }
+
+.trade-override { display: flex; flex-direction: column; gap: 10px; }
+.trade-override-toggle {
+  align-self: flex-start; background: none; border: none; padding: 0;
+  color: var(--text-secondary); font-size: 12px; font-family: inherit;
+  cursor: pointer;
+}
+.trade-override-toggle:hover { color: var(--text-primary); }
+
+.trade-form-actions { display: flex; gap: 10px; }
+
+.trade-error {
+  background: rgba(239, 68, 68, 0.10); border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--color-error); border-radius: 8px; padding: 10px 12px; font-size: 13px;
+}
+
+/* ── Trade confirmation ───────────────────────────────────── */
+
+.trade-confirm {
+  border: 1px solid rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.06);
+  border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column;
+  gap: 12px;
+}
+.trade-confirm-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.trade-confirm-title { font-size: 13px; font-weight: 600; color: var(--color-success); }
+
+.trade-confirm-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;
+}
+.trade-confirm-item { display: flex; flex-direction: column; gap: 3px; }
+.trade-confirm-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.trade-confirm-value {
+  font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.trade-confirm-note { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+/* An approximate fill is flagged, never presented as an exact one. */
+.trade-confirm-approx { color: var(--color-warning); }
+
+/* ── Add-holding form ─────────────────────────────────────── */
+
+.add-holding-form {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;
+  padding: 14px 16px; margin-bottom: 14px;
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+.add-holding-note { flex: 1 1 100%; font-size: 12px; color: var(--accent-teal); }
+
+/* ── Journal ──────────────────────────────────────────────── */
+
+.journal-notice {
+  padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+.journal-error { color: var(--color-error); }
+
+.journal-list { display: flex; flex-direction: column; gap: 10px; }
+
+.journal-entry {
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  border-radius: 10px; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.journal-entry-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px;
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.journal-side {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 2px 7px; border-radius: 5px;
+}
+.journal-side-buy  { color: var(--color-success); background: rgba(34, 197, 94, 0.12); }
+.journal-side-sell { color: var(--color-error);   background: rgba(239, 68, 68, 0.12); }
+
+.journal-ticker { font-weight: 600; color: var(--text-primary); }
+.journal-qty, .journal-price { color: var(--text-secondary); }
+.journal-total { font-weight: 600; color: var(--text-primary); }
+/* Push the timestamp to the right edge on wide rows. */
+.journal-when { margin-left: auto; font-size: 12px; color: var(--text-muted); }
+
+/* Shown in full, never truncated — reading it back is the point. */
+.journal-rationale {
+  margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-primary);
+  border-left: 2px solid var(--border-active); padding-left: 10px;
+}
+.journal-rationale-empty {
+  color: var(--text-muted); font-style: italic;
+  border-left-color: var(--border-subtle);
+}
+.journal-rationale-seed { color: var(--text-secondary); border-left-color: var(--border-subtle); }
+.journal-seed-tag {
+  display: inline-block; margin-right: 8px; padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); background: rgba(148, 163, 184, 0.12);
+}
+
+.journal-meta { font-size: 11px; color: var(--text-muted); }
+
+@media (max-width: 900px) {
+  .trade-field, .trade-field-narrow { flex: 1 1 100%; }
+  .journal-when { margin-left: 0; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   15. Trading Coach Review
+   ═══════════════════════════════════════════════════════════════ */
+
+.btn-coach {
+  background: rgba(139, 92, 246, 0.10);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #c4b5fd; border-radius: 8px; padding: 9px 16px;
+  font-size: 13px; font-weight: 500; font-family: inherit;
+  cursor: pointer; transition: all 200ms;
+}
+.btn-coach:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.18);
+  border-color: rgba(139, 92, 246, 0.55);
+}
+.btn-coach:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.coach-review {
+  border: 1px solid rgba(139, 92, 246, 0.30);
+  background: rgba(139, 92, 246, 0.05);
+  border-radius: 12px; padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+
+.coach-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.coach-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 600; color: var(--text-primary);
+}
+.coach-icon { font-size: 16px; }
+.coach-subject {
+  font-size: 12px; font-weight: 500; color: var(--text-secondary);
+  padding: 2px 8px; border-radius: 5px; background: rgba(148, 163, 184, 0.12);
+}
+
+/* ── Alignment score ──────────────────────────────────────── */
+
+.coach-align { display: flex; flex-direction: column; gap: 6px; }
+.coach-align-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.coach-align-score {
+  font-size: 26px; font-weight: 700; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.coach-align-max { font-size: 13px; font-weight: 500; color: var(--text-muted); }
+.coach-align-bar {
+  height: 6px; border-radius: 3px; overflow: hidden;
+  background: rgba(148, 163, 184, 0.15);
+}
+.coach-align-fill { height: 100%; border-radius: 3px; transition: width 300ms; }
+.coach-align-fill-positive { background: var(--color-success); }
+.coach-align-fill-neutral  { background: var(--color-warning); }
+.coach-align-fill-negative { background: var(--color-error); }
+
+/* A thin journal must never be hidden behind confident prose. */
+.coach-caution {
+  background: rgba(234, 179, 8, 0.10); border: 1px solid rgba(234, 179, 8, 0.30);
+  color: var(--color-warning); border-radius: 8px; padding: 9px 12px;
+  font-size: 12px; line-height: 1.5;
+}
+
+/* ── Blocks ──────────────────────────────────────────────── */
+
+.coach-block { display: flex; flex-direction: column; gap: 6px; }
+.coach-block-title {
+  margin: 0; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary);
+}
+.coach-text {
+  margin: 0; font-size: 13px; line-height: 1.65; color: var(--text-primary);
+}
+.coach-feedback {
+  border-left: 2px solid rgba(139, 92, 246, 0.5); padding-left: 12px;
+}
+
+/* ── Biases ──────────────────────────────────────────────── */
+
+.coach-bias-list { list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 12px; }
+.coach-bias {
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.coach-bias-head { display: flex; align-items: baseline; gap: 8px; }
+.coach-bias-name { font-size: 13px; font-weight: 600; }
+.coach-bias-severity {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); padding: 1px 6px; border-radius: 4px;
+  background: rgba(148, 163, 184, 0.12);
+}
+.coach-bias-evidence { font-style: italic; color: var(--text-secondary); }
+
+/* Each chip is a real logged trade — the backend strips unverifiable dates. */
+.coach-occurrences {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px;
+}
+.coach-occurrences-label { font-size: 11px; color: var(--text-muted); }
+.coach-date-chip {
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  padding: 2px 7px; border-radius: 4px;
+  color: var(--accent-teal); background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.25);
+}
+
+/* ── Supporting data + limitations ───────────────────────── */
+
+.coach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.coach-chip {
+  font-size: 11px; padding: 3px 8px; border-radius: 5px;
+  color: var(--text-secondary); background: rgba(148, 163, 184, 0.10);
+  border: 1px solid var(--border-subtle);
+}
+
+.coach-limits { font-size: 12px; color: var(--text-muted); }
+.coach-limits summary { cursor: pointer; }
+.coach-limits ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.6; }
+
+.coach-footer {
+  font-size: 11px; color: var(--text-muted); text-align: right;
+  border-top: 1px solid var(--border-subtle); padding-top: 8px;
 }

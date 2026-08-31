@@ -9,6 +9,8 @@ entities from ``domain_schemas``.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .domain_schemas import (
@@ -448,6 +450,251 @@ class AnalyzeRequest(BaseModel):
     end_date: str | None = Field(
         None, description="Analysis period end, YYYY-MM-DD (e.g. '2026-06-30')"
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# Portfolio & Trading Journal Models (GET/POST /portfolio*)
+# ─────────────────────────────────────────────────────────────
+
+class HoldingCreate(BaseModel):
+    """
+    Request body for POST /portfolio/holdings — blueprint §1 "Initial Portfolio
+    Setup". Seeds a position the user already owns, so the coach has a starting
+    cost basis. New positions opened *through* the journal come in as trades.
+    """
+
+    ticker: str = Field(description="Stock ticker, e.g. 'AAPL' (case-insensitive)")
+    quantity: float = Field(gt=0, description="Shares held")
+    avg_price: float = Field(gt=0, description="Average purchase price per share")
+    initial_fx_rate: float | None = Field(
+        None, gt=0,
+        description="Exchange rate at acquisition, for non-USD cost bases",
+    )
+    currency: str = Field("USD", description="Cost-basis currency, e.g. 'USD', 'KRW'")
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("ticker must not be empty")
+        return v.upper()
+
+
+class Holding(BaseModel):
+    """One position in the portfolio."""
+
+    ticker: str
+    quantity: float
+    avg_price: float
+    initial_fx_rate: float | None = None
+    currency: str = "USD"
+    created_at: str | None = None
+    updated_at: str | None = None
+    # Live valuation is filled in by phase 3 (price automation); until then these
+    # stay null rather than being faked, so the UI can tell "unknown" from "zero".
+    current_price: float | None = Field(
+        None, description="Latest market price; null until phase 3 wires pricing"
+    )
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    unrealized_roi: float | None = Field(
+        None, description="(current_price - avg_price) / avg_price"
+    )
+
+
+class TradeCreate(BaseModel):
+    """
+    Request body for POST /portfolio/trades.
+
+    Deliberately minimal: blueprint §1 says the user inputs **only** the
+    transaction time and quantity (plus which stock and which direction). The
+    execution price, total value, and resulting average are *server-derived* —
+    accepting them from the client would defeat the automation and let the
+    journal disagree with the market.
+
+    ``execution_price`` is the one escape hatch, for correcting a fill the
+    market-data lookup gets wrong. Leave it unset in normal use.
+    """
+
+    ticker: str = Field(description="Stock ticker, e.g. 'AAPL'")
+    side: str = Field(description="'buy' or 'sell'")
+    quantity: float = Field(gt=0, description="Shares transacted")
+    executed_at: str = Field(
+        description="When the trade happened, ISO-8601 (e.g. '2026-08-29T14:30:00Z')"
+    )
+    entry_rationale: str | None = Field(
+        None,
+        description=(
+            "Why the user made this trade, in their own words — including the "
+            "psychological state (e.g. 'bought on FOMO after the keynote'). The "
+            "Coach agent evaluates exactly this text against objective data."
+        ),
+    )
+    execution_price: float | None = Field(
+        None, gt=0,
+        description="Manual override; normally derived from market data",
+    )
+    fx_rate: float | None = Field(None, gt=0, description="Exchange rate at execution")
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("ticker must not be empty")
+        return v.upper()
+
+    @field_validator("side")
+    @classmethod
+    def _side_valid(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        return v
+
+    @field_validator("executed_at")
+    @classmethod
+    def _executed_at_iso(cls, v: str) -> str:
+        # Validate the format here so a malformed timestamp is a 422 at the edge
+        # rather than a bad row that silently sorts wrong in the journal.
+        raw = (v or "").strip()
+        try:
+            datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(
+                "executed_at must be an ISO-8601 datetime, "
+                "e.g. '2026-08-29T14:30:00Z'"
+            )
+        return raw
+
+
+class Trade(BaseModel):
+    """One journal entry, as stored."""
+
+    id: int
+    ticker: str
+    side: str
+    quantity: float
+    executed_at: str
+    execution_price: float | None = None
+    total_value: float | None = None
+    fx_rate: float | None = None
+    entry_rationale: str | None = None
+    avg_price_after: float | None = Field(
+        None, description="Position's average price after this trade was applied"
+    )
+    created_at: str | None = None
+
+
+class PriceResolution(BaseModel):
+    """
+    How a trade's fill price was derived, so the UI can be honest about it.
+
+    A trade logged within ~30 days gets a real 1-minute bar. Older than that,
+    Yahoo no longer serves 1-minute data and the fill degrades to an hourly or
+    daily bar — ``is_approximate`` says so, and ``message`` explains why.
+    """
+
+    resolution: str = Field(description="'1m', '1h', or '1d'")
+    bar_time: str = Field(description="Timestamp of the price bar actually used")
+    is_approximate: bool = Field(
+        description="False only when an exact 1-minute bar was found"
+    )
+    message: str = Field(description="Human-readable explanation for the UI")
+
+
+class TradeResponse(BaseModel):
+    """POST /portfolio/trades — the logged trade plus the updated position."""
+
+    trade: Trade
+    holding: Holding | None = Field(
+        None, description="The position after the trade; null if fully closed out"
+    )
+    price_resolution: PriceResolution | None = Field(
+        None,
+        description="How the execution price was derived; null if the caller "
+                    "supplied one explicitly",
+    )
+
+
+class PortfolioResponse(BaseModel):
+    """GET /portfolio — every holding plus whole-portfolio aggregates."""
+
+    holdings: list[Holding] = []
+    total_cost_basis: float = 0.0
+    total_market_value: float | None = Field(
+        None, description="Null until phase 3 supplies live prices"
+    )
+    total_unrealized_pnl: float | None = None
+    total_roi: float | None = None
+    baseline_status: dict[str, dict] = Field(
+        default_factory=dict,
+        description="Per-ticker 8-quarter baseline fetch state, for polling",
+    )
+
+
+class HoldingCreatedResponse(BaseModel):
+    """POST /portfolio/holdings — the new holding + whether a baseline started."""
+
+    holding: Holding
+    baseline_started: bool = Field(
+        description="Whether an 8-quarter SEC baseline fetch was kicked off"
+    )
+    baseline_status: dict = Field(
+        default_factory=dict, description="Initial state of that fetch"
+    )
+
+
+class TradesResponse(BaseModel):
+    """GET /portfolio/trades — the journal, newest first."""
+
+    trades: list[Trade] = []
+    total: int = 0
+    ticker: str | None = Field(None, description="Filter applied, if any")
+
+
+# ─────────────────────────────────────────────────────────────
+# Trading Coach Model (POST /coach/review)
+# ─────────────────────────────────────────────────────────────
+
+class CoachReviewRequest(BaseModel):
+    """
+    Request body for POST /coach/review — a PRE-trade review.
+
+    The rationale is the point of the whole endpoint: the coach evaluates the
+    user's stated reasoning against objective data. A review with no rationale
+    has nothing to evaluate, so it is required here (unlike on a logged trade,
+    where an absent rationale is itself a finding).
+    """
+
+    ticker: str | None = Field(
+        None, description="Company under consideration, e.g. 'AAPL'"
+    )
+    proposed_side: str | None = Field(None, description="'buy' or 'sell'")
+    proposed_quantity: float | None = Field(
+        None, gt=0, description="Shares the user is considering"
+    )
+    entry_rationale: str = Field(
+        ...,
+        min_length=1,
+        description="The user's own words on why they want to make this trade",
+    )
+
+    @field_validator("proposed_side")
+    @classmethod
+    def _side_valid(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v not in ("buy", "sell"):
+            raise ValueError("proposed_side must be 'buy' or 'sell'")
+        return v
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_upper(cls, v: str | None) -> str | None:
+        return (v or "").strip().upper() or None
 
 
 # ─────────────────────────────────────────────────────────────

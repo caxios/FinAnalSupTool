@@ -16,7 +16,7 @@ in-memory stores populated by POST /upload and handed in by the caller.
 Configuration (environment variables)
 ─────────────────────────────────────
   GEMINI_API_KEY   (required)  — your Google AI Studio API key
-  GEMINI_MODEL     (optional)  — model id, default "gemini-2.5-flash"
+  GEMINI_MODEL     (optional)  — model id, default "gemini-3.6-flash"
 
 We call Gemini's REST API directly with httpx (already a dependency), so
 there's no extra SDK to install.
@@ -91,7 +91,10 @@ _GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
 )
-_DEFAULT_MODEL = "gemini-2.5-flash"
+# gemini-2.5-flash was retired for new API keys (404 "no longer available
+# to new users"); 3.6-flash is the named replacement. Override with the
+# GEMINI_MODEL env var.
+_DEFAULT_MODEL = "gemini-3.6-flash"
 _HTTP_TIMEOUT = 90.0
 
 # NOTE: Filing text sections are no longer truncated by a static character cap.

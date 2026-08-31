@@ -1,7 +1,7 @@
 /**
  * agentMeta.ts
  * ────────────
- * Shared display metadata for the six field agents + the manager: human names,
+ * Shared display metadata for the field agents + the manager: human names,
  * icons, and stance/tone → color-class helpers. Kept in one place so the
  * progress tracker, report panels, and debate log all label agents identically.
  */
@@ -14,6 +14,8 @@ export const AGENT_ORDER: string[] = [
   "macro_market",
   "macro_history",
   "technical_analysis",
+  "quant_risk",
+  "trading_coach",
 ];
 
 export const AGENT_NAMES: Record<string, string> = {
@@ -24,6 +26,8 @@ export const AGENT_NAMES: Record<string, string> = {
   macro_market: "Macro & Market",
   macro_history: "Macro History",
   technical_analysis: "Technical (Price)",
+  quant_risk: "Portfolio Risk",
+  trading_coach: "Trading Coach",
   manager: "Manager (Synthesis)",
 };
 
@@ -35,6 +39,8 @@ export const AGENT_ICONS: Record<string, string> = {
   macro_market: "🌐",
   macro_history: "🏛️",
   technical_analysis: "📈",
+  quant_risk: "⚖️",
+  trading_coach: "🧠",
   manager: "🧭",
 };
 

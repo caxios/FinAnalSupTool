@@ -15,6 +15,10 @@ backend/channels.json
 # RAG vector store + persisted analysis history (regenerated at runtime)
 backend/chroma_data/
 backend/analysis_history/
+# Portfolio + trading journal (durable user data, never committed)
+backend/portfolio.db
+backend/portfolio.db-wal
+backend/portfolio.db-shm
 
 # ── Python ──
 __pycache__/

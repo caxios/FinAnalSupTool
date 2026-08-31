@@ -32,6 +32,14 @@ import type {
   AnalyzeProgressEvent,
   AnalysisHistoryResponse,
   AnalysisRecord,
+  PortfolioResponse,
+  TradesResponse,
+  TradeCreate,
+  TradeResponse,
+  HoldingCreate,
+  HoldingCreatedResponse,
+  CoachReport,
+  CoachReviewRequest,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -516,4 +524,106 @@ export async function getAnalysisRun(runId: string): Promise<AnalysisRecord> {
   return fetchJson<AnalysisRecord>(
     `${API_BASE}/analysis/${encodeURIComponent(runId)}`
   );
+}
+
+// =============================================================================
+// Portfolio & Trading Journal
+// =============================================================================
+// Deliberately NOT ticker-scoped the way the filing endpoints are: the
+// portfolio spans every company at once. `getTrades` takes an optional ticker
+// as a *filter*, not as required scope.
+
+/** Every holding, with live valuation and whole-portfolio totals. */
+export async function getPortfolio(): Promise<PortfolioResponse> {
+  return fetchJson<PortfolioResponse>(`${API_BASE}/portfolio`);
+}
+
+/**
+ * Seed a position the user already owns.
+ *
+ * Side effect on the backend: if this ticker has no filings yet, an 8-quarter
+ * SEC baseline fetch starts in the background — poll `getBaselineStatus`.
+ */
+export async function addHolding(
+  body: HoldingCreate
+): Promise<HoldingCreatedResponse> {
+  return fetchJson<HoldingCreatedResponse>(`${API_BASE}/portfolio/holdings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Remove a position. Its journal entries are deleted with it. */
+export async function removeHolding(ticker: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/portfolio/holdings/${encodeURIComponent(ticker)}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) msg = body.detail;
+    } catch {
+      /* non-JSON error body — keep the status text */
+    }
+    throw new Error(msg);
+  }
+  // 204 No Content — nothing to parse.
+}
+
+/** The trading journal, newest first. Pass a ticker to filter to one company. */
+export async function getTrades(
+  ticker?: string | null,
+  limit?: number
+): Promise<TradesResponse> {
+  const params = new URLSearchParams();
+  if (ticker) params.set("ticker", ticker);
+  if (limit) params.set("limit", String(limit));
+  const qs = params.toString();
+  return fetchJson<TradesResponse>(
+    `${API_BASE}/portfolio/trades${qs ? `?${qs}` : ""}`
+  );
+}
+
+/**
+ * Log a trade.
+ *
+ * Send only what the user typed — time, quantity, side, and their rationale.
+ * Omitting `execution_price` is the point: the backend looks up the fill from
+ * intraday market data and returns it, along with how precisely it resolved.
+ */
+export async function logTrade(body: TradeCreate): Promise<TradeResponse> {
+  return fetchJson<TradeResponse>(`${API_BASE}/portfolio/trades`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Progress of the background 8-quarter baseline fetch for one ticker. */
+export async function getBaselineStatus(
+  ticker: string
+): Promise<{ ticker: string; state: string; message: string; ingested?: number }> {
+  return fetchJson(`${API_BASE}/portfolio/baseline/${encodeURIComponent(ticker)}`);
+}
+
+// =============================================================================
+// Trading Coach
+// =============================================================================
+
+/**
+ * Ask the coach to review a trade BEFORE it is logged.
+ *
+ * The rationale is the subject of the review, so it is required. The coach
+ * grounds its answer in the user's real journal plus, when a Deep Analysis has
+ * been run for the ticker, that company's fundamental and technical reports.
+ */
+export async function reviewTrade(body: CoachReviewRequest): Promise<CoachReport> {
+  return fetchJson<CoachReport>(`${API_BASE}/coach/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }

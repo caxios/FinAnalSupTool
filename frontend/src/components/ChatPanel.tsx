@@ -181,11 +181,19 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     ? activeTicker
       ? `Ask about ${activeTicker}'s financials, ratios, or filing text.`
       : "Select a company in the header to ask about its filings, or ask about macro/market data."
+    : selectedAgent === "trading_coach"
+    ? "Chat with your Trading Coach about your own decisions — it reads your journal, so it works without an analysis run."
     : selectedAgent === "manager"
     ? "Chat with the Manager about the synthesized verdict and how the debate resolved. Run a Deep Analysis first."
     : `Chat with the ${personaName} agent — scoped to its own data and the debate transcript. Run a Deep Analysis first.`;
   const suggestions = isGeneral
     ? SUGGESTIONS
+    : selectedAgent === "trading_coach"
+    ? [
+        "What patterns do you see in my trading?",
+        "Do I sell too early?",
+        "Which of my rationales held up best?",
+      ]
     : selectedAgent === "manager"
     ? [
         "What was the final recommendation, and why?",

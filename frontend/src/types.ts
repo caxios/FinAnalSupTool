@@ -364,3 +364,150 @@ export interface AnalysisRecord {
   reports: Record<string, AgentSlot>;
   debate: DebateTranscript | null;
 }
+
+// =============================================================================
+// Portfolio & Trading Journal (GET/POST /portfolio*)
+// =============================================================================
+// Mirrors the Pydantic models in `backend/schemas/api_schemas.py`. Unlike the
+// filing types these are portfolio-scoped, not company-scoped: the portfolio
+// spans every ticker at once, so nothing here is keyed on `activeTicker`.
+
+/** One position. Valuation fields are null until the backend can price it. */
+export interface Holding {
+  ticker: string;
+  quantity: number;
+  avg_price: number;
+  initial_fx_rate: number | null;
+  currency: string;
+  created_at: string | null;
+  updated_at: string | null;
+  /** Null means "couldn't be priced", NOT "worth zero". */
+  current_price: number | null;
+  market_value: number | null;
+  unrealized_pnl: number | null;
+  /** Fractional, e.g. 0.1542 = +15.42%. */
+  unrealized_roi: number | null;
+}
+
+/** One journal entry. */
+export interface Trade {
+  id: number;
+  ticker: string;
+  side: "buy" | "sell";
+  quantity: number;
+  executed_at: string;
+  execution_price: number | null;
+  total_value: number | null;
+  fx_rate: number | null;
+  /** The user's own words — what the Coach agent will evaluate. */
+  entry_rationale: string | null;
+  avg_price_after: number | null;
+  created_at: string | null;
+}
+
+/**
+ * How the backend derived a fill price. `is_approximate` is false only when an
+ * exact 1-minute bar was found — Yahoo serves those for ~30 days only, so an
+ * older trade degrades to an hourly or daily bar and must be labeled as such.
+ */
+export interface PriceResolution {
+  resolution: "1m" | "1h" | "1d";
+  bar_time: string;
+  is_approximate: boolean;
+  message: string;
+}
+
+/** Per-ticker state of the background 8-quarter SEC baseline fetch. */
+export interface BaselineStatus {
+  state: "none" | "queued" | "running" | "complete" | "partial" | "failed";
+  message: string;
+  ingested?: number;
+  start_year?: number;
+  end_year?: number;
+}
+
+export interface PortfolioResponse {
+  holdings: Holding[];
+  total_cost_basis: number;
+  total_market_value: number | null;
+  total_unrealized_pnl: number | null;
+  total_roi: number | null;
+  baseline_status: Record<string, BaselineStatus>;
+}
+
+export interface TradesResponse {
+  trades: Trade[];
+  total: number;
+  ticker: string | null;
+}
+
+/** POST /portfolio/trades — what the user types, and nothing more. */
+export interface TradeCreate {
+  ticker: string;
+  side: "buy" | "sell";
+  quantity: number;
+  executed_at: string;
+  entry_rationale?: string | null;
+  /** Manual override; omit so the backend derives the fill from market data. */
+  execution_price?: number | null;
+  fx_rate?: number | null;
+}
+
+export interface TradeResponse {
+  trade: Trade;
+  holding: Holding | null;
+  /** Null when the caller supplied an explicit price (no lookup happened). */
+  price_resolution: PriceResolution | null;
+}
+
+export interface HoldingCreate {
+  ticker: string;
+  quantity: number;
+  avg_price: number;
+  initial_fx_rate?: number | null;
+  currency?: string;
+}
+
+export interface HoldingCreatedResponse {
+  holding: Holding;
+  baseline_started: boolean;
+  baseline_status: BaselineStatus;
+}
+
+// =============================================================================
+// Trading Coach (POST /coach/review)
+// =============================================================================
+
+/** One bias the coach believes it can evidence from the journal. */
+export interface DetectedBias {
+  bias: string;
+  evidence: string;
+  /** Dates of real past trades. The backend strips any it can't verify. */
+  past_occurrences: string[];
+  severity: "mild" | "moderate" | "strong" | string;
+}
+
+export interface CoachReport {
+  agent: string;
+  confidence: number;
+  reasoning: string;
+  ticker: string | null;
+  proposed_action: string | null;
+  rationale_evaluation: string;
+  detected_biases: DetectedBias[];
+  /** Null when the journal is too short for a pattern to mean anything. */
+  historical_pattern: string | null;
+  coaching_feedback: string;
+  /** 0 = contradicts the objective data, 100 = fully consistent with it. */
+  alignment_score: number;
+  supporting_data_points: string[];
+  data_limitations: string[];
+  history_sufficient: boolean;
+}
+
+export interface CoachReviewRequest {
+  ticker?: string | null;
+  proposed_side?: "buy" | "sell" | null;
+  proposed_quantity?: number | null;
+  entry_rationale: string;
+}

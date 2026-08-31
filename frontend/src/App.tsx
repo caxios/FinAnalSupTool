@@ -26,6 +26,7 @@ import FilingDashboard from "./views/FilingDashboard";
 import CompanyMedia from "./views/CompanyMedia";
 import MacroSentiment from "./views/MacroSentiment";
 import DeepAnalysis from "./views/DeepAnalysis";
+import Portfolio from "./views/Portfolio";
 
 export default function App() {
   const [activeTicker, setActiveTicker] = useState<string | null>(null);
@@ -145,6 +146,7 @@ export default function App() {
               <Route path="/media" element={<CompanyMedia />} />
               <Route path="/macro" element={<MacroSentiment />} />
               <Route path="/analysis" element={<DeepAnalysis />} />
+              <Route path="/portfolio" element={<Portfolio />} />
             </Routes>
           </main>
 

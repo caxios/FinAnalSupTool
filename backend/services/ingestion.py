@@ -58,7 +58,15 @@ logger.info(f"Ingestion staging directory: {STAGING_DIR}")
 
 
 def staging_path(filename: str) -> Path:
-    """Path under the shared staging dir where a caller should write a PDF."""
+    """
+    Path under the shared staging dir where a caller should write a PDF.
+
+    Recreates the directory if it has gone missing. The dir is made once at
+    import and removed by the shutdown hook, so a background ingestion still in
+    flight across a shutdown — or any external cleanup of the system temp dir —
+    would otherwise fail on a path that no longer exists.
+    """
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
     return STAGING_DIR / filename
 
 

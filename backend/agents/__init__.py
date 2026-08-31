@@ -17,6 +17,8 @@ from .company_news_agent import CompanyNewsAgent
 from .macro_market_agent import MacroMarketAgent
 from .youtube_agent import YouTubeAgent
 from .macro_history_agent import MacroHistoryAgent
+from .quant_risk_agent import QuantRiskAgent
+from .coach_agent import CoachAgent
 from .manager_agent import ManagerAgent
 from .debate import (
     AgentArgument,
@@ -38,6 +40,8 @@ __all__ = [
     "MacroMarketAgent",
     "YouTubeAgent",
     "MacroHistoryAgent",
+    "QuantRiskAgent",
+    "CoachAgent",
     "ManagerAgent",
     "date_range_to_quarters",
     "AgentArgument",

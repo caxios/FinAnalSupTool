@@ -87,6 +87,8 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
     "macro_market": "Macro & Market Analyst",
     "technical_analysis": "Technical (Price) Analyst",
     "macro_history": "Macro History Analyst",
+    "quant_risk": "Quantitative Risk Analyst",
+    "trading_coach": "Trading Coach",
     "manager": "Lead Analyst (Manager)",
 }
 
