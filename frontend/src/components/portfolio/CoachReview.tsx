@@ -1,19 +1,29 @@
 /**
  * CoachReview.tsx
  * ───────────────
- * The trading coach's verdict on a trade the user has NOT yet made.
+ * The trading coach's verdict on one decision, in either of two modes.
  *
- * Placed inside the trade form on purpose: after the rationale is written but
- * before "Log trade" is clicked is the only moment coaching can still change
- * the decision. Afterwards it is just a scorekeeper.
+ * **Pre-trade** — rendered inside the trade form. After the rationale is written
+ * but before "Log trade" is clicked is the only moment coaching can still change
+ * the decision.
  *
- * Two presentational rules, both about not overstating what the coach knows:
+ * **Retrospective** — rendered inside a journal row, for a trade already logged.
+ * Here the headline number is `process_quality`, which the backend produced
+ * *before* the model was shown what happened next, and the outcome is reported
+ * beside it rather than folded into it. That separation is the point: a decision
+ * can be sound and still lose money, and a review that cannot say so teaches the
+ * user to chase outcomes.
+ *
+ * Three presentational rules, all about not overstating what the coach knows:
  *   - `history_sufficient: false` is shown prominently. A coach that sounds
  *     equally confident with 2 trades and 200 teaches the user to trust it
  *     when it shouldn't be trusted.
  *   - `past_occurrences` dates are rendered as evidence chips. The backend has
  *     already stripped any date it could not match to a real journal entry, so
  *     everything displayed here is a trade the user actually made.
+ *   - The four-quadrant verdict is coloured by the PROCESS, never by the money.
+ *     "Bad process, good outcome" is the most dangerous result there is and must
+ *     not be shown in the same green as a decision that was actually sound.
  */
 
 import type { CoachReport } from "../../types";
@@ -29,56 +39,144 @@ function severityTone(severity: string): "negative" | "neutral" {
   return severity === "strong" ? "negative" : "neutral";
 }
 
+/**
+ * The four quadrants, and how each should FEEL.
+ *
+ * Tone follows the process, never the outcome. "Bad process, good outcome" is
+ * the most dangerous cell there is — a bad habit just got paid — so it must not
+ * render as a success. Colouring by outcome here would teach exactly the
+ * outcome-chasing the two-pass review exists to prevent.
+ */
+const QUADRANTS: Record<
+  string,
+  { label: string; tone: "positive" | "negative" | "neutral"; note: string }
+> = {
+  "good process, good outcome": {
+    label: "Sound decision, and it worked",
+    tone: "positive",
+    note: "Repeat this.",
+  },
+  "good process, bad outcome": {
+    label: "Sound decision, bad luck",
+    tone: "positive",
+    note: "The reasoning held up. Losing money on a good decision is not a reason to change the process.",
+  },
+  "bad process, good outcome": {
+    label: "Got away with it",
+    tone: "negative",
+    note: "This made money despite the reasoning, not because of it — the most dangerous kind of result, because it rewards the habit.",
+  },
+  "bad process, bad outcome": {
+    label: "The reasoning did not hold up",
+    tone: "negative",
+    note: "The process is what to fix here.",
+  },
+  "too early to tell": {
+    label: "Too early to tell",
+    tone: "neutral",
+    note: "No outcome horizon has elapsed yet.",
+  },
+};
+
 export default function CoachReview({
   report,
   onDismiss,
 }: {
   report: CoachReport;
-  onDismiss: () => void;
+  /** Omitted when the review is embedded in a journal row rather than a form. */
+  onDismiss?: () => void;
 }) {
-  const tone = alignmentTone(report.alignment_score);
+  const retro = report.review_type === "retrospective";
+
+  // On a retrospective the headline number is the PROCESS score, which was
+  // produced before the model was shown what happened next.
+  const score = retro
+    ? report.process_quality ?? report.alignment_score
+    : report.alignment_score;
+  const tone = alignmentTone(score);
+  const quadrant = report.luck_vs_skill
+    ? QUADRANTS[report.luck_vs_skill.trim().toLowerCase()]
+    : undefined;
 
   return (
     <section className="coach-review">
       <header className="coach-head">
         <div className="coach-title">
           <span className="coach-icon">🧠</span>
-          Coach review
+          {retro ? "Looking back at this trade" : "Coach review"}
           {report.proposed_action && (
             <span className="coach-subject">{report.proposed_action}</span>
           )}
         </div>
-        <button className="btn-close" onClick={onDismiss} title="Dismiss review">
-          ✕
-        </button>
+        {onDismiss && (
+          <button className="btn-close" onClick={onDismiss} title="Dismiss review">
+            ✕
+          </button>
+        )}
       </header>
 
       <div className="coach-align">
-        <div className="coach-align-label">Alignment with the data</div>
+        <div className="coach-align-label">
+          {retro ? "Quality of the reasoning" : "Alignment with the data"}
+        </div>
         <div className={`coach-align-score tone-${tone}`}>
-          {report.alignment_score}
+          {score}
           <span className="coach-align-max">/100</span>
         </div>
         <div className="coach-align-bar">
           <div
             className={`coach-align-fill coach-align-fill-${tone}`}
-            style={{ width: `${Math.min(100, Math.max(0, report.alignment_score))}%` }}
+            style={{ width: `${Math.min(100, Math.max(0, score))}%` }}
           />
         </div>
+        {retro && (
+          <p className="coach-align-hint">
+            Scored on what was knowable at the time — before the outcome was
+            taken into account.
+          </p>
+        )}
       </div>
 
       {/* Never let a confident tone paper over a thin journal. */}
       {!report.history_sufficient && (
         <div className="coach-caution">
           Not enough trade history yet to identify a behavioural pattern — this
-          review is based on the current trade and the available reports only.
+          review is based on {retro ? "this trade" : "the current trade"} and the
+          available reports only.
+        </div>
+      )}
+
+      {/* The four-quadrant verdict. Tone follows the process, not the money. */}
+      {retro && quadrant && (
+        <div className={`coach-quadrant coach-quadrant-${quadrant.tone}`}>
+          <div className="coach-quadrant-label">{quadrant.label}</div>
+          <p className="coach-quadrant-note">{quadrant.note}</p>
+        </div>
+      )}
+
+      {retro && report.what_was_knowable && (
+        <div className="coach-block">
+          <h4 className="coach-block-title">What the data said at the time</h4>
+          <p className="coach-text">{report.what_was_knowable}</p>
         </div>
       )}
 
       <div className="coach-block">
-        <h4 className="coach-block-title">Your rationale vs. the data</h4>
+        <h4 className="coach-block-title">
+          {retro ? "Your reasoning vs. that data" : "Your rationale vs. the data"}
+        </h4>
         <p className="coach-text">{report.rationale_evaluation}</p>
       </div>
+
+      {retro && report.outcome_summary && (
+        <div className="coach-block">
+          <h4 className="coach-block-title">What happened next</h4>
+          <p className="coach-text">{report.outcome_summary}</p>
+          {report.hindsight_note && (
+            <p className="coach-text coach-hindsight">{report.hindsight_note}</p>
+          )}
+        </div>
+      )}
 
       {report.detected_biases.length > 0 && (
         <div className="coach-block">

@@ -15,12 +15,19 @@
  */
 
 import { useCallback, useState } from "react";
-import type { Holding, TradeResponse } from "../types";
+import type { Holding, JournalReport, TradeResponse } from "../types";
 import { useDashboard } from "../context/DashboardContext";
 import { useAsync } from "../hooks/useAsync";
-import { getPortfolio, getTrades, addHolding, removeHolding } from "../api";
+import {
+  getPortfolio,
+  getTrades,
+  addHolding,
+  removeHolding,
+  reviewJournal,
+} from "../api";
 import TradeForm from "../components/portfolio/TradeForm";
 import TradeHistory from "../components/portfolio/TradeHistory";
+import JournalReview from "../components/portfolio/JournalReview";
 
 /** Map a signed number to the app's existing tone classes. */
 function tone(n: number | null | undefined): "positive" | "negative" | "neutral" {
@@ -145,7 +152,27 @@ export default function Portfolio() {
   const portfolio = useAsync(() => getPortfolio(), [version]);
   const journal = useAsync(() => getTrades(filterTicker), [version, filterTicker]);
 
+  // The whole-record review. Scoped by the journal's own ticker filter, so
+  // "review my AAPL trades" needs no second control.
+  const [journalReport, setJournalReport] = useState<JournalReport | null>(null);
+  const [journalReviewing, setJournalReviewing] = useState(false);
+  const [journalError, setJournalError] = useState<string | null>(null);
+
   const refresh = useCallback(() => setVersion((v) => v + 1), []);
+
+  async function handleJournalReview() {
+    setJournalReviewing(true);
+    setJournalError(null);
+    try {
+      setJournalReport(await reviewJournal({ ticker: filterTicker }));
+    } catch (err) {
+      setJournalError(
+        err instanceof Error ? err.message : "The journal review failed."
+      );
+    } finally {
+      setJournalReviewing(false);
+    }
+  }
 
   const holdings: Holding[] = portfolio.data?.holdings ?? [];
   const tickers = holdings.map((h) => h.ticker);
@@ -348,7 +375,34 @@ export default function Portfolio() {
 
       {/* ── Journal ────────────────────────────────────────── */}
       <section className="view-section">
-        <h2 className="section-title">📓 Trading Journal</h2>
+        <div className="section-head-row">
+          <h2 className="section-title">📓 Trading Journal</h2>
+          <button
+            className="btn-coach"
+            disabled={journalReviewing || (journal.data?.trades.length ?? 0) === 0}
+            onClick={handleJournalReview}
+            title={
+              filterTicker
+                ? `Review your ${filterTicker} trades as a whole`
+                : "Review your whole record — patterns, not single decisions"
+            }
+          >
+            {journalReviewing
+              ? "Reviewing…"
+              : `🧠 Review ${filterTicker ?? "my whole journal"}`}
+          </button>
+        </div>
+
+        {journalError && (
+          <div className="journal-notice journal-error">{journalError}</div>
+        )}
+        {journalReport && (
+          <JournalReview
+            report={journalReport}
+            onDismiss={() => setJournalReport(null)}
+          />
+        )}
+
         <TradeHistory
           trades={journal.data?.trades ?? []}
           loading={journal.loading}

@@ -697,6 +697,74 @@ class CoachReviewRequest(BaseModel):
         return (v or "").strip().upper() or None
 
 
+class JournalReviewRequest(BaseModel):
+    """
+    Request body for POST /coach/review/journal — a review of the whole record.
+
+    Every field is optional: the default is "review everything". The scope is
+    echoed back in the report's ``scope_description`` so the user can check what
+    was actually looked at rather than inferring it.
+    """
+
+    ticker: str | None = Field(
+        None, description="Restrict to one company; null reviews every company"
+    )
+    since: str | None = Field(
+        None,
+        description="ISO date; only trades executed on or after it are reviewed",
+    )
+    limit: int = Field(
+        50, ge=1, le=200,
+        description="Maximum journal entries to consider, newest first",
+    )
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_upper(cls, v: str | None) -> str | None:
+        return (v or "").strip().upper() or None
+
+
+class StoredReview(BaseModel):
+    """
+    A persisted coaching review as it comes back out of the database.
+
+    ``report`` is deliberately an untyped dict rather than ``CoachReport``: the
+    report schema keeps growing, and an old review must stay readable after it
+    grows again. The frontend renders whichever fields are present.
+    """
+
+    id: int
+    review_type: str = Field(
+        ..., description="'pre_trade', 'retrospective', or 'journal'"
+    )
+    trade_id: int | None = None
+    ticker: str | None = None
+    scope: str | None = None
+    rationale_snapshot: str | None = Field(
+        None, description="The rationale text as it read when it was judged"
+    )
+    model: str | None = Field(None, description="LLM that produced the review")
+    data_as_of: str | None = Field(
+        None,
+        description="run_id of the analysis that backed the review, when one "
+                    "existed at the trade's timestamp",
+    )
+    created_at: str
+    report: dict = Field(default_factory=dict)
+
+
+class StoredReviewsResponse(BaseModel):
+    reviews: list[StoredReview] = Field(default_factory=list)
+    count: int = 0
+
+
+class PendingReviewsResponse(BaseModel):
+    """Logged trades that carry a rationale but have never been reviewed."""
+
+    trades: list[Trade] = Field(default_factory=list)
+    count: int = 0
+
+
 # ─────────────────────────────────────────────────────────────
 # Error Model
 # ─────────────────────────────────────────────────────────────

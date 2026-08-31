@@ -101,10 +101,99 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker_executed
     ON trades (ticker, executed_at)
 """
 
+# Coaching reviews, kept so the coach can remember what it has already said and
+# the user can read back what they were told. Before this table every review was
+# rendered once and discarded.
+#
+# `report_json` holds the whole report rather than exploded columns: the report
+# schema will keep growing, and an old review must stay readable after it does.
+# `rationale_snapshot` freezes the text that was actually judged — if the trade's
+# rationale is later edited, the review must not appear to have assessed words it
+# never saw.
+_SCHEMA_COACH_REVIEWS = """
+CREATE TABLE IF NOT EXISTS coach_reviews (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_type        TEXT    NOT NULL CHECK (review_type IN
+                         ('pre_trade', 'retrospective', 'journal')),
+    trade_id           INTEGER,
+    ticker             TEXT,
+    scope              TEXT,
+    rationale_snapshot TEXT,
+    report_json        TEXT    NOT NULL,
+    model              TEXT,
+    data_as_of         TEXT,
+    created_at         TEXT    NOT NULL,
+    FOREIGN KEY (trade_id) REFERENCES trades (id) ON DELETE CASCADE
+)
+"""
+
+# The journal view asks "has this trade been reviewed?" for every row it renders,
+# and the pending-backlog query is an anti-join over the same column.
+_SCHEMA_REVIEWS_TRADE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_reviews_trade ON coach_reviews (trade_id)
+"""
+
+_SCHEMA_REVIEWS_TYPE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_reviews_type_time
+    ON coach_reviews (review_type, created_at)
+"""
+
+# The cash ledger. Every movement of money is one row here, and a balance is a
+# SUM over them — there is deliberately no stored balance column anywhere, because
+# a stored balance eventually disagrees with its own ledger and nothing can then
+# decide which is right.
+#
+# Two properties carry the whole multi-currency design:
+#
+#   `amount` is denominated in `currency` and SIGNED (+ into the account, - out),
+#   so a balance is `SUM(amount) WHERE currency = ?` with no per-type sign table
+#   to get wrong. The sign is enforced against `flow_type` in `cash_service`,
+#   where the error message can be useful.
+#
+#   `fx_to_krw` is NOT NULL on every row, 1.0 on KRW rows. It is the only record
+#   of what the money was worth in base currency AT THE MOMENT IT MOVED, and it
+#   cannot be reconstructed afterwards. Without it there is no cost basis in won
+#   and no realized FX gain — only a number that silently assumes today's rate
+#   always applied.
+#
+# `fx_out`/`fx_in` are the two legs of a 환전, linked by `conversion_id` so the
+# pair renders as one event. They are internal: no money entered or left.
+# `adjustment` exists for reconciling against a broker statement — a visible,
+# dated, note-carrying row, never a silent correction.
+_SCHEMA_CASH_FLOWS = """
+CREATE TABLE IF NOT EXISTS cash_flows (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    flow_type     TEXT    NOT NULL CHECK (flow_type IN
+                    ('deposit', 'withdrawal', 'buy', 'sell', 'dividend',
+                     'fee', 'tax', 'interest', 'fx_out', 'fx_in', 'adjustment')),
+    currency      TEXT    NOT NULL,
+    amount        REAL    NOT NULL,
+    fx_to_krw     REAL    NOT NULL,
+    occurred_at   TEXT    NOT NULL,
+    trade_id      INTEGER,
+    conversion_id TEXT,
+    note          TEXT,
+    created_at    TEXT    NOT NULL,
+    FOREIGN KEY (trade_id) REFERENCES trades (id) ON DELETE CASCADE
+)
+"""
+
+# Every balance query is "this currency, up to this instant"; the net-worth
+# series in phase 4 walks exactly that, one date at a time.
+_SCHEMA_CASH_FLOWS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_cash_flows_ccy_time
+    ON cash_flows (currency, occurred_at)
+"""
+
 _SCHEMA_STATEMENTS = (
     _SCHEMA_HOLDINGS,
     _SCHEMA_TRADES,
     _SCHEMA_TRADES_INDEX,
+    _SCHEMA_COACH_REVIEWS,
+    _SCHEMA_REVIEWS_TRADE_INDEX,
+    _SCHEMA_REVIEWS_TYPE_INDEX,
+    _SCHEMA_CASH_FLOWS,
+    _SCHEMA_CASH_FLOWS_INDEX,
 )
 
 
@@ -180,7 +269,10 @@ def init_db() -> None:
     with transaction() as conn:
         for statement in _SCHEMA_STATEMENTS:
             conn.execute(statement)
-    logger.info("Portfolio database schema ready (holdings, trades).")
+    logger.info(
+        "Portfolio database schema ready "
+        "(holdings, trades, coach_reviews, cash_flows)."
+    )
 
 
 def close_db() -> None:

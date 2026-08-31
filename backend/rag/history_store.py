@@ -148,3 +148,64 @@ def list_tickers() -> list[dict]:
         tk = f.name.rsplit("_", 3)[0]  # strip _YYYYmmdd_HHMMSS_mmm.json
         counts[tk] = counts.get(tk, 0) + 1
     return [{"ticker": t, "runs": n} for t, n in sorted(counts.items())]
+
+
+def _run_id_time(run_id: str) -> datetime | None:
+    """
+    Parse the UTC instant encoded in a run_id (``YYYYmmdd_HHMMSS_mmm``).
+
+    `save_analysis` builds the id from `datetime.now(timezone.utc)`, so the id
+    itself is a sortable timestamp and no file has to be opened to date a run.
+    """
+    parts = run_id.split("_")
+    if len(parts) < 2:
+        return None
+    try:
+        dt = datetime.strptime(f"{parts[0]}_{parts[1]}", "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+    ms = 0
+    if len(parts) > 2 and parts[2].isdigit():
+        ms = int(parts[2])
+    return dt.replace(microsecond=ms * 1000, tzinfo=timezone.utc)
+
+
+def analysis_as_of(ticker: str, when: datetime) -> dict | None:
+    """
+    The most recent stored analysis run at or **before** ``when``.
+
+    This is what makes an honest retrospective review possible. Handing the coach
+    today's fundamental and technical reports to judge a trade from three months
+    ago is hindsight contamination — the current technical report already knows
+    which way the price went. Returning only what existed at the time keeps the
+    process judgement clean.
+
+    ``None`` means the trade predates every stored run for this ticker. Callers
+    must treat that as "no fundamental pillar" and say so, **not** as licence to
+    fall back to the latest report.
+    """
+    if not _HISTORY_DIR.exists():
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+
+    best_path, best_time = None, None
+    for f in _HISTORY_DIR.glob(f"{_safe(ticker)}_*.json"):
+        # Filenames are `{TICKER}_{YYYYmmdd}_{HHMMSS}_{mmm}.json`; the ticker may
+        # itself contain dots or dashes, so split from the right like list_tickers.
+        parts = f.stem.rsplit("_", 3)
+        if len(parts) < 4:
+            continue
+        run_time = _run_id_time("_".join(parts[1:]))
+        if run_time is None or run_time > when:
+            continue
+        if best_time is None or run_time > best_time:
+            best_path, best_time = f, run_time
+
+    if best_path is None:
+        return None
+    try:
+        return json.loads(best_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read history record {best_path.name}: {e}")
+        return None

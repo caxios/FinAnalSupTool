@@ -40,6 +40,10 @@ import type {
   HoldingCreatedResponse,
   CoachReport,
   CoachReviewRequest,
+  JournalReport,
+  JournalReviewRequest,
+  StoredReviewsResponse,
+  PendingReviewsResponse,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -626,4 +630,66 @@ export async function reviewTrade(body: CoachReviewRequest): Promise<CoachReport
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * Ask the coach to review a trade that has ALREADY been logged.
+ *
+ * Judged in two passes on the backend: the reasoning is scored against only the
+ * data that existed at the trade's timestamp, then the outcome is described
+ * without being allowed to revise that score. That is what makes "good
+ * decision, bad luck" something the report can actually say.
+ *
+ * Calling this on an already-reviewed trade adds a new review rather than
+ * replacing the old one — a verdict at 7 days and one at 90 days are both valid.
+ */
+export async function reviewLoggedTrade(tradeId: number): Promise<CoachReport> {
+  return fetchJson<CoachReport>(`${API_BASE}/coach/review/trade/${tradeId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Ask the coach to review the whole record — patterns, not single decisions. */
+export async function reviewJournal(
+  body: JournalReviewRequest = {}
+): Promise<JournalReport> {
+  return fetchJson<JournalReport>(`${API_BASE}/coach/review/journal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Past reviews, newest first. */
+export async function getReviews(params?: {
+  reviewType?: string;
+  ticker?: string | null;
+  limit?: number;
+}): Promise<StoredReviewsResponse> {
+  const qs = new URLSearchParams();
+  if (params?.reviewType) qs.set("review_type", params.reviewType);
+  if (params?.ticker) qs.set("ticker", params.ticker);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return fetchJson<StoredReviewsResponse>(
+    `${API_BASE}/coach/reviews${q ? `?${q}` : ""}`
+  );
+}
+
+/** Every review of one trade, newest first. More than one is normal. */
+export async function getReviewsForTrade(
+  tradeId: number
+): Promise<StoredReviewsResponse> {
+  return fetchJson<StoredReviewsResponse>(
+    `${API_BASE}/coach/reviews/trade/${tradeId}`
+  );
+}
+
+/**
+ * Logged trades that carry a rationale and have never been reviewed — the
+ * backlog of entries the user wrote a reason for and got nothing back on.
+ */
+export async function getPendingReviews(): Promise<PendingReviewsResponse> {
+  return fetchJson<PendingReviewsResponse>(`${API_BASE}/coach/reviews/pending`);
 }

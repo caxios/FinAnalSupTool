@@ -106,9 +106,19 @@ def _parse_dt(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-async def trade_outcomes(ticker: str | None = None, limit: int | None = 50) -> list[dict]:
+async def trade_outcomes(
+    ticker: str | None = None,
+    limit: int | None = 50,
+    before: datetime | None = None,
+) -> list[dict]:
     """
     Every trade joined to what the price did afterwards.
+
+    ``before`` restricts the result to what was knowable at a past instant: only
+    trades executed at or before it, and only outcome horizons that had already
+    resolved by then. The retrospective coach depends on this — judging a
+    decision's *process* is only honest if the judge cannot see what came after
+    it, and that includes later trades and later horizons of earlier ones.
 
     For each trade we look up the price 7, 30, and 90 days later and compute the
     return **from the user's own fill**, signed by direction: a buy profits when
@@ -122,66 +132,110 @@ async def trade_outcomes(ticker: str | None = None, limit: int | None = 50) -> l
     Network failures degrade to ``None`` outcomes; the journal entry itself is
     still returned so the coach can at least read the rationale.
     """
-    from providers import price_provider   # local import keeps startup light
+    if before is None:
+        trades = portfolio_service.list_trades(ticker=ticker, limit=limit)
+    else:
+        # The SQL LIMIT would cut from the newest end, which is the end being
+        # filtered away — so fetch the lot, then slice after the cutoff applies.
+        rows = portfolio_service.list_trades(ticker=ticker)
+        trades = [r for r in rows
+                  if (d := _parse_dt(r.get("executed_at"))) and d <= before]
+        if limit is not None:
+            trades = trades[:limit]
 
-    trades = portfolio_service.list_trades(ticker=ticker, limit=limit)
     if not trades:
         return []
 
-    now = datetime.now(timezone.utc)
+    # A horizon must have resolved by `before` to be knowable at that moment;
+    # absent a cutoff, "knowable" just means it has resolved by now.
+    horizon_cutoff = before or datetime.now(timezone.utc)
     out: list[dict] = []
 
     for t in trades:
-        executed = _parse_dt(t.get("executed_at"))
-        entry = t.get("execution_price")
-        row = {
-            "id": t.get("id"),
-            "ticker": t.get("ticker"),
-            "side": t.get("side"),
-            "quantity": t.get("quantity"),
-            "executed_at": t.get("executed_at"),
-            "execution_price": entry,
-            "entry_rationale": t.get("entry_rationale"),
-            "rationale_type": classify_rationale(t.get("entry_rationale")),
-            "is_opening_entry": portfolio_service.is_opening_entry(t),
-            "outcomes": {},
-        }
-
-        if executed and entry:
-            for days in OUTCOME_HORIZONS_DAYS:
-                target = executed + timedelta(days=days)
-                key = f"{days}d"
-                if target > now:
-                    row["outcomes"][key] = {
-                        "price": None, "return": None,
-                        "note": "horizon has not elapsed yet",
-                    }
-                    continue
-                try:
-                    res = await price_provider.fetch_execution_price(
-                        row["ticker"], target
-                    )
-                    later = res.price
-                    raw = (later - float(entry)) / float(entry)
-                    # Sign by intent: a sell is "right" when the price falls.
-                    signed = raw if row["side"] == "buy" else -raw
-                    row["outcomes"][key] = {
-                        "price": later,
-                        "return": round(signed, 6),
-                        "note": None,
-                    }
-                except Exception as e:  # noqa: BLE001 — one horizon failing is fine
-                    logger.warning(
-                        f"[journal] outcome lookup failed for "
-                        f"{row['ticker']} +{days}d: {e}"
-                    )
-                    row["outcomes"][key] = {
-                        "price": None, "return": None,
-                        "note": "price lookup failed",
-                    }
+        row = _journal_row(t)
+        row["outcomes"] = await compute_outcomes(t, as_of=horizon_cutoff)
         out.append(row)
 
     return out
+
+
+def _journal_row(trade: dict) -> dict:
+    """The journal fields the coach reads, without the outcome lookup."""
+    return {
+        "id": trade.get("id"),
+        "ticker": trade.get("ticker"),
+        "side": trade.get("side"),
+        "quantity": trade.get("quantity"),
+        "executed_at": trade.get("executed_at"),
+        "execution_price": trade.get("execution_price"),
+        "entry_rationale": trade.get("entry_rationale"),
+        "rationale_type": classify_rationale(trade.get("entry_rationale")),
+        "is_opening_entry": portfolio_service.is_opening_entry(trade),
+    }
+
+
+async def compute_outcomes(trade: dict, as_of: datetime | None = None) -> dict:
+    """
+    What the price did 7/30/90 days after one trade, signed by direction.
+
+    ``as_of`` is the moment the question is being asked from: a horizon landing
+    after it is reported as unelapsed rather than looked up. Passing a past
+    instant yields the outcomes that were knowable then — which is what keeps a
+    retrospective process review free of hindsight.
+    """
+    from providers import price_provider   # local import keeps startup light
+
+    cutoff = as_of or datetime.now(timezone.utc)
+    executed = _parse_dt(trade.get("executed_at"))
+    entry = trade.get("execution_price")
+    ticker, side = trade.get("ticker"), trade.get("side")
+    outcomes: dict = {}
+
+    if not (executed and entry):
+        return outcomes
+
+    for days in OUTCOME_HORIZONS_DAYS:
+        target = executed + timedelta(days=days)
+        key = f"{days}d"
+        if target > cutoff:
+            outcomes[key] = {
+                "price": None, "return": None,
+                "note": "horizon has not elapsed yet",
+            }
+            continue
+        try:
+            res = await price_provider.fetch_execution_price(ticker, target)
+            later = res.price
+            raw = (later - float(entry)) / float(entry)
+            # Sign by intent: a sell is "right" when the price falls.
+            signed = raw if side == "buy" else -raw
+            outcomes[key] = {
+                "price": later, "return": round(signed, 6), "note": None,
+            }
+        except Exception as e:  # noqa: BLE001 — one horizon failing is fine
+            logger.warning(
+                f"[journal] outcome lookup failed for {ticker} +{days}d: {e}"
+            )
+            outcomes[key] = {
+                "price": None, "return": None, "note": "price lookup failed",
+            }
+    return outcomes
+
+
+async def outcomes_for_trade(trade_id: int) -> dict | None:
+    """
+    One journal entry joined to its outcomes, as of now.
+
+    The retrospective coach's second pass needs exactly this and nothing else —
+    fetching the whole ticker's journal to find one row would spend a price
+    lookup per horizon per trade for a single answer.
+    """
+    trade = portfolio_service.get_trade(trade_id)
+    if trade is None:
+        return None
+    row = _journal_row(trade)
+    row["outcomes"] = await compute_outcomes(trade)
+    return row
 
 
 async def rationale_corpus(ticker: str | None = None, limit: int | None = 50) -> list[dict]:

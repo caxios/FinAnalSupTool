@@ -42,6 +42,15 @@ class CoachReport(AgentReport):
 
     agent: str = "trading_coach"
 
+    review_type: str = Field(
+        "pre_trade",
+        description="'pre_trade' (a trade being considered) or 'retrospective' "
+                    "(a trade already logged)",
+    )
+    trade_id: int | None = Field(
+        None, description="The reviewed journal entry, on a retrospective review"
+    )
+
     ticker: str | None = None
     proposed_action: str | None = Field(
         None, description="The trade being reviewed, e.g. 'sell 15 AAPL'"
@@ -80,3 +89,109 @@ class CoachReport(AgentReport):
         description="False when there are too few logged trades for any "
                     "behavioural pattern to be meaningful",
     )
+
+    # ── Retrospective-only fields ────────────────────────────────────────────
+    # All None on a pre-trade review, where there is no outcome to speak of.
+    #
+    # `process_quality` is deliberately NOT `alignment_score` under another name.
+    # A retrospective review knows what happened next, and a single blended score
+    # would let that outcome leak into the judgement of the decision. Scoring the
+    # process separately — and generating it before the outcome is ever shown to
+    # the model — is what keeps "good decision, bad luck" expressible.
+
+    process_quality: int | None = Field(
+        None, ge=0, le=100,
+        description="Quality of the REASONING judged only on what was knowable "
+                    "at the time; 100 = sound process, 0 = unsupported by the "
+                    "data that existed then",
+    )
+    what_was_knowable: str | None = Field(
+        None,
+        description="What the data available at the trade's timestamp actually "
+                    "said — the standard the decision is held to",
+    )
+    outcome_summary: str | None = Field(
+        None,
+        description="What the price then did over 7/30/90 days, stated plainly; "
+                    "null when no horizon has elapsed yet",
+    )
+    luck_vs_skill: str | None = Field(
+        None,
+        description="Which quadrant this trade fell in: 'good process, good "
+                    "outcome' | 'good process, bad outcome' | 'bad process, "
+                    "good outcome' | 'bad process, bad outcome'",
+    )
+    hindsight_note: str | None = Field(
+        None,
+        description="Why the process and the outcome are scored separately, in "
+                    "terms specific to this trade",
+    )
+    data_as_of: str | None = Field(
+        None,
+        description="run_id of the analysis that existed at the trade's "
+                    "timestamp and backed the process judgement. Null means no "
+                    "analysis had been run yet — never that the current one was "
+                    "used instead.",
+    )
+
+
+class RecurringPattern(BaseModel):
+    """A behaviour the journal shows more than once, with the dates to prove it."""
+
+    pattern: str = Field(..., description="What recurs, named plainly")
+    occurrences: list[str] = Field(
+        default_factory=list,
+        description="Dates (YYYY-MM-DD) of the trades showing it. Must be real "
+                    "journal entries; unverifiable dates are stripped.",
+    )
+    trend: str = Field(
+        "stable", description="'worsening', 'stable', or 'improving' over time"
+    )
+    evidence: str = Field(
+        "", description="What in the journal supports the claim — quote the user"
+    )
+
+
+class JournalReport(AgentReport):
+    """
+    A review of the user's whole record rather than one decision.
+
+    Not a loop over single-trade reviews: it answers questions that only exist at
+    the level of the whole journal — which patterns actually recur, whether good
+    process has actually paid, and which advice was given and then ignored.
+    """
+
+    agent: str = "trading_coach"
+    review_type: str = "journal"
+
+    scope_description: str = Field(
+        "", description="Exactly what was reviewed, in words the user can check"
+    )
+    trades_reviewed: int = 0
+    period: str | None = Field(
+        None, description="Date range covered, e.g. '2026-02-10..2026-08-30'"
+    )
+
+    recurring_patterns: list[RecurringPattern] = Field(default_factory=list)
+    process_vs_outcome: str = Field(
+        "",
+        description="Whether well-reasoned decisions have actually done better "
+                    "here, or whether the record cannot yet say",
+    )
+    advice_followed: str | None = Field(
+        None,
+        description="What earlier reviews warned about and what the user then "
+                    "did; null when there are no earlier reviews",
+    )
+    strengths: list[str] = Field(
+        default_factory=list,
+        description="What this user does well. Required, not decorative — a "
+                    "review that only lists faults stops being read.",
+    )
+    priorities: list[str] = Field(
+        default_factory=list,
+        description="At most 3, most important first. A list of twelve fixes is "
+                    "a list of zero fixes.",
+    )
+    history_sufficient: bool = True
+    data_limitations: list[str] = Field(default_factory=list)

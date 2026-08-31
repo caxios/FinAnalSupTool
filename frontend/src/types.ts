@@ -491,6 +491,9 @@ export interface CoachReport {
   agent: string;
   confidence: number;
   reasoning: string;
+  /** 'pre_trade' for a trade being considered, 'retrospective' for a logged one. */
+  review_type: "pre_trade" | "retrospective" | string;
+  trade_id: number | null;
   ticker: string | null;
   proposed_action: string | null;
   rationale_evaluation: string;
@@ -503,6 +506,83 @@ export interface CoachReport {
   supporting_data_points: string[];
   data_limitations: string[];
   history_sufficient: boolean;
+
+  // ── Retrospective only; null on a pre-trade review. ──
+  /**
+   * Quality of the REASONING, scored before the outcome was shown to the model.
+   * Deliberately separate from the outcome: a decision can be sound and still
+   * lose money, and collapsing the two teaches outcome-chasing.
+   */
+  process_quality: number | null;
+  what_was_knowable: string | null;
+  outcome_summary: string | null;
+  /** Which of the four quadrants this trade fell in. */
+  luck_vs_skill: string | null;
+  hindsight_note: string | null;
+  /** run_id of the analysis that existed at the trade's timestamp, if any. */
+  data_as_of: string | null;
+}
+
+export interface RecurringPattern {
+  pattern: string;
+  /** Real journal dates. The backend strips any it cannot verify. */
+  occurrences: string[];
+  trend: "worsening" | "stable" | "improving" | string;
+  evidence: string;
+}
+
+/** The coach's review of the whole record rather than one decision. */
+export interface JournalReport {
+  agent: string;
+  confidence: number;
+  reasoning: string;
+  review_type: "journal" | string;
+  scope_description: string;
+  trades_reviewed: number;
+  period: string | null;
+  recurring_patterns: RecurringPattern[];
+  process_vs_outcome: string;
+  advice_followed: string | null;
+  strengths: string[];
+  /** Capped at 3 by the backend. */
+  priorities: string[];
+  history_sufficient: boolean;
+  data_limitations: string[];
+}
+
+export interface JournalReviewRequest {
+  ticker?: string | null;
+  since?: string | null;
+  limit?: number;
+}
+
+/** A persisted review as it comes back from the database. */
+export interface StoredReview {
+  id: number;
+  review_type: "pre_trade" | "retrospective" | "journal" | string;
+  trade_id: number | null;
+  ticker: string | null;
+  scope: string | null;
+  /** The rationale text as it read when it was judged. */
+  rationale_snapshot: string | null;
+  model: string | null;
+  data_as_of: string | null;
+  created_at: string;
+  /**
+   * Untyped on purpose: the report schema keeps growing and old reviews must
+   * stay readable. Render whichever fields are present.
+   */
+  report: Partial<CoachReport> & Partial<JournalReport>;
+}
+
+export interface StoredReviewsResponse {
+  reviews: StoredReview[];
+  count: number;
+}
+
+export interface PendingReviewsResponse {
+  trades: Trade[];
+  count: number;
 }
 
 export interface CoachReviewRequest {

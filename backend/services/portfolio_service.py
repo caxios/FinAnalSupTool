@@ -199,6 +199,14 @@ def list_trades(ticker: str | None = None, limit: int | None = None) -> list[dic
     return [dict(r) for r in db.get_connection().execute(sql, params).fetchall()]
 
 
+def get_trade(trade_id: int) -> dict | None:
+    """One journal entry by id, or ``None``. Used by the retrospective coach."""
+    row = db.get_connection().execute(
+        "SELECT * FROM trades WHERE id = ?", (int(trade_id),)
+    ).fetchone()
+    return _row_to_dict(row)
+
+
 def record_trade(
     ticker: str,
     side: str,

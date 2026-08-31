@@ -36,7 +36,7 @@ from services.storage import (
     get_media_cache,
     get_debate_store,
 )
-from services import media_service, journal_analysis
+from services import media_service, journal_analysis, review_store
 
 router = APIRouter(tags=["chat"])
 
@@ -117,6 +117,14 @@ Ground rules:
 {patterns}
 === END SUMMARY ===
 
+=== WHAT YOU HAVE ALREADY TOLD THIS USER (past reviews) ===
+{reviews}
+=== END REVIEWS ===
+
+=== TRADES STILL AWAITING A REVIEW ===
+{pending}
+=== END PENDING ===
+
 === FUNDAMENTAL ANALYST REPORT (if a Deep Analysis was run) ===
 {fundamental}
 === END FUNDAMENTAL ===
@@ -138,6 +146,25 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
     journal = await journal_analysis.trade_outcomes(limit=25)
     patterns = await journal_analysis.pattern_summary()
 
+    # Past reviews let the user ask "what have you been telling me?" and "what
+    # did I ignore?" — questions the coach could not answer while every review
+    # was discarded the moment it was rendered.
+    reviews = [
+        {
+            "reviewed_at": r.get("created_at"),
+            "review_type": r.get("review_type"),
+            "ticker": r.get("ticker"),
+            "trade_id": r.get("trade_id"),
+            "rationale_at_the_time": r.get("rationale_snapshot"),
+            "coaching_feedback": (r.get("report") or {}).get("coaching_feedback"),
+            "alignment_score": (r.get("report") or {}).get("alignment_score"),
+            "process_quality": (r.get("report") or {}).get("process_quality"),
+            "luck_vs_skill": (r.get("report") or {}).get("luck_vs_skill"),
+        }
+        for r in review_store.list_reviews(limit=15)
+    ]
+    pending = review_store.unreviewed_trades(limit=15)
+
     sec_report = technical_report = None
     if ticker:
         record = debate_store.get(ticker) or {}
@@ -154,6 +181,18 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
                 "(The journal is EMPTY. The user has logged no trades; do not "
                 "cite any past trade.)",
         patterns=dump(patterns),
+        reviews=dump(reviews) if reviews else
+                "(You have not reviewed anything for this user yet.)",
+        pending=(
+            json.dumps(
+                [{"trade_id": t["id"], "ticker": t["ticker"], "side": t["side"],
+                  "executed_at": t["executed_at"],
+                  "entry_rationale": t.get("entry_rationale")}
+                 for t in pending],
+                ensure_ascii=False, indent=2, default=str,
+            )
+            if pending else "(None — every logged trade has been reviewed.)"
+        ),
         fundamental=dump(sec_report),
         technical=dump(technical_report),
     )
