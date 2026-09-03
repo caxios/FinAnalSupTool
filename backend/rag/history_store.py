@@ -170,26 +170,52 @@ def _run_id_time(run_id: str) -> datetime | None:
     return dt.replace(microsecond=ms * 1000, tzinfo=timezone.utc)
 
 
+def _window_end(record: dict) -> datetime | None:
+    """
+    The last date whose data an analysis could have seen.
+
+    ``analysis_period`` is stored as ``"YYYY-MM-DD..YYYY-MM-DD"`` by
+    ``pipeline.analyze_pipeline``. The end of that window — not when the run
+    happened — is what bounds the information inside it.
+    """
+    period = (record.get("analysis_period") or "").strip()
+    if ".." not in period:
+        return None
+    try:
+        end = datetime.strptime(period.split("..", 1)[1].strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    # End of that day, so an analysis through 2026-06-30 covers a trade stamped
+    # anywhere in 2026-06-30.
+    return end.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+
+
 def analysis_as_of(ticker: str, when: datetime) -> dict | None:
     """
-    The most recent stored analysis run at or **before** ``when``.
+    The stored analysis whose data window ends latest at or **before** ``when``.
 
     This is what makes an honest retrospective review possible. Handing the coach
     today's fundamental and technical reports to judge a trade from three months
     ago is hindsight contamination — the current technical report already knows
-    which way the price went. Returning only what existed at the time keeps the
-    process judgement clean.
+    which way the price went.
 
-    ``None`` means the trade predates every stored run for this ticker. Callers
-    must treat that as "no fundamental pillar" and say so, **not** as licence to
-    fall back to the latest report.
+    The test is **what the analysis could see, not when it was run.** A run
+    executed today over a window ending 2026-06-30 contains nothing that
+    postdates that quarter, so it is legitimate evidence for an August trade;
+    a run executed in June over a window ending today is not. Judging by run
+    timestamp would get both backwards. Where ``analysis_period`` is missing or
+    malformed the run timestamp is used as a conservative fallback.
+
+    ``None`` means every stored analysis for this ticker sees past ``when``.
+    Callers must treat that as "no fundamental pillar" and say so — **not** as
+    licence to fall back to the latest report.
     """
     if not _HISTORY_DIR.exists():
         return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
 
-    best_path, best_time = None, None
+    best_record, best_end, best_run = None, None, None
     for f in _HISTORY_DIR.glob(f"{_safe(ticker)}_*.json"):
         # Filenames are `{TICKER}_{YYYYmmdd}_{HHMMSS}_{mmm}.json`; the ticker may
         # itself contain dots or dashes, so split from the right like list_tickers.
@@ -197,15 +223,23 @@ def analysis_as_of(ticker: str, when: datetime) -> dict | None:
         if len(parts) < 4:
             continue
         run_time = _run_id_time("_".join(parts[1:]))
-        if run_time is None or run_time > when:
-            continue
-        if best_time is None or run_time > best_time:
-            best_path, best_time = f, run_time
 
-    if best_path is None:
-        return None
-    try:
-        return json.loads(best_path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not read history record {best_path.name}: {e}")
-        return None
+        try:
+            record = json.loads(f.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Skipping unreadable history file {f.name}: {e}")
+            continue
+
+        covers_until = _window_end(record) or run_time
+        if covers_until is None or covers_until > when:
+            continue
+
+        # Latest window wins; between two runs over the same window, the newer
+        # run is the better-informed one.
+        if (best_end is None
+                or covers_until > best_end
+                or (covers_until == best_end and run_time and best_run
+                    and run_time > best_run)):
+            best_record, best_end, best_run = record, covers_until, run_time
+
+    return best_record

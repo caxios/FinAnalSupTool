@@ -387,10 +387,35 @@ export interface Holding {
   unrealized_pnl: number | null;
   /** Fractional, e.g. 0.1542 = +15.42%. */
   unrealized_roi: number | null;
+
+  /** Share of NET WORTH (positions + cash), not of equity. */
+  weight: number | null;
+  // The same wealth stated twice — exactly one of each pair equals the native
+  // figure above. The redundancy is deliberate: no consumer needs a conversion
+  // rule, and the frontend never multiplies by a rate.
+  market_value_krw: number | null;
+  market_value_usd: number | null;
+  cost_basis_krw: number | null;
+  cost_basis_usd: number | null;
+  unrealized_pnl_krw: number | null;
+  unrealized_pnl_usd: number | null;
+  /** The stock's own return, in its trading currency. */
+  roi_local: number | null;
+  /** The currency's return since the position was funded; exactly 0 for KRW. */
+  roi_fx: number | null;
+  roi_krw: number | null;
+  roi_usd: number | null;
 }
 
 /** One journal entry. */
 export interface Trade {
+  /** On a sell, net of fees, in the asset's own currency. */
+  realized_pnl?: number | null;
+  /** The same sale in KRW at the rates that applied — its gap from
+   * `realized_pnl` is the exchange-rate component. */
+  realized_pnl_base?: number | null;
+  fee?: number | null;
+  tax?: number | null;
   id: number;
   ticker: string;
   side: "buy" | "sell";
@@ -418,21 +443,117 @@ export interface PriceResolution {
 }
 
 /** Per-ticker state of the background 8-quarter SEC baseline fetch. */
+/** Progress of the quarterly Deep Analysis runs kicked off with a new holding. */
+export interface BaselineAnalysisStatus {
+  state:
+    | "pending"
+    | "queued"
+    | "running"
+    | "complete"
+    | "partial"
+    | "failed"
+    | "skipped";
+  completed: number;
+  total: number;
+  message: string;
+  failures?: string[];
+  /** run_ids of the analyses produced, viewable in the Deep Analysis view. */
+  run_ids?: string[];
+}
+
 export interface BaselineStatus {
-  state: "none" | "queued" | "running" | "complete" | "partial" | "failed";
+  state:
+    | "none"
+    | "queued"
+    | "running"
+    | "complete"
+    | "partial"
+    | "failed"
+    /** Not a US listing — SEC EDGAR has nothing to fetch. */
+    | "unsupported";
   message: string;
   ingested?: number;
   start_year?: number;
   end_year?: number;
+  analysis?: BaselineAnalysisStatus;
+}
+
+/** The exchange rate a response's converted figures used. One per response. */
+export interface FxInfo {
+  pair: string;
+  /** KRW per 1 USD. Null when unavailable — render a dash, never a zero. */
+  rate: number | null;
+  as_of: string | null;
+  is_stale: boolean;
+  source: string | null;
 }
 
 export interface PortfolioResponse {
   holdings: Holding[];
-  total_cost_basis: number;
+  /**
+   * Totals are null whenever no single figure can honestly be stated — no live
+   * prices yet, or holdings spanning more than one currency. `note` says which.
+   * Per-currency subtotals below always hold, and every holding carries its own
+   * `currency`, so no position is unreadable when an aggregate is withheld.
+   */
+  total_cost_basis: number | null;
   total_market_value: number | null;
   total_unrealized_pnl: number | null;
   total_roi: number | null;
+  note: string | null;
+  currencies: string[];
+  cost_basis_by_currency: Record<string, number>;
+  market_value_by_currency: Record<string, number>;
+  fx: FxInfo | null;
+  /** Per-currency cash balances. */
+  cash: Record<string, number>;
+  cash_initialized: boolean;
+  /**
+   * The money actually held in each currency — distinct from `cash_total_krw` /
+   * `cash_total_usd`, which state the WHOLE cash pile in each. Confusing the two
+   * is the easiest mistake to make here.
+   */
+  cash_balances: Record<string, number>;
+  cash_total_krw: number | null;
+  cash_total_usd: number | null;
+  equity_total_krw: number | null;
+  equity_total_usd: number | null;
+  net_worth_krw: number | null;
+  net_worth_usd: number | null;
+  cost_basis_krw: number | null;
+  cost_basis_usd: number | null;
+  cash_weight: number | null;
+  equity_weight: number | null;
+  /** Share of net worth denominated in a foreign currency. */
+  fx_exposure: number | null;
+  roi_krw_total: number | null;
+  roi_usd_total: number | null;
   baseline_status: Record<string, BaselineStatus>;
+}
+
+/** One movement of money in the cash ledger. */
+export interface CashFlow {
+  id: number;
+  flow_type: string;
+  currency: string;
+  /** Signed and denominated in `currency`: positive in, negative out. */
+  amount: number;
+  /** USDKRW rate when the money moved (1.0 on a KRW row). */
+  fx_to_krw: number;
+  occurred_at: string;
+  trade_id: number | null;
+  /** Links the two legs of a currency conversion. */
+  conversion_id: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface CashPosition {
+  balances: Record<string, number>;
+  base_currency: string;
+  is_initialized: boolean;
+  fx: FxInfo | null;
+  recent_flows: CashFlow[];
 }
 
 export interface TradesResponse {
@@ -590,4 +711,88 @@ export interface CoachReviewRequest {
   proposed_side?: "buy" | "sell" | null;
   proposed_quantity?: number | null;
   entry_rationale: string;
+}
+
+/** Both legs of a 환전, plus the spread against the market rate that day. */
+export interface ConversionResult {
+  conversion_id: string;
+  /** Effective rate, derived from the two amounts — spread included. */
+  rate: number;
+  market_rate: number | null;
+  /** Positive means the conversion cost you, in won. */
+  spread_krw: number | null;
+  /** Set when converting back to base currency. Average cost, not FIFO. */
+  realized_fx_pnl_krw: number | null;
+  out: CashFlow;
+  in: CashFlow;
+}
+
+export interface CashFlowCreate {
+  flow_type: string;
+  currency: string;
+  /** Positive magnitude; the server derives the sign from `flow_type`. */
+  amount: number;
+  occurred_at: string;
+  fx_to_krw?: number | null;
+  note?: string | null;
+}
+
+export interface ConversionCreate {
+  from_currency: string;
+  from_amount: number;
+  to_currency: string;
+  to_amount: number;
+  occurred_at: string;
+  note?: string | null;
+}
+
+export interface CashFlowsResponse {
+  flows: CashFlow[];
+  count: number;
+}
+
+export interface LedgerInitResponse {
+  balances: Record<string, number>;
+  flows_written: number;
+  holdings_funded: number;
+  fx_backfill: { filled: number; unresolved: number; problems: string[] } | null;
+}
+
+export type PerformanceWindow = "1m" | "3m" | "6m" | "1y" | "all";
+
+export interface NetWorthPoint {
+  date: string;
+  equity_krw: number | null;
+  equity_usd: number | null;
+  cash_krw: number | null;
+  cash_usd: number | null;
+  net_worth_krw: number | null;
+  net_worth_usd: number | null;
+  fx_rate: number | null;
+}
+
+export interface ReturnFigure {
+  cumulative: number | null;
+  annualized: number | null;
+  days?: number;
+  note: string | null;
+}
+
+export interface PerformanceReport {
+  window: string;
+  /** Where the ledger begins — the chart must not imply history before it. */
+  coverage_start: string | null;
+  note: string | null;
+  observations: number;
+  series: NetWorthPoint[];
+  twr: Record<string, ReturnFigure>;
+  mwr: Record<string, ReturnFigure>;
+  realized: {
+    realized_pnl_native: number | null;
+    realized_pnl_krw: number | null;
+    realized_fx_pnl_krw: number | null;
+    fees: { native: number; krw: number };
+    taxes: { native: number; krw: number };
+    basis: string;
+  };
 }

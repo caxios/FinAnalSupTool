@@ -104,6 +104,27 @@ class QuantRiskReport(AgentReport):
         default_factory=list,
         description="Holdings left out for missing or too-short price history",
     )
+
+    # ── Cash and currency (phase 5) ──────────────────────────────────────
+    # Cash is a position, not an absence of one. Won cash is genuinely
+    # risk-free for a won-based investor; dollar cash carries the exchange
+    # rate's full volatility and is correlated with the rest of the book.
+    cash_positions: list[dict] = Field(
+        default_factory=list,
+        description="Per-currency cash, with its own risk contribution",
+    )
+    cash: dict = Field(
+        default_factory=dict,
+        description="Balances, weight, and the opportunity cost of holding them",
+    )
+    fx_risk: dict = Field(
+        default_factory=dict,
+        description="Currency exposure and what it does to this book. "
+                    "`fx_contribution` is portfolio volatility minus the same "
+                    "portfolio hedged; NEGATIVE means the exchange rate is "
+                    "reducing total risk, which is common for a won-based "
+                    "investor holding dollars.",
+    )
     data_sufficient: bool = Field(
         True, description="False when the sample is too small for reliable estimates"
     )

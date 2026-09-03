@@ -37,6 +37,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pandas as pd
+
 from providers import price_provider
 from services import risk_metrics
 
@@ -72,7 +74,27 @@ HOW TO READ THE INPUT:
   capital carrying 35% of risk is the single most important thing to report.
 - average_correlation near 1.0 means the holdings move together, so
   diversification is an illusion; near 0 means they genuinely offset.
-- Scenarios show what happens to total volatility if a position grows.
+- Scenarios show what happens to total volatility if a position grows, and
+  `funded_from` says which pocket pays for it.
+
+CURRENCY — read this before interpreting any figure:
+- Every amount is in KRW, and every weight is a share of NET WORTH (positions
+  PLUS cash). Weights over the positions alone therefore sum to LESS than 1;
+  the remainder is `concentration.cash_weight`. Do NOT describe the portfolio as
+  fully invested.
+- The user is won-based. Cash is risk-free only in its own currency: KRW cash
+  has zero volatility, while USD cash carries the exchange rate's volatility and
+  appears in `cash_positions` with a real risk contribution.
+- `fx_risk.fx_contribution` is portfolio volatility minus the same portfolio
+  with the currency hedged away. A NEGATIVE value means dollar exposure is
+  REDUCING total risk, which is common for a won-based investor because USDKRW
+  tends to rise when risk assets fall. Report that as diversification, not as a
+  problem — and never describe FX as pure added risk when the number says
+  otherwise.
+- `fx_risk.exposure` is the share of net worth denominated in a foreign currency.
+- If `cash.cash_drag` is null, say the opportunity cost of holding cash was not
+  computed because no KRW risk-free rate is configured. Do not substitute a US
+  yield for it.
 
 YOUR TASK:
 1. State how much risk this portfolio carries and WHERE it comes from, citing
@@ -159,11 +181,16 @@ class QuantRiskAgent(BaseAgent):
                      optional ``start_date`` / ``end_date``.
         """
         holdings = context.get("holdings") or []
+        cash = context.get("cash") or {}
 
         # An empty portfolio is a normal state of the app, not an error — and
         # there is nothing for an LLM to interpret, so return a well-formed
         # report directly rather than spending a call on it.
-        if not holdings:
+        #
+        # Cash alone is no longer this case: a book of only won has near-zero
+        # risk and a book of only dollars carries the exchange rate's own
+        # volatility. Both are real answers.
+        if not holdings and not cash:
             return QuantRiskReport(
                 agent=self.agent_id,
                 confidence=1.0,
@@ -184,24 +211,80 @@ class QuantRiskAgent(BaseAgent):
             end = end or today.isoformat()
             start = start or (today - timedelta(days=_HISTORY_DAYS)).isoformat()
 
-        prices, dropped = await price_provider.fetch_price_history(tickers, start, end)
-        metrics = risk_metrics.compute_portfolio_risk(holdings, prices)
+        from providers import fx_provider
+        from services import cash_service as cs
+        from services import portfolio_service as ps
+
+        currencies = {t: ps.resolve_asset_currency(t) for t in tickers}
+        base = cs.BASE_CURRENCY
+
+        # BOTH series: base-currency prices drive the risk model (so the
+        # stock/exchange-rate correlation is inside the returns), and the native
+        # ones drive the hedged comparison in `fx_risk`.
+        local_prices, dropped = await price_provider.fetch_price_history(
+            tickers, start, end
+        ) if tickers else (None, [])
+        try:
+            prices, dropped = await price_provider.fetch_price_history_base(
+                tickers, start, end, currencies, base=base
+            ) if tickers else (None, [])
+        except Exception as e:  # noqa: BLE001 — fall back rather than fail the run
+            logger.warning(
+                f"[quant_risk] base-currency series unavailable ({e}); "
+                f"falling back to native prices."
+            )
+            prices = local_prices
+
+        fx_returns = None
+        try:
+            fx = await fx_provider.fetch_fx_history(start, end)
+            if not fx.empty:
+                fx_returns = fx.pct_change().dropna()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[quant_risk] no FX history for risk model: {e}")
+
+        metrics = risk_metrics.compute_portfolio_risk(
+            holdings, prices, cash=cash, fx_returns=fx_returns,
+            base_currency=base, local_prices=local_prices,
+        )
 
         # What-if scenarios on the biggest risk contributors (blueprint §2's
-        # "how does changing this position alter total risk").
+        # "how does changing this position alter total risk"), now funded from
+        # the pocket the money would really come from.
         scenarios: list[dict] = []
-        if metrics.get("positions") and not prices.empty:
+        if metrics.get("positions") and prices is not None and not prices.empty:
             import numpy as np
             rets = risk_metrics.daily_returns(prices)
+            cash_rets = risk_metrics.cash_return_columns(
+                cash, fx_returns, rets.index, base
+            )
+            if not cash_rets.empty:
+                rets = pd.concat([rets, cash_rets], axis=1).dropna(how="any")
             cols = list(rets.columns)
             weight_by = {p["ticker"]: p["weight"] for p in metrics["positions"]}
+            weight_by.update({
+                f"{risk_metrics.CASH_PREFIX}{c['currency']}": c["weight"]
+                for c in metrics.get("cash_positions", [])
+            })
             w = np.array([weight_by.get(c, 0.0) for c in cols], dtype=float)
             for p in metrics["positions"][:_SCENARIO_COUNT]:
                 scenarios.append(
                     risk_metrics.simulate_position_change(
-                        rets, w, p["ticker"], _SCENARIO_DELTA
+                        rets, w, p["ticker"], _SCENARIO_DELTA,
+                        asset_currency=currencies.get(p["ticker"]),
+                        base_currency=base,
                     )
                 )
+            # A lever that touches no position at all, and that this user pulls
+            # every time they convert won to dollars to invest.
+            for c in metrics.get("cash_positions", []):
+                if c["currency"] != base and c["weight"] > 0:
+                    scenarios.append(
+                        risk_metrics.simulate_conversion(
+                            rets, w, c["currency"], 0.5, base_currency=base
+                        )
+                    )
+                    break
 
         payload = {**metrics, "scenarios": scenarios, "excluded_tickers": dropped}
         metrics_text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
@@ -251,6 +334,9 @@ class QuantRiskAgent(BaseAgent):
         report.concentration = metrics.get("concentration", {})
         report.scenarios = scenarios
         report.excluded_tickers = dropped
+        report.cash_positions = metrics.get("cash_positions", [])
+        report.cash = metrics.get("cash", {})
+        report.fx_risk = metrics.get("fx_risk", {})
         report.data_sufficient = bool(
             metrics.get("data_quality", {}).get("sufficient", False)
         )

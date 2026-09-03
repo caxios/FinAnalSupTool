@@ -3106,3 +3106,396 @@ body {
 }
 /* Short by construction — the backend caps priorities at three. */
 .journal-review-priorities li { padding-left: 4px; }
+
+
+/* ═══════════════════════════════════════════════════════════════
+   17. Multi-Currency Holdings
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Which currency a position actually trades in. Without this, ₩260,000 and
+   $314 sit in the same column looking comparable — the confusion that let the
+   app add won into a dollar total in the first place. */
+.portfolio-ccy {
+  margin-left: 6px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.04em; padding: 1px 5px; border-radius: 4px;
+  color: var(--text-muted); background: rgba(148, 163, 184, 0.12);
+  border: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+/* Shown when the backend withholds a total rather than summing denominations.
+   A row of dashes with no explanation is worse than the wrong number it
+   replaced, because the user cannot tell which of the two happened. */
+.portfolio-mixed-note {
+  margin-top: 12px; padding: 10px 14px; border-radius: 10px;
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.28);
+  font-size: 12px; line-height: 1.55; color: var(--text-secondary);
+}
+
+.portfolio-ccy-totals {
+  display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px;
+}
+.portfolio-ccy-total {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.portfolio-ccy-total-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   18. Baseline Ingest & Quarterly Analysis Progress
+   ═══════════════════════════════════════════════════════════════ */
+
+.baseline-panel {
+  display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;
+}
+
+.baseline-row {
+  border: 1px solid var(--border-subtle); border-radius: 10px;
+  background: var(--glass-bg); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+
+.baseline-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.baseline-ticker { font-size: 13px; font-weight: 700; }
+.baseline-state {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(148, 163, 184, 0.12); border: 1px solid var(--border-subtle);
+}
+.baseline-count { font-size: 11px; color: var(--text-muted); }
+
+.baseline-message {
+  margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-secondary);
+}
+
+.baseline-analysis-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; margin-top: 4px;
+}
+.baseline-analysis-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.baseline-analysis-count {
+  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.baseline-bar {
+  height: 5px; border-radius: 3px; overflow: hidden;
+  background: rgba(148, 163, 184, 0.15);
+}
+.baseline-bar-fill {
+  height: 100%; border-radius: 3px; transition: width 400ms;
+  background: var(--accent-teal);
+}
+.baseline-bar-failed { background: var(--color-error); }
+
+.baseline-link {
+  align-self: flex-start; font-size: 12px; font-weight: 500;
+  color: var(--accent-teal); text-decoration: none; margin-top: 2px;
+}
+.baseline-link:hover { text-decoration: underline; }
+
+.baseline-failures { font-size: 11px; color: var(--text-muted); }
+.baseline-failures summary { cursor: pointer; }
+.baseline-failures ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.6; }
+
+
+/* ═══════════════════════════════════════════════════════════════
+   19. Dual-Currency Money, Net Worth, Cash & Performance
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Money ────────────────────────────────────────────────── */
+/* Won reads as the primary figure; dollars sit beneath, dimmed. Both are
+   always present — they are the same wealth stated twice, not a value and a
+   translation. */
+
+.money { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.money-stacked { display: inline-flex; flex-direction: column; line-height: 1.25; }
+.money-stacked .money-krw { font-weight: 600; }
+.money-stacked .money-usd { font-size: 0.85em; color: var(--text-muted); }
+
+.money-compact { display: inline-flex; align-items: baseline; gap: 5px; }
+.money-compact .money-usd { font-size: 0.85em; color: var(--text-muted); }
+.money-divider { color: var(--border-subtle); }
+
+.currency-toggle {
+  display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px;
+  background: rgba(148, 163, 184, 0.10); border: 1px solid var(--border-subtle);
+}
+.currency-toggle-btn {
+  border: none; background: transparent; color: var(--text-secondary);
+  font-size: 12px; font-family: inherit; font-weight: 500;
+  padding: 3px 10px; border-radius: 5px; cursor: pointer; transition: all 150ms;
+}
+.currency-toggle-btn:hover { color: var(--text-primary); }
+.currency-toggle-btn.is-active {
+  background: var(--glass-bg); color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.view-head-right { display: flex; align-items: center; gap: 14px; }
+
+/* ── Net worth header ─────────────────────────────────────── */
+
+.networth {
+  border: 1px solid var(--border-subtle); border-radius: 14px;
+  background: var(--glass-bg); padding: 18px 20px; margin-bottom: 18px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+
+.networth-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-secondary); margin-bottom: 4px;
+}
+.networth-value .money-stacked .money-krw { font-size: 30px; font-weight: 700; }
+.networth-value .money-stacked .money-usd { font-size: 15px; }
+.networth-value .money-single { font-size: 30px; font-weight: 700; }
+
+.networth-split {
+  display: flex; flex-wrap: wrap; gap: 28px;
+  padding-top: 12px; border-top: 1px solid var(--border-subtle);
+}
+.networth-part { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+.networth-part-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary); display: flex; align-items: baseline; gap: 6px;
+}
+.networth-part-pct {
+  font-size: 13px; font-weight: 700; color: var(--text-primary);
+  letter-spacing: 0; text-transform: none;
+}
+.networth-fx-note { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+
+.networth-bar {
+  display: flex; height: 6px; border-radius: 3px; overflow: hidden;
+  background: rgba(148, 163, 184, 0.15);
+}
+.networth-bar-equity { background: var(--accent-teal); }
+.networth-bar-cash { background: rgba(148, 163, 184, 0.55); }
+
+.networth-fx {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-muted);
+}
+.networth-fx-rate { font-variant-numeric: tabular-nums; }
+.networth-fx-stale {
+  padding: 1px 6px; border-radius: 4px; font-weight: 600;
+  color: var(--color-warning); background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+.networth-fx-missing { color: var(--color-warning); }
+.networth-note {
+  font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+  padding: 8px 12px; border-radius: 8px;
+  background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25);
+}
+
+/* ── Cash ─────────────────────────────────────────────────── */
+
+.cash-panel { display: flex; flex-direction: column; gap: 12px; }
+
+.cash-cards { display: flex; flex-wrap: wrap; gap: 12px; }
+.cash-card {
+  flex: 1 1 190px; border: 1px solid var(--border-subtle); border-radius: 10px;
+  background: var(--glass-bg); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.cash-card-total { border-color: rgba(6, 182, 212, 0.3); }
+.cash-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cash-card-ccy {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  color: var(--text-muted); text-transform: uppercase;
+}
+.cash-card-native {
+  font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.cash-card-value { font-size: 12px; }
+
+.cash-negative {
+  font-size: 12px; line-height: 1.55; padding: 10px 12px; border-radius: 8px;
+  color: var(--color-warning);
+  background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.28);
+}
+
+.cash-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.cash-setup {
+  border: 1px solid rgba(6, 182, 212, 0.28); border-radius: 12px;
+  background: rgba(6, 182, 212, 0.05); padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.cash-setup-title { margin: 0; font-size: 15px; font-weight: 600; }
+.cash-setup-note {
+  margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary);
+}
+.cash-setup-fields { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+
+.cash-form {
+  border: 1px solid var(--border-subtle); border-radius: 10px;
+  background: var(--glass-bg); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.cash-form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.cash-form-actions { display: flex; gap: 8px; }
+.cash-form-hint { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+.cash-form-override { font-size: 12px; color: var(--text-secondary); }
+.cash-form-override summary { cursor: pointer; margin-bottom: 8px; }
+.cash-form-implied {
+  font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums;
+}
+.cash-swap { align-self: flex-end; margin-bottom: 2px; }
+
+.cash-conv-result {
+  font-size: 12px; line-height: 1.6; padding: 10px 12px; border-radius: 8px;
+  background: rgba(148, 163, 184, 0.08); border: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.cash-conv-caveat { color: var(--text-muted); font-size: 11px; }
+
+/* ── Holdings table additions ─────────────────────────────── */
+
+.portfolio-weight { font-variant-numeric: tabular-nums; font-weight: 600; }
+.portfolio-row-cash { background: rgba(148, 163, 184, 0.05); cursor: default; }
+.portfolio-row-cash td { color: var(--text-secondary); }
+.portfolio-total-alt {
+  display: block; font-size: 11px; font-weight: 500; color: var(--text-muted);
+}
+
+/* ── Return attribution ───────────────────────────────────── */
+
+.attr-panel { display: flex; flex-direction: column; gap: 16px; }
+.attr-panel-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.attr-panel-title { margin: 0; font-size: 14px; font-weight: 600; }
+.attr-panel-totals {
+  display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.attr-row {
+  border: 1px solid var(--border-subtle); border-radius: 10px;
+  background: var(--glass-bg); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.attr-head { display: flex; align-items: baseline; gap: 8px; }
+.attr-ticker { font-size: 13px; font-weight: 700; }
+.attr-ccy {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 4px; color: var(--text-muted);
+  background: rgba(148, 163, 184, 0.12); border: 1px solid var(--border-subtle);
+}
+
+.attr-bars { display: flex; flex-direction: column; gap: 5px; }
+.attr-bar-row { display: grid; grid-template-columns: 78px 1fr 76px; align-items: center; gap: 10px; }
+.attr-bar-label { font-size: 11px; color: var(--text-secondary); }
+.attr-bar-track {
+  height: 8px; border-radius: 4px; background: rgba(148, 163, 184, 0.13);
+  overflow: hidden;
+}
+.attr-bar-fill { height: 100%; border-radius: 4px; transition: width 300ms; }
+.tone-bg-positive { background: var(--color-success); }
+.tone-bg-negative { background: var(--color-error); }
+.tone-bg-neutral { background: rgba(148, 163, 184, 0.5); }
+.attr-bar-value {
+  font-size: 12px; font-weight: 600; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.attr-total .attr-bar-label { font-weight: 600; color: var(--text-primary); }
+.attr-total { padding-top: 4px; border-top: 1px solid var(--border-subtle); }
+
+.attr-sentence { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.attr-footnote { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+
+/* ── Performance ──────────────────────────────────────────── */
+
+.perf-panel { display: flex; flex-direction: column; gap: 14px; }
+.perf-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.perf-head .btn-secondary-sm.is-active {
+  border-color: var(--accent-teal); color: var(--accent-teal);
+}
+
+.perf-note, .perf-coverage {
+  font-size: 12px; line-height: 1.55; padding: 8px 12px; border-radius: 8px;
+  color: var(--text-secondary);
+  background: rgba(148, 163, 184, 0.08); border: 1px solid var(--border-subtle);
+}
+
+.perf-chart { display: flex; flex-direction: column; gap: 6px; }
+.perf-chart-svg { width: 100%; height: 90px; display: block; }
+.perf-line-up { stroke: var(--color-success); }
+.perf-line-down { stroke: var(--color-error); }
+.perf-chart-axis {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+
+.perf-cards { display: flex; flex-wrap: wrap; gap: 12px; }
+.perf-card {
+  flex: 1 1 240px; border: 1px solid var(--border-subtle); border-radius: 10px;
+  background: var(--glass-bg); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.perf-card-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.perf-card-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.perf-card-annual { font-size: 12px; color: var(--text-muted); }
+.perf-card-note { margin: 4px 0 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+
+.perf-divergence { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
+
+.perf-realized { display: flex; flex-wrap: wrap; gap: 20px; }
+.perf-realized > div { display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.perf-realized-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.perf-basis { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+
+/* ── Ledger ───────────────────────────────────────────────── */
+
+.ledger-tabs { display: flex; gap: 4px; }
+.ledger-tab {
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-secondary); font-family: inherit; font-size: 15px;
+  font-weight: 600; padding: 4px 12px; border-radius: 8px; cursor: pointer;
+  transition: all 150ms;
+}
+.ledger-tab:hover { color: var(--text-primary); }
+.ledger-tab.is-active {
+  color: var(--text-primary); background: var(--glass-bg);
+  border-color: var(--border-subtle);
+}
+
+.ledger-table td { vertical-align: top; }
+.ledger-when { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.ledger-type {
+  font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px;
+  background: rgba(148, 163, 184, 0.12); border: 1px solid var(--border-subtle);
+}
+.ledger-type-deposit, .ledger-type-sell, .ledger-type-dividend, .ledger-type-interest {
+  color: var(--color-success);
+}
+.ledger-type-withdrawal, .ledger-type-buy, .ledger-type-fee, .ledger-type-tax {
+  color: var(--color-error);
+}
+.ledger-type-conversion { color: var(--accent-teal); }
+.ledger-amount { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger-conversion { display: inline-flex; align-items: baseline; gap: 6px; }
+.ledger-arrow { color: var(--text-muted); }
+.ledger-rate { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.ledger-detail { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+.ledger-linked { color: var(--accent-teal); }
+.ledger-note { color: var(--text-muted); }

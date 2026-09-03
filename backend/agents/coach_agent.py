@@ -90,6 +90,11 @@ ABSOLUTE RULES — violating these makes your advice harmful:
 - The rationale-type labels ("emotional"/"analytical") come from a crude keyword
   match, not a psychological assessment. Treat them as a weak hint, not a fact
   about the user.
+- NEVER state a directional view on the exchange rate. You may say what the
+  user's exposure IS, what rate they entered at versus rates they have seen, and
+  that their rationale did not mention the currency. You may NOT say where USDKRW
+  is heading. This is the same failure as inventing a trade — a confident claim
+  the data does not support — and it belongs under the same rule.
 
 WHAT TO DO:
 - Compare the user's stated rationale against the objective reports. Name the
@@ -101,7 +106,28 @@ WHAT TO DO:
   "The last two times you wrote something like this (2026-03-14, 2026-05-02),
   the position was higher 30 days later."
 - Detect biases only when you can evidence them: FOMO, panic selling, loss
-  aversion, anchoring, revenge trading, recency bias.
+  aversion, anchoring, revenge trading, recency bias, over-concentration
+  (repeatedly adding to an already-largest position), cash-drag anxiety
+  (deploying immediately after every deposit), panic de-risking (a withdrawal or
+  sell cluster after a drawdown), and currency chasing (converting to dollars in
+  bulk right after a sharp won move).
+
+SIZING AND CURRENCY — use POSITION & SIZING below when it is present:
+- State concentration as a fact when it is material: "this buy takes AAPL from
+  22% to 38% of your net worth". Often that restatement IS the coaching. Say
+  nothing about size when the trade is small — a 2% position needs no comment.
+- Call out dry-powder exhaustion with the actual number: "this deploys 94% of
+  your remaining dollars, leaving nothing to average down with if the thesis
+  takes longer than you expect". This lands hardest when the rationale sounds
+  urgent.
+- When `requires_conversion` is true, the user is making TWO decisions: the
+  stock and the dollar. Name the exposure change ("this raises your dollar
+  exposure from 51% to 64% of net worth") and note it if the rationale addresses
+  only the company. Buying after the won has already weakened is a fact about
+  their entry rate — state it as that, never as a forecast.
+- Compare what they SAY against what they STAKE. A hedged, uncertain rationale
+  behind an unusually large position — or a strongly argued one behind a token
+  position — is the most legible behavioural signal the journal contains.
 - Set `alignment_score`: 100 = the rationale is fully consistent with the
   objective data, 0 = it directly contradicts it.
 - Be DIRECT but not moralizing. You are a coach, not a scold. Do not lecture
@@ -151,11 +177,108 @@ _USER_TEMPLATE = """\
 {patterns}
 === END SUMMARY ===
 
+=== POSITION & SIZING (computed, in KRW; weights are of NET WORTH) ===
+{sizing}
+=== END SIZING ===
+
 Review this decision.
 """
 
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+async def position_context(
+    ticker: str | None, side: str | None, quantity: float | None,
+    price: float | None = None,
+) -> dict:
+    """
+    The fourth pillar: **how much** this trade commits, and **in which currency**.
+
+    A trade is a different decision at 2% of net worth than at 40%, and a US
+    purchase funded by conversion is two bets — the stock and the dollar — that
+    the app could not previously separate. These are numbers, not judgements:
+    Python computes them, the LLM interprets them, exactly as with the journal
+    statistics and the risk metrics.
+
+    Never raises. A portfolio that cannot be valued yields an empty dict and the
+    prompt simply has no sizing to comment on.
+    """
+    from providers import fx_provider
+    from services import cash_service as cs
+    from services import portfolio_service as ps
+
+    try:
+        valued, totals = await ps.value_holdings()
+        net_worth = totals.get("net_worth_krw")
+        if not net_worth or net_worth <= 0:
+            return {}
+
+        currency = ps.resolve_asset_currency(ticker) if ticker else None
+        balances = cs.balances()
+        spot = None
+        try:
+            spot = (await fx_provider.fetch_spot()).rate
+        except Exception:  # noqa: BLE001 — sizing degrades, it does not fail
+            pass
+
+        ctx: dict = {
+            "net_worth_krw": round(net_worth, 2),
+            "net_worth_usd": totals.get("net_worth_usd"),
+            "cash_balances": balances,
+            "cash_weight": totals.get("cash_weight"),
+            "fx_exposure_before": totals.get("fx_exposure"),
+            "largest_position_weight": max(
+                (v.get("weight") or 0.0 for v in valued), default=None
+            ),
+            "trade_currency": currency,
+        }
+
+        current = next(
+            (v for v in valued if v["ticker"] == (ticker or "").strip().upper()), None
+        )
+        ctx["position_current_weight"] = (current or {}).get("weight")
+
+        # Value the proposed trade at the position's current price when the
+        # caller has no explicit one — a pre-trade review has no fill yet.
+        unit = price or (current or {}).get("current_price")
+        if not (unit and quantity and currency):
+            return ctx
+
+        value_native = float(unit) * float(quantity)
+        value_krw = fx_provider.convert(value_native, currency, "KRW", spot)
+        if value_krw is None:
+            return ctx
+
+        signed = value_krw if (side or "buy") == "buy" else -value_krw
+        ctx["trade_value_krw"] = round(value_krw, 2)
+        ctx["trade_size_pct_of_net_worth"] = round(value_krw / net_worth, 6)
+
+        own_cash = balances.get(currency, 0.0)
+        ctx["trade_size_pct_of_cash"] = (
+            round(value_native / own_cash, 6) if own_cash > 1e-9 else None
+        )
+        # True when this currency's cash cannot cover the purchase, so won would
+        # have to be converted — the hidden second decision.
+        ctx["requires_conversion"] = bool(
+            (side or "buy") == "buy" and value_native > own_cash + 1e-9
+        )
+
+        after = ((current or {}).get("market_value_krw") or 0.0) + signed
+        ctx["position_weight_after"] = round(max(after, 0.0) / net_worth, 6)
+
+        # FX exposure after: a foreign purchase raises it, a foreign sale lowers
+        # it, and a domestic trade leaves it alone.
+        before_exposure = totals.get("fx_exposure")
+        if before_exposure is not None:
+            delta = signed if currency != cs.BASE_CURRENCY else 0.0
+            ctx["fx_exposure_after"] = round(
+                min(max((before_exposure * net_worth + delta) / net_worth, 0.0), 1.0), 6
+            )
+        return ctx
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[coach] position sizing unavailable: {e}")
+        return {}
 
 
 def _cited_date_lists(report) -> list[tuple[object, str]]:
@@ -175,7 +298,25 @@ def _cited_date_lists(report) -> list[tuple[object, str]]:
     return refs
 
 
-def verify_citations(report, journal: list[dict]) -> list[str]:
+def real_dates(journal: list[dict], flows: list[dict] | None = None) -> set[str]:
+    """
+    Every date the coach is allowed to cite.
+
+    Trades **and** cash flows: once the coach can talk about deposits and
+    conversions, those are a second place to invent a date, and a claim about a
+    환전 must be held to exactly the same standard as one about a trade.
+    """
+    dates = {
+        (t.get("executed_at") or "")[:10] for t in journal if t.get("executed_at")
+    }
+    dates |= {
+        (f.get("occurred_at") or "")[:10] for f in (flows or []) if f.get("occurred_at")
+    }
+    return {d for d in dates if d}
+
+
+def verify_citations(report, journal: list[dict],
+                     flows: list[dict] | None = None) -> list[str]:
     """
     Strip any cited date that does not correspond to a real journal entry.
 
@@ -188,18 +329,14 @@ def verify_citations(report, journal: list[dict]) -> list[str]:
     reports, so ``CoachReport`` and ``JournalReport`` are covered by the same
     pass.
     """
-    real_dates = {
-        (t.get("executed_at") or "")[:10]
-        for t in journal
-        if t.get("executed_at")
-    }
+    allowed = real_dates(journal, flows)
     removed: list[str] = []
 
     for owner, attr in _cited_date_lists(report):
         kept = []
         for d in getattr(owner, attr) or []:
             day = (d or "").strip()[:10]
-            if _DATE_RE.fullmatch(day) and day in real_dates:
+            if _DATE_RE.fullmatch(day) and day in allowed:
                 kept.append(day)
             else:
                 removed.append(d)
@@ -210,7 +347,8 @@ def verify_citations(report, journal: list[dict]) -> list[str]:
             f"[coach] dropped {len(removed)} fabricated trade date(s): {removed}"
         )
         report.data_limitations.append(
-            "Some cited past trades did not match the journal and were removed."
+            "Some cited dates did not match the journal or the cash ledger and "
+            "were removed."
         )
     return removed
 
@@ -334,6 +472,10 @@ _RETRO_PROCESS_TEMPLATE = """\
 === THE USER'S JOURNAL UP TO THAT MOMENT ({prior_count} earlier trades) ===
 {journal}
 === END JOURNAL ===
+
+=== POSITION & SIZING AT THAT TIME (computed, in KRW) ===
+{sizing}
+=== END SIZING ===
 
 Judge the reasoning. You do not know what happened next.
 """
@@ -508,6 +650,7 @@ class CoachAgent(BaseAgent):
         fundamental = _compact_report(context.get("sec_report"), _SEC_FIELDS)
         technical = _compact_report(context.get("technical_report"), _TECH_FIELDS)
 
+        sizing = await position_context(ticker, side, qty)
         user_prompt = _USER_TEMPLATE.format(
             proposed=proposed,
             rationale=rationale or "(The user gave no rationale for this trade.)",
@@ -515,6 +658,12 @@ class CoachAgent(BaseAgent):
             technical=technical,
             journal=journal_text,
             patterns=json.dumps(patterns, ensure_ascii=False, indent=2, default=str),
+            sizing=(
+                json.dumps(sizing, ensure_ascii=False, indent=2, default=str)
+                if sizing else
+                "(Not available — the portfolio could not be valued, so do not "
+                "comment on position size.)"
+            ),
         )
 
         if capture is not None:
@@ -523,7 +672,8 @@ class CoachAgent(BaseAgent):
         report = await self._generate_report(CoachReport, _SYSTEM_PROMPT, user_prompt)
 
         # ── Enforce what the prompt only asked for. ──
-        verify_citations(report, real_entries)
+        from services import cash_service as cs
+        verify_citations(report, real_entries, flows=cs.list_flows(limit=200))
 
         report.ticker = ticker
         report.proposed_action = proposed
@@ -592,8 +742,16 @@ class CoachAgent(BaseAgent):
             as_of_reports.get("technical_analysis"), _TECH_FIELDS
         )
 
+        sizing = await position_context(
+            ticker, trade.get("side"), trade.get("quantity"),
+            price=trade.get("execution_price"),
+        )
         pass1_prompt = _RETRO_PROCESS_TEMPLATE.format(
             subject=subject,
+            sizing=(
+                json.dumps(sizing, ensure_ascii=False, indent=2, default=str)
+                if sizing else "(Not available.)"
+            ),
             rationale=rationale or "(No rationale was recorded for this trade.)",
             fundamental=fundamental,
             technical=technical,
@@ -649,7 +807,8 @@ class CoachAgent(BaseAgent):
             report.luck_vs_skill = "too early to tell"
 
         # ── Enforce what the prompts only asked for. ─────────────────────
-        verify_citations(report, prior)
+        from services import cash_service as cs
+        verify_citations(report, prior, flows=cs.list_flows(limit=200))
 
         report.review_type = "retrospective"
         report.trade_id = trade_id
@@ -762,7 +921,8 @@ class CoachAgent(BaseAgent):
         )
 
         # ── Enforce what the prompt only asked for. ──────────────────────
-        verify_citations(report, journal)
+        from services import cash_service as cs
+        verify_citations(report, journal, flows=cs.list_flows(limit=200))
 
         report.scope_description = scope_text
         report.trades_reviewed = len(journal)

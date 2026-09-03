@@ -278,11 +278,37 @@ async def analyze_pipeline(
         logger.warning(f"Could not read the portfolio for risk analysis: {e}")
         holdings = []
 
-    if holdings:
+    # Cash in BASE CURRENCY, keyed by the currency it is actually held in — the
+    # key selects the return series (won: none, dollars: the exchange rate's),
+    # the value is what it is worth in won. A book of only cash is no longer
+    # "nothing to measure": it has near-zero risk in won and real risk in dollars.
+    cash_base: dict[str, float] = {}
+    try:
+        from providers import fx_provider
+        from services import cash_service
+
+        spot = None
+        balances = cash_service.balances()
+        if any(c != cash_service.BASE_CURRENCY and abs(v) > 1e-9
+               for c, v in balances.items()):
+            spot = (await fx_provider.fetch_spot()).rate
+        for currency, amount in balances.items():
+            if abs(amount) < 1e-9:
+                continue
+            converted = fx_provider.convert(
+                amount, currency, cash_service.BASE_CURRENCY, spot
+            )
+            if converted is not None:
+                cash_base[currency] = converted
+    except Exception as e:  # noqa: BLE001 — cash is additive; never fail the run
+        logger.warning(f"Could not read cash balances for risk analysis: {e}")
+
+    if holdings or cash_base:
         try:
             risk_report = await QuantRiskAgent().analyze(
                 {
                     "holdings": holdings,
+                    "cash": cash_base,
                     "macro_report": reports.get("macro_market"),
                     "start_date": start_date,
                     "end_date": end_date,

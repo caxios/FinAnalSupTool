@@ -107,6 +107,12 @@ Ground rules:
 - If the behavioural summary says the history is insufficient, say the history is
   too short to establish a pattern rather than generalizing from a few trades.
 - Be direct but not moralizing. A good decision deserves to be told it is good.
+- NEVER state a directional view on the exchange rate. You may say what the
+  user's dollar exposure IS and what it costs or hedges; you may not say where
+  USDKRW is going.
+- Weights are shares of NET WORTH (positions plus cash), so position weights sum
+  to less than 1 and the remainder is cash. Do not describe the portfolio as
+  fully invested.
 - Be concise and use Markdown.
 
 === THE USER'S TRADING JOURNAL (real logged trades + outcomes) ===
@@ -116,6 +122,10 @@ Ground rules:
 === BEHAVIOURAL SUMMARY (computed) ===
 {patterns}
 === END SUMMARY ===
+
+=== CASH, SIZING AND CURRENCY (computed, in KRW; weights are of NET WORTH) ===
+{position}
+=== END POSITION ===
 
 === WHAT YOU HAVE ALREADY TOLD THIS USER (past reviews) ===
 {reviews}
@@ -165,6 +175,12 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
     ]
     pending = review_store.unreviewed_trades(limit=15)
 
+    # Cash, sizing and currency, so "how much cash do I have?", "what is my
+    # biggest position?" and "how exposed am I to the dollar?" are answerable
+    # without a ticker and without any prior analysis.
+    from agents.coach_agent import position_context
+    position = await position_context(None, None, None)
+
     sec_report = technical_report = None
     if ticker:
         record = debate_store.get(ticker) or {}
@@ -181,6 +197,9 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
                 "(The journal is EMPTY. The user has logged no trades; do not "
                 "cite any past trade.)",
         patterns=dump(patterns),
+        position=dump(position) if position else
+                 "(The portfolio could not be valued, so no cash or sizing "
+                 "figures are available.)",
         reviews=dump(reviews) if reviews else
                 "(You have not reviewed anything for this user yet.)",
         pending=(

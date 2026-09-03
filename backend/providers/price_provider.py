@@ -695,3 +695,100 @@ async def fetch_price_history(
     Blocking work runs in a worker thread, matching the other fetchers here.
     """
     return await asyncio.to_thread(_fetch_price_history, tickers, start, end)
+
+
+# =============================================================================
+# Base-currency price series
+# =============================================================================
+# The ordering rule the whole risk model rests on:
+#
+#     Convert each price series to the base currency FIRST.
+#     Compute returns SECOND.
+#
+# Done in that order, the correlation between a US stock and the exchange rate is
+# already inside the return series, so the existing covariance machinery in
+# `services/risk_metrics.py` discovers it with no new factor model. Convert after
+# computing returns — or convert only the final value — and that correlation is
+# thrown away. For a KRW-based investor it is not a rounding detail: the won is a
+# risk-on currency and the dollar a haven, so USD exposure typically *dampens*
+# portfolio volatility, and a model blind to it gets the sign wrong, not just the
+# magnitude.
+
+
+def _convert_series(
+    series: pd.Series, native: str, base: str, fx: pd.Series
+) -> pd.Series:
+    """Restate one price series in ``base``, given a USDKRW rate series."""
+    if native == base:
+        return series
+    if native == "USD" and base == "KRW":
+        return series * fx
+    if native == "KRW" and base == "USD":
+        return series / fx
+    raise ValueError(f"Unsupported conversion {native} -> {base}.")
+
+
+async def fetch_price_history_base(
+    tickers: list[str],
+    start: str,
+    end: str,
+    currencies: dict[str, str],
+    base: str = "KRW",
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Daily closes for several tickers, **restated in one currency** and aligned to
+    the dates every series shares.
+
+    ``currencies`` maps ticker -> the currency it trades in (from
+    ``portfolio_service.resolve_asset_currency``). Tickers already denominated in
+    ``base`` pass through untouched.
+
+    Returns ``(DataFrame, dropped)`` exactly like :func:`fetch_price_history`, so
+    a caller can swap one for the other. ``dropped`` lists tickers excluded for
+    having no data or too little history to align — surface them rather than
+    pretend the portfolio was fully covered.
+
+    **Korean and US market holidays do not coincide** (설날, 추석, Thanksgiving,
+    Independence Day). The inner join therefore drops every date on which either
+    market was shut — roughly 15-20 sessions a year for a mixed book. That is the
+    correct behaviour: a "return" measured across a day one leg did not trade is
+    not a return. It does lower the observation count, so callers should report
+    it and let ``risk_metrics.MIN_OBSERVATIONS`` refuse thin data rather than
+    proceeding quietly.
+    """
+    from providers import fx_provider   # local import: keeps startup light
+
+    aligned, dropped = await fetch_price_history(tickers, start, end)
+    if aligned.empty:
+        return aligned, dropped
+
+    resolved = {
+        c: (currencies.get(c) or "USD").strip().upper() for c in aligned.columns
+    }
+    if all(v == base for v in resolved.values()):
+        return aligned, dropped          # nothing to convert, nothing to join
+
+    fx = await fx_provider.fetch_fx_history(start, end)
+    if fx.empty:
+        raise ValueError(
+            "No USDKRW history is available, so a mixed-currency price series "
+            "cannot be stated in one currency."
+        )
+
+    # The FX series joins the SAME inner join as the price columns, so a day
+    # without a quote is dropped rather than forward-filled into an observation
+    # that never happened.
+    common = aligned.index.intersection(fx.index)
+    if common.empty:
+        raise ValueError(
+            "Price history and exchange-rate history share no dates."
+        )
+    aligned = aligned.loc[common]
+    fx = fx.loc[common]
+
+    out = pd.DataFrame(index=common)
+    for col in sorted(aligned.columns):
+        out[col] = _convert_series(aligned[col], resolved[col], base, fx)
+
+    out = out.dropna(how="any")
+    return out, dropped

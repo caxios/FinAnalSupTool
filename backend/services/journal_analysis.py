@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 # a strategy, and telling a user it is would be actively harmful.
 MIN_TRADES_FOR_PATTERN = 5
 
+# Quartile labels for `outcome_by_size_quartile`, smallest first.
+_SIZE_QUARTILES = ("smallest", "small", "large", "largest")
+
 # Horizons at which we measure what happened after each decision.
 OUTCOME_HORIZONS_DAYS = (7, 30, 90)
 
@@ -348,6 +351,12 @@ async def pattern_summary(ticker: str | None = None) -> dict:
     if holds:
         summary["average_holding_days"] = round(sum(holds) / len(holds), 1)
 
+    # ── Sizing and currency (phase 7) ──
+    # All of it sits behind the same cold-start gate below. These statistics are
+    # only as good as `classify_rationale`, which is a keyword match — they must
+    # not acquire more authority than the classifier beneath them deserves.
+    summary.update(await _sizing_statistics(real))
+
     # ── The cold-start gate. ──
     n = len(real)
     if n < MIN_TRADES_FOR_PATTERN:
@@ -364,3 +373,154 @@ async def pattern_summary(ticker: str | None = None) -> dict:
             f"30-day outcomes where available."
         )
     return summary
+
+
+# =============================================================================
+# Sizing and currency behaviour (phase 7)
+# =============================================================================
+
+def _mean(values: list[float]) -> float | None:
+    clean = [v for v in values if v is not None]
+    return round(sum(clean) / len(clean), 6) if clean else None
+
+
+async def _sizing_statistics(trades: list[dict]) -> dict:
+    """
+    How big the user's trades are, and whether size has been rewarded.
+
+    ``outcome_by_size_quartile`` is the most useful figure here: it can tell a
+    user, from their own record, whether their high-conviction sizing has
+    historically worked. ``outcome_local_vs_base`` is the second — someone whose
+    stock picks work but whose won-denominated results do not has a **currency**
+    problem, not a selection problem, and no other view in the app can say so.
+
+    Never raises: this decorates a summary that must always be well-formed.
+    """
+    from services import cash_service as cs
+    from services import portfolio_service as ps
+
+    out: dict = {
+        "avg_trade_size_pct": None,
+        "largest_trade_size_pct": None,
+        "emotional_vs_analytical_sizing": {},
+        "cash_deployment_pattern": None,
+        "outcome_by_size_quartile": [],
+        "conversion_timing": None,
+        "outcome_local_vs_base": None,
+    }
+    if not trades:
+        return out
+
+    try:
+        # Trade value as a share of the cash that existed just before it — the
+        # only sizing denominator available for a PAST trade without replaying
+        # market prices for every day in the journal.
+        sized: list[dict] = []
+        for t in trades:
+            price, qty = t.get("execution_price"), t.get("quantity")
+            if not price or not qty:
+                continue
+            currency = ps.resolve_asset_currency(t["ticker"])
+            value = float(price) * float(qty)
+            before = cs.balance(currency, as_of=t.get("executed_at"))
+            # A buy is measured against the cash it consumed; below 1.0 means it
+            # fitted inside the balance, 1.0 means it took everything.
+            share = (value / before) if before > 1e-9 else None
+            sized.append({
+                "id": t.get("id"),
+                "ticker": t["ticker"],
+                "executed_at": t.get("executed_at"),
+                "side": t.get("side"),
+                "currency": currency,
+                "value": round(value, 4),
+                "pct_of_cash": round(min(share, 5.0), 6) if share is not None else None,
+                "rationale_type": t.get("rationale_type"),
+                "return_30d": (t.get("outcomes", {}).get("30d") or {}).get("return"),
+            })
+
+        shares = [s["pct_of_cash"] for s in sized if s["pct_of_cash"] is not None]
+        out["avg_trade_size_pct"] = _mean(shares)
+        out["largest_trade_size_pct"] = round(max(shares), 6) if shares else None
+
+        # Does the way a trade was described track how much was staked on it?
+        by_type: dict[str, list[float]] = {}
+        for s in sized:
+            if s["pct_of_cash"] is not None:
+                by_type.setdefault(s["rationale_type"] or "unclassified", []).append(
+                    s["pct_of_cash"]
+                )
+        out["emotional_vs_analytical_sizing"] = {
+            k: {"count": len(v), "avg_size_pct": _mean(v)} for k, v in by_type.items()
+        }
+
+        # Do buys cluster when the balance is already low? Deploying the last of
+        # the cash every time is a habit worth naming.
+        buys = [s for s in sized if s["side"] == "buy" and s["pct_of_cash"] is not None]
+        if buys:
+            near_full = sum(1 for s in buys if s["pct_of_cash"] >= 0.8)
+            out["cash_deployment_pattern"] = {
+                "buys_measured": len(buys),
+                "buys_using_80pct_or_more_of_cash": near_full,
+                "share": round(near_full / len(buys), 4),
+            }
+
+        # Have the big ones actually worked out?
+        with_outcome = [s for s in sized
+                        if s["pct_of_cash"] is not None and s["return_30d"] is not None]
+        if len(with_outcome) >= 4:
+            with_outcome.sort(key=lambda s: s["pct_of_cash"])
+            size = len(with_outcome)
+            for i, label in enumerate(_SIZE_QUARTILES):
+                lo, hi = (i * size) // 4, ((i + 1) * size) // 4
+                bucket = with_outcome[lo:hi]
+                if not bucket:
+                    continue
+                out["outcome_by_size_quartile"].append({
+                    "quartile": label,
+                    "count": len(bucket),
+                    "avg_size_pct": _mean([s["pct_of_cash"] for s in bucket]),
+                    "avg_return_30d": _mean([s["return_30d"] for s in bucket]),
+                    "win_rate_30d": _win_rate([s["return_30d"] for s in bucket]),
+                })
+
+        # Did the exchange rate ever flip the sign of a realized result?
+        realized = ps.db.get_connection().execute(
+            "SELECT ticker, executed_at, realized_pnl, realized_pnl_base"
+            " FROM trades WHERE side = 'sell' AND realized_pnl IS NOT NULL"
+            "   AND realized_pnl_base IS NOT NULL"
+        ).fetchall()
+        if realized:
+            flipped = [
+                {"ticker": r["ticker"], "date": (r["executed_at"] or "")[:10],
+                 "local": round(float(r["realized_pnl"]), 4),
+                 "base": round(float(r["realized_pnl_base"]), 4)}
+                for r in realized
+                if (float(r["realized_pnl"]) > 0) != (float(r["realized_pnl_base"]) > 0)
+            ]
+            out["outcome_local_vs_base"] = {
+                "sells_measured": len(realized),
+                "sign_flipped_by_currency": len(flipped),
+                "examples": flipped[:5],
+                "note": (
+                    "A sign flip means the trade made money in the stock's own "
+                    "currency and lost it in won, or the reverse — a currency "
+                    "outcome, not a selection one."
+                ),
+            }
+
+        # Conversions: where the rate stood when the user converted, against the
+        # range of rates they had actually seen.
+        conversions = cs.list_flows(flow_type="fx_in")
+        if conversions:
+            rates = [float(f["fx_to_krw"]) for f in conversions if f["fx_to_krw"]]
+            if rates:
+                lo, hi = min(rates), max(rates)
+                out["conversion_timing"] = {
+                    "conversions": len(conversions),
+                    "avg_rate": round(sum(rates) / len(rates), 4),
+                    "range": [round(lo, 4), round(hi, 4)],
+                    "dates": [(f["occurred_at"] or "")[:10] for f in conversions[:10]],
+                }
+    except Exception as e:  # noqa: BLE001 — decoration must not break the summary
+        logger.warning(f"[journal] sizing statistics unavailable: {e}")
+    return out

@@ -44,6 +44,15 @@ import type {
   JournalReviewRequest,
   StoredReviewsResponse,
   PendingReviewsResponse,
+  CashPosition,
+  CashFlow,
+  CashFlowCreate,
+  CashFlowsResponse,
+  ConversionCreate,
+  ConversionResult,
+  LedgerInitResponse,
+  PerformanceReport,
+  PerformanceWindow,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -692,4 +701,91 @@ export async function getReviewsForTrade(
  */
 export async function getPendingReviews(): Promise<PendingReviewsResponse> {
   return fetchJson<PendingReviewsResponse>(`${API_BASE}/coach/reviews/pending`);
+}
+
+// =============================================================================
+// Cash ledger & performance
+// =============================================================================
+
+/** Balances per currency, whether the ledger has been opened, and recent flows. */
+export async function getCash(limit = 10): Promise<CashPosition> {
+  return fetchJson<CashPosition>(`${API_BASE}/portfolio/cash?limit=${limit}`);
+}
+
+/**
+ * Record the opening anchor.
+ *
+ * `occurred_at` matters: the anchor describes the WHOLE state at that instant,
+ * so a trade dated before it moves no cash — its effect is already inside this
+ * balance. Back-date it to the start of any history you intend to enter.
+ */
+export async function initializeLedger(body: {
+  opening: Record<string, number>;
+  fx_to_krw?: number | null;
+  occurred_at?: string | null;
+  backfill_fx?: boolean;
+}): Promise<LedgerInitResponse> {
+  return fetchJson<LedgerInitResponse>(`${API_BASE}/portfolio/cash/initialize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The ledger, newest first. */
+export async function getCashFlows(params?: {
+  currency?: string | null;
+  flowType?: string | null;
+  limit?: number;
+}): Promise<CashFlowsResponse> {
+  const qs = new URLSearchParams();
+  if (params?.currency) qs.set("currency", params.currency);
+  if (params?.flowType) qs.set("flow_type", params.flowType);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return fetchJson<CashFlowsResponse>(
+    `${API_BASE}/portfolio/cash/flows${q ? `?${q}` : ""}`
+  );
+}
+
+/** A deposit, withdrawal, dividend, fee, tax, interest, or adjustment. */
+export async function createCashFlow(body: CashFlowCreate): Promise<CashFlow> {
+  return fetchJson<CashFlow>(`${API_BASE}/portfolio/cash/flows`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * A 환전, recorded from BOTH amounts rather than a rate — that is what a bank
+ * statement shows, and it captures the spread actually paid.
+ */
+export async function createConversion(
+  body: ConversionCreate
+): Promise<ConversionResult> {
+  return fetchJson<ConversionResult>(`${API_BASE}/portfolio/cash/convert`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Remove a mistyped entry. Use an `adjustment` to correct a real one. */
+export async function deleteCashFlow(flowId: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/portfolio/cash/flows/${flowId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Failed to delete flow ${flowId} (${res.status})`);
+  }
+}
+
+/** Net worth over time plus TWR and MWR, in both currencies. */
+export async function getPerformance(
+  window: PerformanceWindow = "all"
+): Promise<PerformanceReport> {
+  return fetchJson<PerformanceReport>(
+    `${API_BASE}/portfolio/performance?window=${window}`
+  );
 }

@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS trades (
     fx_rate         REAL,
     entry_rationale TEXT,
     avg_price_after REAL,
+    realized_pnl      REAL,
+    realized_pnl_base REAL,
+    fee               REAL,
+    tax               REAL,
     created_at      TEXT    NOT NULL,
     FOREIGN KEY (ticker) REFERENCES holdings (ticker) ON DELETE CASCADE
 )
@@ -172,6 +176,8 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     occurred_at   TEXT    NOT NULL,
     trade_id      INTEGER,
     conversion_id TEXT,
+    market_rate         REAL,
+    realized_fx_pnl_krw REAL,
     note          TEXT,
     created_at    TEXT    NOT NULL,
     FOREIGN KEY (trade_id) REFERENCES trades (id) ON DELETE CASCADE
@@ -262,6 +268,46 @@ def transaction() -> Iterator[sqlite3.Connection]:
             raise
 
 
+# Columns added after a table shipped. `CREATE TABLE IF NOT EXISTS` will not
+# alter a table that already exists, and SQLite has no `ADD COLUMN IF NOT
+# EXISTS`, so each one is applied only when `PRAGMA table_info` says it is
+# missing. Every entry must be nullable — SQLite cannot add a NOT NULL column
+# without a default, and back-filling a real value is the caller's job, not the
+# migration's.
+_ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "trades": (
+        # Realized in the asset's own currency, and in base currency at the
+        # rates that actually applied. Neither is derivable from the other:
+        # their difference IS the exchange-rate component of the result.
+        ("realized_pnl", "REAL"),
+        ("realized_pnl_base", "REAL"),
+        ("fee", "REAL"),
+        ("tax", "REAL"),
+    ),
+    "cash_flows": (
+        # On a conversion: the mid-market rate that day, kept beside the rate
+        # the user actually got, so the spread they paid is visible.
+        ("market_rate", "REAL"),
+        # On the `fx_in` leg of a conversion back to base currency.
+        ("realized_fx_pnl_krw", "REAL"),
+    ),
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Apply `_ADDED_COLUMNS` to tables that predate them."""
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {
+            r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not existing:
+            continue   # table not created yet; its CREATE already has them
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                logger.info(f"Added column {table}.{name}")
+
+
 def init_db() -> None:
     """
     Create the schema if it isn't there yet. Idempotent — safe on every startup.
@@ -269,6 +315,7 @@ def init_db() -> None:
     with transaction() as conn:
         for statement in _SCHEMA_STATEMENTS:
             conn.execute(statement)
+        _ensure_columns(conn)
     logger.info(
         "Portfolio database schema ready "
         "(holdings, trades, coach_reviews, cash_flows)."

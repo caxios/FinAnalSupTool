@@ -498,6 +498,25 @@ class Holding(BaseModel):
     )
     market_value: float | None = None
     unrealized_pnl: float | None = None
+    weight: float | None = Field(
+        None, description="Share of NET WORTH (positions + cash), not of equity"
+    )
+    market_value_krw: float | None = None
+    market_value_usd: float | None = None
+    cost_basis_krw: float | None = None
+    cost_basis_usd: float | None = None
+    unrealized_pnl_krw: float | None = None
+    unrealized_pnl_usd: float | None = None
+    roi_local: float | None = Field(
+        None, description="The stock's own return, in its trading currency"
+    )
+    roi_fx: float | None = Field(
+        None,
+        description="The currency's return since this position was funded. "
+                    "Exactly 0 for a KRW-denominated asset.",
+    )
+    roi_krw: float | None = None
+    roi_usd: float | None = None
     unrealized_roi: float | None = Field(
         None, description="(current_price - avg_price) / avg_price"
     )
@@ -536,6 +555,14 @@ class TradeCreate(BaseModel):
         description="Manual override; normally derived from market data",
     )
     fx_rate: float | None = Field(None, gt=0, description="Exchange rate at execution")
+    fee: float = Field(
+        0.0, ge=0,
+        description="Commission paid, in the asset's own currency. Recorded as "
+                    "its own cash flow so a year's friction can be totalled.",
+    )
+    tax: float = Field(
+        0.0, ge=0, description="Transaction tax, in the asset's own currency"
+    )
 
     @field_validator("ticker")
     @classmethod
@@ -616,18 +643,74 @@ class TradeResponse(BaseModel):
         description="How the execution price was derived; null if the caller "
                     "supplied one explicitly",
     )
+    cash_warning: dict | None = Field(
+        None,
+        description="Set when the buy exceeded the balance available on that "
+                    "date. The trade is still recorded — back-filling history "
+                    "out of order transiently goes negative, and refusing would "
+                    "make correct data unenterable.",
+    )
 
 
 class PortfolioResponse(BaseModel):
     """GET /portfolio — every holding plus whole-portfolio aggregates."""
 
     holdings: list[Holding] = []
-    total_cost_basis: float = 0.0
+
+    # Totals are null whenever no single figure can honestly be stated: no live
+    # prices yet, or holdings spanning more than one currency. `note` says which.
+    # Per-currency subtotals are always available, and each holding carries its
+    # own `currency`, so the client can render every position correctly even when
+    # the aggregate is withheld.
+    total_cost_basis: float | None = 0.0
     total_market_value: float | None = Field(
-        None, description="Null until phase 3 supplies live prices"
+        None, description="Null until live prices exist, or when currencies mix"
     )
     total_unrealized_pnl: float | None = None
     total_roi: float | None = None
+    note: str | None = Field(
+        None, description="Why a total was withheld, when one was"
+    )
+    currencies: list[str] = Field(
+        default_factory=list,
+        description="Every currency represented in the holdings",
+    )
+    cost_basis_by_currency: dict[str, float] = Field(default_factory=dict)
+    market_value_by_currency: dict[str, float] = Field(default_factory=dict)
+    fx: FxInfo | None = Field(
+        None,
+        description="The rate available for conversion — one per response, "
+                    "never one per row",
+    )
+    cash: dict[str, float] = Field(
+        default_factory=dict, description="Per-currency cash balances"
+    )
+    cash_balances: dict[str, float] = Field(
+        default_factory=dict,
+        description="The money actually held in each currency — distinct from "
+                    "`cash_total_krw`/`cash_total_usd`, which state the whole "
+                    "cash pile in each",
+    )
+    cash_total_krw: float | None = None
+    cash_total_usd: float | None = None
+    equity_total_krw: float | None = None
+    equity_total_usd: float | None = None
+    net_worth_krw: float | None = None
+    net_worth_usd: float | None = None
+    cost_basis_krw: float | None = None
+    cost_basis_usd: float | None = None
+    cash_weight: float | None = None
+    equity_weight: float | None = None
+    fx_exposure: float | None = Field(
+        None,
+        description="Share of net worth denominated in a foreign currency — how "
+                    "exposed this portfolio is to the exchange rate",
+    )
+    roi_krw_total: float | None = None
+    roi_usd_total: float | None = None
+    cash_initialized: bool = Field(
+        False, description="Whether an opening cash balance has been recorded"
+    )
     baseline_status: dict[str, dict] = Field(
         default_factory=dict,
         description="Per-ticker 8-quarter baseline fetch state, for polling",
@@ -695,6 +778,175 @@ class CoachReviewRequest(BaseModel):
     @classmethod
     def _ticker_upper(cls, v: str | None) -> str | None:
         return (v or "").strip().upper() or None
+
+
+class FxInfo(BaseModel):
+    """
+    The exchange rate a response's converted figures were computed with.
+
+    **One per response, never one per row.** Every converted figure on a page
+    uses the same rate; repeating it per row invites two of them to drift and
+    leaves the reader unable to tell which one a given total came from.
+
+    ``rate: null`` means the rate was unavailable. Callers render converted
+    figures as a dash in that case — never as zero, and never as a stale value.
+    """
+
+    pair: str = "USDKRW"
+    rate: float | None = Field(None, description="KRW per 1 USD")
+    as_of: datetime | None = Field(
+        None, description="Timestamp of the quote actually used"
+    )
+    is_stale: bool = Field(
+        False, description="The quote is older than a normal trading gap"
+    )
+    source: str | None = Field(
+        None, description="'spot', 'daily_close', or 'manual'"
+    )
+
+
+class CashFlow(BaseModel):
+    """One movement of money, as stored."""
+
+    id: int
+    flow_type: str = Field(
+        ...,
+        description="deposit | withdrawal | buy | sell | dividend | fee | tax | "
+                    "interest | fx_out | fx_in | adjustment",
+    )
+    currency: str
+    amount: float = Field(
+        ..., description="Signed and denominated in `currency`: + in, - out"
+    )
+    fx_to_krw: float = Field(
+        ...,
+        description="USDKRW rate at `occurred_at` (1.0 on a KRW row). The only "
+                    "record of what this money was worth in base currency when "
+                    "it moved.",
+    )
+    occurred_at: str
+    trade_id: int | None = None
+    conversion_id: str | None = Field(
+        None, description="Links the two legs of a currency conversion"
+    )
+    note: str | None = None
+    created_at: str
+
+
+class CashFlowCreate(BaseModel):
+    """
+    Request body for POST /portfolio/cash/flows.
+
+    ``amount`` is a **positive magnitude**; the sign is derived on the server
+    from ``flow_type``, the same way ``TradeCreate`` leaves ``total_value`` to
+    the server. Asking a client to send -1234.56 for a fee is asking it to get
+    the sign wrong.
+    """
+
+    flow_type: str = Field(
+        ..., description="deposit | withdrawal | dividend | fee | tax | "
+                         "interest | adjustment"
+    )
+    currency: str = Field("KRW", description="'KRW' or 'USD'")
+    amount: float = Field(
+        ..., description="Positive magnitude (an adjustment may be negative)"
+    )
+    occurred_at: str = Field(..., description="ISO-8601 datetime")
+    fx_to_krw: float | None = Field(
+        None, gt=0,
+        description="Override the resolved rate — use your statement's rate "
+                    "when you have it, including the spread you paid",
+    )
+    note: str | None = None
+
+    @field_validator("currency")
+    @classmethod
+    def _ccy_upper(cls, v: str) -> str:
+        return (v or "KRW").strip().upper()
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _iso(cls, v: str) -> str:
+        try:
+            datetime.fromisoformat((v or "").strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("occurred_at must be an ISO-8601 datetime")
+        return v
+
+
+class ConversionCreate(BaseModel):
+    """
+    A 환전, recorded from **both amounts** rather than from a rate.
+
+    That is what a bank or broker statement shows, and it captures the spread
+    actually paid — a mid-market rate fetched from the market would quietly
+    erase a real cost.
+    """
+
+    from_currency: str = Field(..., description="'KRW' or 'USD'")
+    from_amount: float = Field(..., gt=0)
+    to_currency: str = Field(..., description="'KRW' or 'USD'")
+    to_amount: float = Field(..., gt=0)
+    occurred_at: str = Field(..., description="ISO-8601 datetime")
+    note: str | None = None
+
+
+class CashPosition(BaseModel):
+    """Cash as it stands: one balance per currency, plus the ledger's state."""
+
+    balances: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-currency balances — the money actually held in each",
+    )
+    base_currency: str = "KRW"
+    is_initialized: bool = Field(
+        False, description="Whether an opening balance has been recorded"
+    )
+    fx: FxInfo | None = None
+    recent_flows: list[CashFlow] = Field(default_factory=list)
+
+
+class CashFlowsResponse(BaseModel):
+    flows: list[CashFlow] = Field(default_factory=list)
+    count: int = 0
+
+
+class LedgerInitRequest(BaseModel):
+    """
+    The opening anchor: how much cash the user holds right now, per currency.
+
+    Explicitly an anchor and not a claim about history — like the seeded
+    positions it funds, whose real acquisition dates are unknown.
+    """
+
+    opening: dict[str, float] = Field(
+        ..., description='Per-currency opening cash, e.g. {"KRW": 12000000, "USD": 8000}'
+    )
+    fx_to_krw: float | None = Field(
+        None, gt=0,
+        description="USDKRW rate for the opening entry; resolved from the market "
+                    "when omitted. Required if any non-KRW figure is given.",
+    )
+    occurred_at: str | None = Field(
+        None,
+        description="When this balance was true, ISO-8601. Defaults to now. "
+                    "The anchor describes the WHOLE state at that instant, so a "
+                    "trade dated before it moves no cash — its effect is already "
+                    "inside this balance. Back-date the anchor to the start of "
+                    "the history you intend to enter.",
+    )
+    backfill_fx: bool = Field(
+        True,
+        description="Also fill the exchange-rate columns on existing trades and "
+                    "holdings, which have been null since they were added",
+    )
+
+
+class LedgerInitResponse(BaseModel):
+    balances: dict[str, float] = Field(default_factory=dict)
+    flows_written: int = 0
+    holdings_funded: int = 0
+    fx_backfill: dict | None = None
 
 
 class JournalReviewRequest(BaseModel):
