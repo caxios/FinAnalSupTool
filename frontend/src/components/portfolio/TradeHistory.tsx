@@ -28,6 +28,11 @@ import { getReviews, getPendingReviews, reviewLoggedTrade } from "../../api";
 /** Marker the backend writes for a position seeded at portfolio setup. */
 const OPENING_RATIONALE = "Opening position recorded at portfolio setup.";
 
+const EMOTION_EMOJI: Record<string, string> = {
+  calm: "😌", fomo: "⚡", revenge: "🔥", boredom: "🥱",
+  overconfidence: "🚀", fear: "😨",
+};
+
 interface TradeHistoryProps {
   trades: Trade[];
   loading: boolean;
@@ -211,6 +216,11 @@ export default function TradeHistory({
                     </span>
                     <span className="journal-total">{money(t.total_value)}</span>
                     <span className="journal-when">{formatWhen(t.executed_at)}</span>
+                    {t.emotion_tag && (
+                      <span className="journal-emotion" title={t.emotion_tag}>
+                        {EMOTION_EMOJI[t.emotion_tag] ?? "•"}
+                      </span>
+                    )}
                   </div>
 
                   {t.entry_rationale ? (

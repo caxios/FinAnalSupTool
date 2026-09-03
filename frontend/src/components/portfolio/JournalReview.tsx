@@ -65,6 +65,15 @@ export default function JournalReview({
         </div>
       )}
 
+      {report.risk_warnings.length > 0 && (
+        <div className="coach-rule-banner coach-rule-banner-risk">
+          <div className="coach-rule-banner-title">⚖ Portfolio risk</div>
+          <ul className="coach-risk-warning-list">
+            {report.risk_warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+
       {report.strengths.length > 0 && (
         <div className="coach-block">
           <h4 className="coach-block-title">What you are doing well</h4>

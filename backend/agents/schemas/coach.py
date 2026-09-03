@@ -16,6 +16,23 @@ from pydantic import BaseModel, Field
 from ..base_agent import AgentReport
 
 
+class RuleMatch(BaseModel):
+    """
+    One of the user's own active Golden Setup / Toxic Pattern rules that the
+    proposed trade matches (>=70% of the rule's specified conditions) —
+    computed in Python (``services.trading_rules.match_active_rules``) and
+    stamped onto the report after generation, never asserted by the LLM.
+    """
+    id: int
+    title: str
+    description: str
+    conditions: dict = Field(default_factory=dict)
+    win_rate: float | None = None
+    payoff_ratio: float | None = None
+    expectancy: float | None = None
+    match_score: float = Field(..., description="0-1, share of specified conditions matched")
+
+
 class DetectedBias(BaseModel):
     """One psychological bias the coach believes it can evidence."""
 
@@ -88,6 +105,23 @@ class CoachReport(AgentReport):
         True,
         description="False when there are too few logged trades for any "
                     "behavioural pattern to be meaningful",
+    )
+    risk_warnings: list[str] = Field(
+        default_factory=list,
+        description="Rule-based, Python-computed portfolio-risk flags (over-"
+                    "concentration, high correlation to existing holdings, a "
+                    "large simulated volatility jump) — set by the agent after "
+                    "generation, not asserted by the LLM.",
+    )
+    toxic_pattern_matches: list[RuleMatch] = Field(
+        default_factory=list,
+        description="The user's own active Toxic Pattern rules this proposed "
+                    "trade matches — pre-trade only, computed in Python",
+    )
+    golden_setup_matches: list[RuleMatch] = Field(
+        default_factory=list,
+        description="The user's own active Golden Setup rules this proposed "
+                    "trade matches — pre-trade only, computed in Python",
     )
 
     # ── Retrospective-only fields ────────────────────────────────────────────
@@ -195,3 +229,9 @@ class JournalReport(AgentReport):
     )
     history_sufficient: bool = True
     data_limitations: list[str] = Field(default_factory=list)
+    risk_warnings: list[str] = Field(
+        default_factory=list,
+        description="Rule-based, Python-computed CURRENT portfolio-risk flags "
+                    "(concentration, high correlation, elevated VaR) — set by "
+                    "the agent after generation, not asserted by the LLM.",
+    )

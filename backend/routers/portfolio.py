@@ -9,6 +9,7 @@ The trading portfolio and journal — blueprint §1.
   GET    /portfolio/trades             — the journal, optionally per-ticker
   POST   /portfolio/trades             — log a trade
   GET    /portfolio/baseline/{ticker}  — poll the 8-quarter baseline fetch
+  GET    /portfolio/risk               — VaR/CVaR/volatility/correlation/FX risk
 
   GET    /portfolio/cash               — balances per currency + the rate used
   POST   /portfolio/cash/initialize    — record the opening anchor
@@ -207,6 +208,7 @@ async def create_trade(body: TradeCreate):
             fx_rate=body.fx_rate,
             fee=body.fee,
             tax=body.tax,
+            emotion_tag=body.emotion_tag,
         )
     except ps.InvalidTrade as e:
         # Selling more than is held, or opening a position with no price.
@@ -232,6 +234,35 @@ async def get_baseline_status(ticker: str):
     ``partial`` (some forms failed), ``failed``.
     """
     return {"ticker": ps.normalize_ticker(ticker), **ps.baseline_status(ticker)}
+
+
+@router.get("/risk")
+async def get_portfolio_risk(
+    confidence: float = Query(0.95, gt=0, lt=1, description="VaR/CVaR confidence level"),
+    refresh: bool = Query(False, description="Bypass the 5-minute cache and refetch"),
+):
+    """
+    Whole-portfolio quantitative risk: annualized volatility, historical VaR and
+    CVaR (Expected Shortfall), max drawdown, per-position risk contribution vs.
+    capital weight, the pairwise correlation matrix, cash-as-a-position, and FX
+    risk (unhedged exposure and the hedged-volatility comparison).
+
+    This was formerly computed inside Deep Analysis (the retired `quant_risk`
+    agent) — a single-company research run had no business touching the whole
+    book. The math is unchanged (``services.risk_metrics``); only where it runs
+    moved. Results are cached for 5 minutes since they require a price-history
+    download; pass ``refresh=true`` to force a refetch (e.g. right after logging
+    a trade).
+    """
+    from services import portfolio_risk
+
+    try:
+        return await portfolio_risk.build_snapshot(
+            confidence=confidence, use_cache=not refresh
+        )
+    except Exception as e:  # noqa: BLE001 — a risk-snapshot failure is not a 500
+        logger.error(f"Portfolio risk snapshot failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Portfolio risk snapshot failed: {e}")
 
 
 # =============================================================================

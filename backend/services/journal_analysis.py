@@ -95,6 +95,53 @@ def classify_rationale(text: str | None) -> str:
     return "unclassified"
 
 
+# A second, independent axis over the same rationale text: not WHETHER the
+# wording is emotional, but WHAT KIND OF SETUP the user describes. Same crude
+# keyword-heuristic status as `classify_rationale` above — this is what lets
+# `edge_analytics` segment expectancy by "dip-buy" vs "momentum" etc., not a
+# claim that the classifier understands trading strategy.
+STRATEGY_MARKERS: dict[str, tuple[str, ...]] = {
+    "valuation": (
+        "undervalued", "cheap", "p/e", "pe ratio", "dcf", "fair value",
+        "discount to", "book value", "intrinsic value", "value play",
+        "밸류", "저평가",
+    ),
+    "technical_breakout": (
+        "breakout", "broke resistance", "broke out", "breaking out",
+        "52-week high", "52 week high", "new high", "volume surge",
+        "resistance level", "돌파",
+    ),
+    "dip_buy": (
+        "dip", "pullback", "oversold", "correction", "buy the dip",
+        "bought the dip", "sell-off", "selloff", "저점", "눌림목",
+    ),
+    "momentum": (
+        "momentum", "trend", "riding the trend", "strong move",
+        "continuation", "uptrend", "상승세", "모멘텀",
+    ),
+}
+
+
+def classify_strategy(text: str | None) -> str:
+    """
+    Label a rationale by SETUP TYPE: ``"valuation"``, ``"technical_breakout"``,
+    ``"dip_buy"``, ``"momentum"``, ``"mixed"`` (more than one matched),
+    ``"unclassified"`` (text present, none matched), or ``"none"`` (no text).
+
+    A weak keyword hint, exactly like :func:`classify_rationale` — the coach's
+    prompt is told this and must not over-trust it.
+    """
+    if not text or not text.strip():
+        return "none"
+    low = text.lower()
+    hits = [name for name, markers in STRATEGY_MARKERS.items() if any(m in low for m in markers)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        return "mixed"
+    return "unclassified"
+
+
 # =============================================================================
 # Outcomes
 # =============================================================================
@@ -524,3 +571,338 @@ async def _sizing_statistics(trades: list[dict]) -> dict:
     except Exception as e:  # noqa: BLE001 — decoration must not break the summary
         logger.warning(f"[journal] sizing statistics unavailable: {e}")
     return out
+
+
+# =============================================================================
+# Edge analytics (phase 5) — expectancy, disposition effect, MAE/MFE, rules
+# =============================================================================
+# Everything below operates on CLOSED round trips (a buy matched to the sell
+# that closed it) rather than the 30-day-price-outcome proxy `pattern_summary`
+# uses. A round trip's `realized_pnl_base` is what the user actually made or
+# lost — the textbook inputs to Expectancy and Payoff Ratio are REALIZED
+# results, not "what the price later did".
+#
+# BASE CURRENCY ONLY: `realized_pnl` is in the asset's own currency, which
+# cannot be averaged across a KRW trade and a USD trade without silently
+# mixing denominations. `realized_pnl_base` (KRW) is the only figure used here
+# for exactly that reason — see `_sizing_statistics.outcome_local_vs_base`
+# above, which exists because this distinction matters.
+
+# Fewer closed trades than this in one segment (rationale/strategy/emotion
+# bucket) and its expectancy is noise, not a pattern — distinct from
+# MIN_TRADES_FOR_PATTERN, which gates the whole-journal statistics.
+MIN_TRADES_PER_SEGMENT = 3
+
+# How many golden/toxic candidates `synthesize_rules` proposes, strongest first.
+_MAX_SYNTHESIZED_RULES = 5
+
+
+def _expectancy_stats(pnls: list[float]) -> dict:
+    """
+    Win Rate, average gain/loss, Payoff Ratio, and Expectancy from a list of
+    REALIZED P/L figures (all in the same currency — callers must ensure that).
+
+        W = wins / total
+        Payoff Ratio R = avg(gains) / avg(|losses|)
+        Expectancy E = W * avg(gains) - (1 - W) * avg(|losses|)
+
+    A trade with P/L exactly 0 counts as a loss (it did not profit) — the same
+    convention `_win_rate` above uses (`r > 0` for a win).
+    """
+    n = len(pnls)
+    if n == 0:
+        return {
+            "count": 0, "win_rate": None, "avg_gain": None, "avg_loss": None,
+            "payoff_ratio": None, "expectancy": None,
+        }
+    gains = [p for p in pnls if p > 0]
+    losses = [-p for p in pnls if p <= 0]  # stored as positive magnitudes
+    win_rate = len(gains) / n
+    avg_gain = round(sum(gains) / len(gains), 4) if gains else None
+    avg_loss = round(sum(losses) / len(losses), 4) if losses else None
+    payoff_ratio = (
+        round(avg_gain / avg_loss, 4)
+        if avg_gain is not None and avg_loss is not None and avg_loss > 1e-9
+        else None
+    )
+    expectancy = round(
+        win_rate * (avg_gain or 0.0) - (1 - win_rate) * (avg_loss or 0.0), 4
+    )
+    return {
+        "count": n, "win_rate": round(win_rate, 4),
+        "avg_gain": avg_gain, "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio, "expectancy": expectancy,
+    }
+
+
+def _closed_round_trips(real_trades: list[dict]) -> list[dict]:
+    """
+    Match each sell to the buy it closed, FIFO per ticker — the same matching
+    `pattern_summary`'s holding-days figure uses, kept here with the realized
+    P/L and entry/exit prices attached so MAE/MFE and disposition effect can
+    be computed from the SAME matched pairs (one matching pass, several
+    statistics), rather than three separately-drifting reimplementations.
+
+    Only sells with a resolvable `realized_pnl_base` are matched (a sell can
+    still consume a FIFO buy slot even without one — the position DID close —
+    but the pair is dropped from this list since none of the statistics below
+    can use it without a base-currency figure).
+    """
+    by_ticker: dict[str, list[dict]] = {}
+    for t in sorted(real_trades, key=lambda x: x.get("executed_at") or ""):
+        by_ticker.setdefault(t["ticker"], []).append(t)
+
+    trips: list[dict] = []
+    for ticker, rows in by_ticker.items():
+        open_buys: list[dict] = []
+        for r in rows:
+            if r.get("side") == "buy":
+                open_buys.append(r)
+            elif open_buys:
+                buy = open_buys.pop(0)
+                if r.get("realized_pnl_base") is None:
+                    continue
+                buy_dt, sell_dt = _parse_dt(buy.get("executed_at")), _parse_dt(r.get("executed_at"))
+                if not (buy_dt and sell_dt):
+                    continue
+                pnl = float(r["realized_pnl_base"])
+                trips.append({
+                    "ticker": ticker,
+                    "buy_id": buy.get("id"), "sell_id": r.get("id"),
+                    "buy_at": buy.get("executed_at"), "sell_at": r.get("executed_at"),
+                    "entry_price": buy.get("execution_price"),
+                    "exit_price": r.get("execution_price"),
+                    "holding_days": round((sell_dt - buy_dt).total_seconds() / 86400.0, 2),
+                    "realized_pnl_base": pnl,
+                    "is_win": pnl > 0,
+                    "rationale_type": classify_rationale(buy.get("entry_rationale")),
+                    "strategy_type": classify_strategy(buy.get("entry_rationale")),
+                    "emotion_tag": buy.get("emotion_tag") or "untagged",
+                })
+    return trips
+
+
+def disposition_effect(trips: list[dict]) -> dict:
+    """
+    Whether losers are held longer than winners — the classic loss-aversion
+    trap: hoping a loser recovers while taking a winner's profit early.
+
+    ``disposition_ratio`` = avg holding days (losers) / avg holding days
+    (winners); ``flag`` is true above 2.0 (losers held twice as long).
+    """
+    winners = [t["holding_days"] for t in trips if t["is_win"]]
+    losers = [t["holding_days"] for t in trips if not t["is_win"]]
+    avg_w = _mean(winners)
+    avg_l = _mean(losers)
+    ratio = round(avg_l / avg_w, 3) if avg_w and avg_w > 1e-9 and avg_l is not None else None
+    return {
+        "avg_holding_days_winners": avg_w,
+        "avg_holding_days_losers": avg_l,
+        "winners_count": len(winners),
+        "losers_count": len(losers),
+        "disposition_ratio": ratio,
+        "flag": bool(ratio is not None and ratio > 2.0),
+        "note": (
+            f"Losing trades are held {ratio:.1f}x as long as winning ones — "
+            f"classic loss-aversion (hoping losers recover, taking winners' "
+            f"profit early)." if ratio is not None and ratio > 2.0 else
+            "No meaningful disposition-effect signal in the closed trades so far."
+        ),
+    }
+
+
+async def mae_mfe_analysis(trips: list[dict]) -> dict:
+    """
+    Maximum Adverse/Favorable Excursion for each closed LONG round trip (this
+    app's trading model has no shorting): the deepest drawdown and highest
+    run-up the position actually experienced between entry and exit, as a
+    return from the entry price.
+
+    Derives two things a lecture cannot give the user:
+      - **Empirical optimal stop-loss**: the 10th percentile of MAE among
+        WINNING trades — the level 90% of eventual winners never crossed on
+        the way to a profitable exit.
+      - **Exit efficiency**: realized return / MFE — how much of the peak
+        favorable move was actually captured before selling.
+
+    A price-history fetch failure for one trade is skipped, not fatal — same
+    degrade-gracefully convention as :func:`compute_outcomes`.
+    """
+    from providers import price_provider
+
+    per_trade: list[dict] = []
+    for trip in trips:
+        entry, exitp = trip.get("entry_price"), trip.get("exit_price")
+        if not entry or not trip.get("buy_at") or not trip.get("sell_at"):
+            continue
+        try:
+            prices, _dropped = await price_provider.fetch_price_history(
+                [trip["ticker"]], trip["buy_at"][:10], trip["sell_at"][:10],
+            )
+        except Exception as e:  # noqa: BLE001 — one trade's price gap is fine
+            logger.warning(f"[journal] MAE/MFE fetch failed for {trip['ticker']}: {e}")
+            continue
+        if prices is None or prices.empty or trip["ticker"] not in prices.columns:
+            continue
+        series = prices[trip["ticker"]].dropna()
+        if series.empty:
+            continue
+
+        returns = (series - float(entry)) / float(entry)
+        mae, mfe = round(float(returns.min()), 6), round(float(returns.max()), 6)
+        realized_return = (
+            round((float(exitp) - float(entry)) / float(entry), 6) if exitp else None
+        )
+        exit_efficiency = (
+            round(realized_return / mfe, 4)
+            if realized_return is not None and mfe > 1e-9 else None
+        )
+        per_trade.append({
+            "ticker": trip["ticker"], "buy_id": trip["buy_id"], "sell_id": trip["sell_id"],
+            "buy_at": trip["buy_at"], "sell_at": trip["sell_at"], "is_win": trip["is_win"],
+            "mae": mae, "mfe": mfe,
+            "realized_return": realized_return, "exit_efficiency": exit_efficiency,
+        })
+
+    winners_mae = [t["mae"] for t in per_trade if t["is_win"]]
+    optimal_stop = None
+    if len(winners_mae) >= MIN_TRADES_PER_SEGMENT:
+        import numpy as np
+        optimal_stop = round(float(np.quantile(winners_mae, 0.10)), 4)
+
+    efficiencies = [t["exit_efficiency"] for t in per_trade if t["exit_efficiency"] is not None]
+    avg_efficiency = _mean(efficiencies)
+
+    return {
+        "trades": per_trade,
+        "optimal_stop_loss": optimal_stop,
+        "optimal_stop_loss_note": (
+            f"90% of your winning trades never dipped below {optimal_stop:.1%} "
+            f"from entry on the way to a profitable exit."
+            if optimal_stop is not None else
+            f"Not enough winning closed trades with price history yet "
+            f"(need {MIN_TRADES_PER_SEGMENT}+) to derive an empirical stop-loss."
+        ),
+        "avg_exit_efficiency": avg_efficiency,
+        "avg_exit_efficiency_note": (
+            f"On average, you captured {avg_efficiency:.0%} of the peak "
+            f"favorable move (MFE) before exiting."
+            if avg_efficiency is not None else None
+        ),
+    }
+
+
+def synthesize_rules(trips: list[dict], overall: dict) -> dict:
+    """
+    Groups closed round trips by (rationale_type, strategy_type, emotion_tag)
+    and proposes GOLDEN (positive expectancy, win rate at/above the overall
+    average) and TOXIC (negative expectancy) candidate rules.
+
+    These are CANDIDATES, never auto-adopted — `POST /coach/rules` is the only
+    way one becomes an active rule the pre-trade review checks against. A
+    pattern from 3 trades is a hypothesis, not a law.
+    """
+    groups: dict[tuple[str, str, str], list[float]] = {}
+    for t in trips:
+        key = (t["rationale_type"], t["strategy_type"], t["emotion_tag"])
+        groups.setdefault(key, []).append(t["realized_pnl_base"])
+
+    overall_win_rate = overall.get("win_rate") or 0.0
+    candidates = []
+    for (rtype, stype, etag), pnls in groups.items():
+        if len(pnls) < MIN_TRADES_PER_SEGMENT:
+            continue
+        stats = _expectancy_stats(pnls)
+        if stats["expectancy"] is None:
+            continue
+        candidates.append({
+            "conditions": {
+                "rationale_type": rtype, "strategy_type": stype, "emotion_tag": etag,
+            },
+            **stats,
+        })
+
+    golden = sorted(
+        (c for c in candidates
+         if c["expectancy"] > 0 and (c["win_rate"] or 0) >= overall_win_rate),
+        key=lambda c: c["expectancy"], reverse=True,
+    )[:_MAX_SYNTHESIZED_RULES]
+    toxic = sorted(
+        (c for c in candidates if c["expectancy"] < 0),
+        key=lambda c: c["expectancy"],
+    )[:_MAX_SYNTHESIZED_RULES]
+    return {"golden_candidates": golden, "toxic_candidates": toxic}
+
+
+async def edge_analytics(ticker: str | None = None) -> dict:
+    """
+    The full quantitative edge picture: Expectancy/Payoff Ratio (overall and
+    segmented by rationale/strategy/emotion), the Disposition Effect, the
+    MAE/MFE empirical stop-loss, and Golden/Toxic rule candidates.
+
+    Gated by :data:`MIN_TRADES_FOR_PATTERN` like every other behavioural
+    statistic in this module — below it, this returns a well-formed but empty
+    result with `sufficient: False` rather than a noisy figure from 2 trades.
+    """
+    trades = portfolio_service.list_trades(ticker=ticker)
+    real = [t for t in trades if not portfolio_service.is_opening_entry(t)]
+
+    result: dict = {
+        "ticker": ticker,
+        "total_trades": len(real),
+        "closed_round_trips": 0,
+        "excluded_missing_base_pnl": 0,
+        "sufficient": False,
+        "note": "",
+        "overall": _expectancy_stats([]),
+        "by_rationale_type": {},
+        "by_strategy_type": {},
+        "by_emotion_tag": {},
+        "disposition_effect": {},
+        "mae_mfe": {},
+        "rule_candidates": {"golden_candidates": [], "toxic_candidates": []},
+    }
+    if len(real) < MIN_TRADES_FOR_PATTERN:
+        result["note"] = (
+            f"Only {len(real)} trade(s) logged — fewer than the "
+            f"{MIN_TRADES_FOR_PATTERN} needed before edge analytics are "
+            f"meaningful."
+        )
+        return result
+
+    trips = _closed_round_trips(real)
+    result["closed_round_trips"] = len(trips)
+    if len(trips) < MIN_TRADES_FOR_PATTERN:
+        result["note"] = (
+            f"{len(real)} trade(s) logged but only {len(trips)} closed round "
+            f"trip(s) with a resolvable base-currency P/L — fewer than the "
+            f"{MIN_TRADES_FOR_PATTERN} needed. Close more positions to unlock "
+            f"edge analytics."
+        )
+        return result
+
+    pnls = [t["realized_pnl_base"] for t in trips]
+    result["overall"] = _expectancy_stats(pnls)
+
+    def _segment(field: str) -> dict:
+        groups: dict[str, list[float]] = {}
+        for t in trips:
+            groups.setdefault(t[field], []).append(t["realized_pnl_base"])
+        return {
+            k: _expectancy_stats(v) for k, v in groups.items()
+            if len(v) >= MIN_TRADES_PER_SEGMENT
+        }
+
+    result["by_rationale_type"] = _segment("rationale_type")
+    result["by_strategy_type"] = _segment("strategy_type")
+    result["by_emotion_tag"] = _segment("emotion_tag")
+    result["disposition_effect"] = disposition_effect(trips)
+    result["mae_mfe"] = await mae_mfe_analysis(trips)
+    result["rule_candidates"] = synthesize_rules(trips, result["overall"])
+
+    result["sufficient"] = True
+    result["note"] = (
+        f"{len(real)} trade(s) logged; {len(trips)} closed round trip(s) with "
+        f"resolvable base-currency P/L back the statistics below."
+    )
+    return result

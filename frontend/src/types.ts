@@ -276,7 +276,60 @@ export interface DebateResolution {
   resolution: string;
 }
 
-/** The Manager's synthesized final report. */
+// ── Institutional Equity Research Paper — chapters 2-6 (Manager report) ──────
+
+export interface SegmentBreakdown {
+  segment: string;
+  revenue_contribution: string | null;
+  operating_profit_contribution: string | null;
+  commentary: string;
+}
+
+export interface BusinessModelChapter {
+  overview: string;
+  segments: SegmentBreakdown[];
+  unit_economics_note: string;
+}
+
+export interface IndustryPositioningChapter {
+  market_structure: string;
+  competitive_moat: string;
+  peer_multiple_benchmark: string;
+}
+
+export interface QoESynthesisChapter {
+  summary: string;
+  depreciation_cliff_flagged: boolean;
+  structural_vs_transitory_verdict: string;
+  qoe_score: number;
+}
+
+export interface DCFScenario {
+  scenario: "bull" | "base" | "bear" | string;
+  assumption: string;
+  implied_value: string | null;
+  basis: string | null;
+}
+
+export interface ValuationChapter {
+  peer_relative_read: string;
+  scenarios: DCFScenario[];
+  target_valuation_band: string | null;
+}
+
+export interface SensitivityFactor {
+  factor: string;
+  sensitivity: string;
+}
+
+export interface RiskSensitivityChapter {
+  macro_sensitivity: string;
+  supply_chain_risk: string;
+  regulatory_headwinds: string;
+  sensitivities: SensitivityFactor[];
+}
+
+/** The Manager's synthesized final report — now a full institutional research paper. */
 export interface ManagerReport {
   agent: string;
   confidence: number;
@@ -292,10 +345,139 @@ export interface ManagerReport {
   key_risks: string[];
   recommended_actions: string[];
   agents_considered: string[];
+
+  // Chapter 1 continued
+  thesis_pillars: string[];
+  // Chapters 2-6
+  business_model_and_segments: BusinessModelChapter;
+  industry_and_peer_positioning: IndustryPositioningChapter;
+  quality_of_earnings_forensic: QoESynthesisChapter;
+  valuation_thesis: ValuationChapter;
+  key_risks_and_sensitivities: RiskSensitivityChapter;
+}
+
+// ── SEC Filings agent's own forensic QoE report (raw material for chapter 4) ─
+
+export interface QoEAccrualRow {
+  period: string;
+  net_income: number | null;
+  operating_cash_flow: number | null;
+  total_assets: number | null;
+  sloan_accrual_ratio: number | null;
+  accrual_flag: "low_risk" | "moderate" | "aggressive" | string | null;
+  cash_conversion_ratio: number | null;
+}
+
+export interface QoEForensicReport {
+  accrual_table: QoEAccrualRow[];
+  accrual_summary: string;
+  capex_da_reconciliation: string;
+  depreciation_cliff_detected: boolean;
+  depreciation_cliff_note: string | null;
+  footnote_crossmatch: string[];
+  structural_drivers: string[];
+  transitory_drivers: string[];
+  qoe_score: number;
+}
+
+export interface MetricHealth {
+  latest_value: string | null;
+  trend: "improving" | "stable" | "deteriorating" | string;
+  commentary: string;
+}
+
+export interface SECFilingsReport {
+  agent: string;
+  confidence: number;
+  reasoning: string;
+  periods_analyzed: string[];
+  fundamental_score: number;
+  financial_health: {
+    revenue: MetricHealth;
+    quality_of_earnings: MetricHealth;
+    margins: MetricHealth;
+    debt: MetricHealth;
+    free_cash_flow: MetricHealth;
+  };
+  multi_period_trends: {
+    metric: string;
+    periods: string[];
+    values: string[];
+    direction: string;
+    note: string;
+  }[];
+  mda_insights: string[];
+  risk_assessment: {
+    risk: string;
+    category: string;
+    severity: "low" | "medium" | "high" | string;
+    trend: string;
+    note: string;
+  }[];
+  quality_of_earnings_forensic: QoEForensicReport;
+}
+
+// =============================================================================
+// Research Data Copilot — POST /analysis/query-data
+// =============================================================================
+
+export type QueryDataScope = "financials" | "sec_text" | "earnings" | "peers" | "all";
+
+export interface QueryDataCitation {
+  period: string;
+  section: string;
+  excerpt: string;
+}
+
+export interface QueryDataResponse {
+  table_markdown: string | null;
+  citations: QueryDataCitation[];
+  analytical_note: string;
 }
 
 /** An agent slot in the report: either a report object or an `{error}`. */
 export type AgentSlot = Record<string, unknown> & { error?: string };
+
+// =============================================================================
+// Peer Comparison — the `peer_comparison` agent slot in a report
+// =============================================================================
+
+export interface PeerMetricRow {
+  metric: string;
+  label: string;
+  target_value: number | null;
+  peer_median: number | null;
+  peer_min: number | null;
+  peer_max: number | null;
+  /** (target - peer_median) / |peer_median|; positive = target is higher. */
+  premium_discount_pct: number | null;
+  /** Target's percentile rank within peers + itself, 0-100. */
+  percentile: number | null;
+  /** True for margins/growth/returns; False for valuation multiples/leverage. */
+  higher_is_better: boolean;
+}
+
+export interface PeerComparisonReport {
+  agent: string;
+  confidence: number;
+  reasoning: string;
+  target_ticker: string;
+  peer_tickers: string[];
+  sector: string | null;
+  industry: string | null;
+  discovery_method:
+    | "direct_cluster_membership"
+    | "sector_industry_match"
+    | "no_match"
+    | string
+    | null;
+  metrics_table: PeerMetricRow[];
+  valuation_assessment: "premium" | "discount" | "in_line" | string;
+  excluded_peers: string[];
+  competitive_moat: string;
+  key_differentiators: string[];
+  data_limitations: string[];
+}
 
 /** Full result from POST /analyze (and the `complete` stream event). */
 export interface AnalyzeResult {
@@ -348,8 +530,18 @@ export interface AnalysisHistoryItem {
 }
 
 export interface AnalysisHistoryResponse {
-  ticker: string;
+  ticker: string | null;
   history: AnalysisHistoryItem[];
+}
+
+/** One entry of GET /analysis/tickers — every ticker with a persisted run. */
+export interface AnalysisTickerInfo {
+  ticker: string;
+  runs: number;
+}
+
+export interface AnalysisTickersResponse {
+  tickers: AnalysisTickerInfo[];
 }
 
 /** Full stored record from GET /analysis/{run_id}. */
@@ -427,6 +619,7 @@ export interface Trade {
   /** The user's own words — what the Coach agent will evaluate. */
   entry_rationale: string | null;
   avg_price_after: number | null;
+  emotion_tag: EmotionTag | null;
   created_at: string | null;
 }
 
@@ -563,6 +756,10 @@ export interface TradesResponse {
 }
 
 /** POST /portfolio/trades — what the user types, and nothing more. */
+/** The user's self-reported emotional state at entry (phase 5 — the Emotion Tag Selector). */
+export type EmotionTag =
+  | "calm" | "fomo" | "revenge" | "boredom" | "overconfidence" | "fear";
+
 export interface TradeCreate {
   ticker: string;
   side: "buy" | "sell";
@@ -572,6 +769,7 @@ export interface TradeCreate {
   /** Manual override; omit so the backend derives the fill from market data. */
   execution_price?: number | null;
   fx_rate?: number | null;
+  emotion_tag?: EmotionTag | null;
 }
 
 export interface TradeResponse {
@@ -608,6 +806,19 @@ export interface DetectedBias {
   severity: "mild" | "moderate" | "strong" | string;
 }
 
+/** One of the user's own active Golden Setup / Toxic Pattern rules a proposed trade matched. */
+export interface RuleMatch {
+  id: number;
+  title: string;
+  description: string;
+  conditions: Record<string, string>;
+  win_rate: number | null;
+  payoff_ratio: number | null;
+  expectancy: number | null;
+  /** 0-1, share of the rule's specified conditions the proposed trade matched. */
+  match_score: number;
+}
+
 export interface CoachReport {
   agent: string;
   confidence: number;
@@ -627,6 +838,12 @@ export interface CoachReport {
   supporting_data_points: string[];
   data_limitations: string[];
   history_sufficient: boolean;
+  /** Python-computed portfolio-risk flags (concentration, correlation, a simulated vol jump). */
+  risk_warnings: string[];
+  /** Pre-trade only: the user's own active Toxic Pattern rules this trade matches. */
+  toxic_pattern_matches: RuleMatch[];
+  /** Pre-trade only: the user's own active Golden Setup rules this trade matches. */
+  golden_setup_matches: RuleMatch[];
 
   // ── Retrospective only; null on a pre-trade review. ──
   /**
@@ -669,6 +886,8 @@ export interface JournalReport {
   priorities: string[];
   history_sufficient: boolean;
   data_limitations: string[];
+  /** Python-computed CURRENT portfolio-risk flags (concentration, correlation, elevated VaR). */
+  risk_warnings: string[];
 }
 
 export interface JournalReviewRequest {
@@ -706,11 +925,114 @@ export interface PendingReviewsResponse {
   count: number;
 }
 
+// =============================================================================
+// Personal Trading Edge — GET /coach/edge-analytics, /coach/rules*
+// =============================================================================
+
+/** Win Rate, Payoff Ratio, and Expectancy over a set of REALIZED, base-currency P/Ls. */
+export interface ExpectancyStats {
+  count: number;
+  win_rate: number | null;
+  avg_gain: number | null;
+  avg_loss: number | null;
+  payoff_ratio: number | null;
+  expectancy: number | null;
+}
+
+export interface DispositionEffect {
+  avg_holding_days_winners: number | null;
+  avg_holding_days_losers: number | null;
+  winners_count: number;
+  losers_count: number;
+  disposition_ratio: number | null;
+  flag: boolean;
+  note: string;
+}
+
+export interface MaeMfeTrade {
+  ticker: string;
+  buy_id: number;
+  sell_id: number;
+  buy_at: string;
+  sell_at: string;
+  is_win: boolean;
+  mae: number;
+  mfe: number;
+  realized_return: number | null;
+  exit_efficiency: number | null;
+}
+
+export interface MaeMfeAnalysis {
+  trades: MaeMfeTrade[];
+  optimal_stop_loss: number | null;
+  optimal_stop_loss_note: string;
+  avg_exit_efficiency: number | null;
+  avg_exit_efficiency_note: string | null;
+}
+
+export interface RuleConditions {
+  rationale_type: string;
+  strategy_type: string;
+  emotion_tag: string;
+}
+
+export interface RuleCandidate extends ExpectancyStats {
+  conditions: RuleConditions;
+}
+
+export interface EdgeAnalytics {
+  ticker: string | null;
+  total_trades: number;
+  closed_round_trips: number;
+  excluded_missing_base_pnl: number;
+  sufficient: boolean;
+  note: string;
+  overall: ExpectancyStats;
+  by_rationale_type: Record<string, ExpectancyStats>;
+  by_strategy_type: Record<string, ExpectancyStats>;
+  by_emotion_tag: Record<string, ExpectancyStats>;
+  disposition_effect: Partial<DispositionEffect>;
+  mae_mfe: Partial<MaeMfeAnalysis>;
+  rule_candidates: {
+    golden_candidates: RuleCandidate[];
+    toxic_candidates: RuleCandidate[];
+  };
+}
+
+export interface TradingRuleCreate {
+  rule_type: "golden" | "toxic" | "custom";
+  title: string;
+  conditions: Record<string, string>;
+  description: string;
+  win_rate?: number | null;
+  payoff_ratio?: number | null;
+  expectancy?: number | null;
+}
+
+export interface TradingRule {
+  id: number;
+  rule_type: "golden" | "toxic" | "custom" | string;
+  title: string;
+  conditions: Record<string, string>;
+  description: string;
+  win_rate: number | null;
+  payoff_ratio: number | null;
+  expectancy: number | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface TradingRulesResponse {
+  rules: TradingRule[];
+  count: number;
+}
+
 export interface CoachReviewRequest {
   ticker?: string | null;
   proposed_side?: "buy" | "sell" | null;
   proposed_quantity?: number | null;
   entry_rationale: string;
+  emotion_tag?: EmotionTag | null;
 }
 
 /** Both legs of a 환전, plus the spread against the market rate that day. */
@@ -795,4 +1117,98 @@ export interface PerformanceReport {
     taxes: { native: number; krw: number };
     basis: string;
   };
+}
+
+// =============================================================================
+// Portfolio risk — GET /portfolio/risk (services.risk_metrics.compute_portfolio_risk)
+// =============================================================================
+// All figures are in BASE CURRENCY (KRW) and weights are shares of NET WORTH
+// (positions plus cash), matching the rest of the dual-currency system.
+
+export interface RiskPosition {
+  ticker: string;
+  weight: number;
+  market_value: number;
+  volatility: number | null;
+  marginal_risk_contribution: number | null;
+  risk_contribution: number | null;
+  /** This position's share of TOTAL portfolio risk — compare against `weight`. */
+  risk_contribution_pct: number | null;
+}
+
+export interface RiskCashPosition {
+  currency: string;
+  weight: number;
+  value: number;
+  volatility: number | null;
+  risk_contribution: number;
+  risk_contribution_pct: number | null;
+}
+
+export interface RiskConcentration {
+  largest_weight: number;
+  largest_position: string | null;
+  top_risk_position: string | null;
+  top_risk_share: number | null;
+  position_count: number;
+  herfindahl: number;
+  equity_weight: number;
+  cash_weight: number;
+  fx_exposure: number;
+}
+
+export interface RiskCashBlock {
+  balances_base: Record<string, number>;
+  total_base: number;
+  weight: number;
+  cash_drag: number | null;
+  cash_drag_note: string | null;
+}
+
+export interface RiskFxBlock {
+  exposure: number;
+  fx_volatility: number | null;
+  fx_var: number | null;
+  equity_fx_correlation: number | null;
+  hedged_volatility: number | null;
+  /** portfolio_volatility minus the same book hedged — negative = FX dampens risk. */
+  fx_contribution: number | null;
+  note: string | null;
+}
+
+export interface RiskScenario {
+  ticker?: string;
+  scenario?: string;
+  delta_weight?: number;
+  weight_before?: number;
+  weight_after?: number;
+  volatility_before: number | null;
+  volatility_after: number | null;
+  volatility_change: number | null;
+  funded_from?: string | null;
+  converted_weight?: number;
+  from_currency?: string;
+  to_currency?: string;
+  share?: number;
+  note: string | null;
+}
+
+export interface PortfolioRiskReport {
+  positions: RiskPosition[];
+  confidence_level: number;
+  portfolio_volatility: number | null;
+  value_at_risk: number | null;
+  conditional_var: number | null;
+  max_drawdown: number | null;
+  correlation_matrix: Record<string, Record<string, number>>;
+  average_correlation: number | null;
+  concentration: Partial<RiskConcentration>;
+  observations: number;
+  period: string | null;
+  data_quality: { sufficient: boolean; note: string };
+  cash_positions: RiskCashPosition[];
+  cash: Partial<RiskCashBlock>;
+  fx_risk: Partial<RiskFxBlock>;
+  scenarios: RiskScenario[];
+  excluded_tickers: string[];
 }

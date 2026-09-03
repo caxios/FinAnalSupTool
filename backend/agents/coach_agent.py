@@ -128,6 +128,42 @@ SIZING AND CURRENCY — use POSITION & SIZING below when it is present:
 - Compare what they SAY against what they STAKE. A hedged, uncertain rationale
   behind an unusually large position — or a strongly argued one behind a token
   position — is the most legible behavioural signal the journal contains.
+
+PORTFOLIO RISK — use PORTFOLIO RISK below when it is present. These are
+WHOLE-BOOK numbers (VaR, correlation, risk contribution vs. capital weight),
+computed the same way the Portfolio Risk dashboard computes them — not this
+one position's size, which SIZING above already covers:
+- `risk_warnings` is a list of concrete, Python-computed flags (concentration,
+  high correlation to existing holdings, a large simulated volatility jump).
+  When it is non-empty, you MUST work every warning into `coaching_feedback` in
+  your own words, grounded in the specific numbers given — do not soften or
+  omit one. When it is empty, do not manufacture a risk concern.
+- `current_position_risk.risk_contribution_pct` vs. `.weight`: a position
+  carrying much more risk share than capital share is the single most
+  important quantitative fact to surface if it applies here.
+- `correlation_to_holdings`: correlations above ~0.7 mean this ticker moves
+  with what is already held — say so plainly rather than treating it as a new,
+  independent bet.
+- `simulated_impact` (when present) shows the ACTUAL covariance-based effect of
+  this trade on total portfolio volatility — cite the before/after numbers
+  rather than describing the change qualitatively.
+- Never invent a VaR, correlation, or volatility figure. Every number you cite
+  from this section must appear in it verbatim.
+
+YOUR OWN PLAYBOOK — use PLAYBOOK below when it is present. `toxic_pattern_matches`
+and `golden_setup_matches` are the user's OWN empirically-derived rules
+(win rate, payoff ratio, expectancy — computed from their real closed trades in
+`services.journal_analysis`), matched against this proposed trade's own
+rationale/strategy/emotion classification — NOT a generic warning:
+- A NON-EMPTY `toxic_pattern_matches` is the single most important thing in
+  this review. Open `coaching_feedback` with it, name the matched rule's
+  `title`, and cite its actual `win_rate`/`expectancy` (e.g. "This matches your
+  own 'FOMO momentum chases' pattern — 0% win rate, -₩53,333 average expectancy
+  across your last 3 trades like this."). This is empirical, not a lecture.
+- A NON-EMPTY `golden_setup_matches` is validating evidence — say the trade
+  fits a setup that has actually worked for this user, citing the figures.
+- Never invent a rule, a win rate, or a match — use only what PLAYBOOK gives
+  you. An empty list on either side means say nothing about it.
 - Set `alignment_score`: 100 = the rationale is fully consistent with the
   objective data, 0 = it directly contradicts it.
 - Be DIRECT but not moralizing. You are a coach, not a scold. Do not lecture
@@ -180,6 +216,14 @@ _USER_TEMPLATE = """\
 === POSITION & SIZING (computed, in KRW; weights are of NET WORTH) ===
 {sizing}
 === END SIZING ===
+
+=== PORTFOLIO RISK (computed — VaR/CVaR/correlation over the WHOLE book) ===
+{risk}
+=== END PORTFOLIO RISK ===
+
+=== YOUR OWN PLAYBOOK (computed — this trade checked against YOUR adopted rules) ===
+{playbook}
+=== END PLAYBOOK ===
 
 Review this decision.
 """
@@ -279,6 +323,106 @@ async def position_context(
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[coach] position sizing unavailable: {e}")
         return {}
+
+
+async def portfolio_risk_context(
+    ticker: str | None, side: str | None, trade_size_pct: float | None,
+) -> dict:
+    """
+    The fifth pillar: how this decision interacts with **portfolio-level** risk
+    — VaR, concentration, and correlation to what is already held — not just
+    this position's own size (that is ``position_context``'s job).
+
+    Reads the exact same snapshot ``GET /portfolio/risk`` shows the user
+    (``services.portfolio_risk``, TTL-cached), so a number the coach cites is
+    never a different computation than the dashboard's. ``risk_warnings`` are
+    rule-based, computed here in Python rather than left to the LLM — the same
+    "compute in Python, interpret in the prompt" split as every other pillar —
+    so a concrete concentration/correlation flag cannot be silently dropped by
+    a model that decides not to mention it.
+
+    Never raises: an unavailable snapshot yields an empty dict and the prompt
+    simply has no portfolio-risk section to comment on.
+    """
+    from services import portfolio_risk as pr
+
+    try:
+        snap = await pr.build_snapshot()
+    except Exception as e:  # noqa: BLE001 — risk context degrades, never fails
+        logger.warning(f"[coach] portfolio risk snapshot unavailable: {e}")
+        return {}
+
+    if snap.get("portfolio_volatility") is None:
+        return {"note": (snap.get("data_quality") or {}).get("note")}
+
+    ctx: dict = {
+        "portfolio_volatility": snap.get("portfolio_volatility"),
+        "value_at_risk_95": snap.get("value_at_risk"),
+        "conditional_var_95": snap.get("conditional_var"),
+        "average_correlation": snap.get("average_correlation"),
+        "concentration": snap.get("concentration"),
+        "data_sufficient": (snap.get("data_quality") or {}).get("sufficient"),
+    }
+
+    t = (ticker or "").strip().upper() or None
+    warnings: list[str] = []
+
+    position = (
+        next((p for p in snap.get("positions", []) if p["ticker"] == t), None)
+        if t else None
+    )
+    if position:
+        ctx["current_position_risk"] = position
+        share = position.get("risk_contribution_pct")
+        weight = position.get("weight")
+        # A position punching well above its capital weight in risk terms —
+        # blueprint §2's headline concentration signal.
+        if share is not None and weight is not None and weight > 1e-6:
+            if share > weight * 1.5 and share > 0.20:
+                warnings.append(
+                    f"{t} is already {weight:.1%} of net worth but carries "
+                    f"{share:.1%} of total portfolio risk — a concentration the "
+                    f"position size alone does not show."
+                )
+
+    corr_row = (snap.get("correlation_matrix") or {}).get(t) if t else None
+    if corr_row:
+        others = {k: v for k, v in corr_row.items() if k != t}
+        ctx["correlation_to_holdings"] = others
+        high = {k: v for k, v in others.items() if v is not None and v > 0.75}
+        if high:
+            pairs = ", ".join(f"{k} ({v:.2f})" for k, v in high.items())
+            warnings.append(
+                f"{t} is highly correlated (>0.75) with {pairs} — adding it "
+                f"does not diversify the book, it concentrates it."
+            )
+
+    if t and side and trade_size_pct:
+        delta = trade_size_pct if side == "buy" else -trade_size_pct
+        try:
+            sim = await pr.simulate_trade(t, delta)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[coach] risk scenario simulation failed: {e}")
+            sim = None
+        if sim and sim.get("volatility_after") is not None:
+            ctx["simulated_impact"] = sim
+            before, after = sim["volatility_before"], sim["volatility_after"]
+            if before > 1e-9 and (after - before) / before > 0.10:
+                warnings.append(
+                    f"This trade would raise annualized portfolio volatility "
+                    f"from {before:.1%} to {after:.1%} "
+                    f"({(after - before) / before:+.0%})."
+                )
+
+    if (ctx.get("average_correlation") or 0) > 0.75:
+        warnings.append(
+            f"The existing book's average pairwise correlation is "
+            f"{ctx['average_correlation']:.2f} — diversification across current "
+            f"holdings is already limited."
+        )
+
+    ctx["risk_warnings"] = warnings
+    return ctx
 
 
 def _cited_date_lists(report) -> list[tuple[object, str]]:
@@ -569,6 +713,11 @@ WHAT TO DO:
   actually do better? If the record cannot yet say, say that.
 - `advice_followed`: compare earlier reviews against what the user subsequently
   logged. Name specifics. Null if there are no earlier reviews.
+- When CURRENT PORTFOLIO RISK is present, ground any concentration or
+  diversification observation in its actual numbers (VaR, correlation,
+  risk_contribution_pct vs. weight) — not a general impression. If
+  `risk_warnings` is non-empty, treat at least the most important one as
+  priority material. Never invent a number this section does not contain.
 
 Output ONLY a single JSON object:
 {
@@ -607,6 +756,10 @@ _JOURNAL_TEMPLATE = """\
 {prior_reviews}
 === END REVIEWS ===
 
+=== CURRENT PORTFOLIO RISK (computed — VaR/CVaR/correlation over the WHOLE book, as of TODAY) ===
+{risk}
+=== END PORTFOLIO RISK ===
+
 Review this record.
 """
 
@@ -622,13 +775,15 @@ class CoachAgent(BaseAgent):
         """
         Args:
             context: ``ticker``, ``entry_rationale``, optional ``proposed_side`` /
-                     ``proposed_quantity``, and optional ``sec_report`` /
-                     ``technical_report`` dicts from the last /analyze run.
+                     ``proposed_quantity`` / ``emotion_tag``, and optional
+                     ``sec_report`` / ``technical_report`` dicts from the last
+                     /analyze run.
         """
         ticker = (context.get("ticker") or "").strip().upper() or None
         rationale = (context.get("entry_rationale") or "").strip()
         side = context.get("proposed_side")
         qty = context.get("proposed_quantity")
+        emotion_tag = context.get("emotion_tag")
 
         proposed = " ".join(
             str(x) for x in [side, qty, ticker] if x not in (None, "")
@@ -651,6 +806,21 @@ class CoachAgent(BaseAgent):
         technical = _compact_report(context.get("technical_report"), _TECH_FIELDS)
 
         sizing = await position_context(ticker, side, qty)
+        risk_ctx = await portfolio_risk_context(
+            ticker, side, sizing.get("trade_size_pct_of_net_worth")
+        )
+
+        # ── The user's own empirical playbook, computed in Python. ──
+        from services import trading_rules
+
+        proposed_segment = {
+            "rationale_type": journal_analysis.classify_rationale(rationale),
+            "strategy_type": journal_analysis.classify_strategy(rationale),
+            "emotion_tag": (emotion_tag or "untagged"),
+        }
+        toxic_matches = trading_rules.match_active_rules("toxic", proposed_segment)
+        golden_matches = trading_rules.match_active_rules("golden", proposed_segment)
+
         user_prompt = _USER_TEMPLATE.format(
             proposed=proposed,
             rationale=rationale or "(The user gave no rationale for this trade.)",
@@ -664,6 +834,18 @@ class CoachAgent(BaseAgent):
                 "(Not available — the portfolio could not be valued, so do not "
                 "comment on position size.)"
             ),
+            risk=(
+                json.dumps(risk_ctx, ensure_ascii=False, indent=2, default=str)
+                if risk_ctx else
+                "(Not available — portfolio risk could not be computed, so do "
+                "not comment on VaR, correlation, or risk contribution.)"
+            ),
+            playbook=json.dumps(
+                {"proposed_segment": proposed_segment,
+                 "toxic_pattern_matches": toxic_matches,
+                 "golden_setup_matches": golden_matches},
+                ensure_ascii=False, indent=2, default=str,
+            ),
         )
 
         if capture is not None:
@@ -674,6 +856,13 @@ class CoachAgent(BaseAgent):
         # ── Enforce what the prompt only asked for. ──
         from services import cash_service as cs
         verify_citations(report, real_entries, flows=cs.list_flows(limit=200))
+
+        # Guarantee every computed risk flag / rule match survives regardless of
+        # whether the model chose to mention it — the same enforcement pattern
+        # as history_sufficient below.
+        report.risk_warnings = risk_ctx.get("risk_warnings", [])
+        report.toxic_pattern_matches = toxic_matches
+        report.golden_setup_matches = golden_matches
 
         report.ticker = ticker
         report.proposed_action = proposed
@@ -898,6 +1087,7 @@ class CoachAgent(BaseAgent):
             f"{f' spanning {period}' if period else ''}."
         )
 
+        risk_ctx = await portfolio_risk_context(ticker, None, None)
         user_prompt = _JOURNAL_TEMPLATE.format(
             scope=scope_text,
             journal=(
@@ -912,6 +1102,11 @@ class CoachAgent(BaseAgent):
                 if prior_reviews else
                 "(No earlier reviews exist. Set `advice_followed` to null.)"
             ),
+            risk=(
+                json.dumps(risk_ctx, ensure_ascii=False, indent=2, default=str)
+                if risk_ctx else
+                "(Not available — portfolio risk could not be computed.)"
+            ),
         )
         if capture is not None:
             capture["raw_data"] = user_prompt
@@ -924,6 +1119,7 @@ class CoachAgent(BaseAgent):
         from services import cash_service as cs
         verify_citations(report, journal, flows=cs.list_flows(limit=200))
 
+        report.risk_warnings = risk_ctx.get("risk_warnings", [])
         report.scope_description = scope_text
         report.trades_reviewed = len(journal)
         report.period = period

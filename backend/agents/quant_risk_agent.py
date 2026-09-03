@@ -15,21 +15,16 @@ The separation is *enforced*, not merely requested: every numeric field on the
 report is overwritten from the computed metrics after the LLM returns, so even a
 model that ignores the instruction cannot alter a number.
 
-Debate participation
-────────────────────
-This agent does NOT join the round-table debate. Every debating agent
-(``FIELD_AGENT_IDS``) analyzes a single company, while this one analyzes the
-whole portfolio — a portfolio-level argument cannot rebut a company-level one,
-and letting it try would produce cross-talk rather than disagreement. It runs
-like ``MacroHistoryAgent``: an independent advisory report handed to the
-Manager alongside the debate.
-
-Macro synthesis
-───────────────
-Blueprint §2 requires merging the hard numbers with the Macro Market agent's
-qualitative regime read, so the same volatility is judged differently in a
-high-rate regime than in a calm one. The agent therefore runs AFTER phase 1, and
-the pipeline passes it ``macro_context`` from the Macro agent's report.
+Not part of the Deep Analysis pipeline
+──────────────────────────────────────
+This agent does NOT join the round-table debate, and — since the portfolio/
+trading-coach reorganization — it is no longer run as part of ``/analyze``
+either: a single-company research run has no business computing whole-
+portfolio math. The objective numbers now live in ``services.portfolio_risk``
+and are consumed directly by ``GET /portfolio/risk`` and by the Trading Coach.
+This class remains as an optional LLM interpretation layer on top of that same
+snapshot — pass it a ``macro_report`` to condition the reading on the market
+regime — for any caller that wants prose alongside the numbers.
 """
 
 from __future__ import annotations
@@ -37,25 +32,12 @@ from __future__ import annotations
 import json
 import logging
 
-import pandas as pd
-
-from providers import price_provider
-from services import risk_metrics
+from services import portfolio_risk
 
 from .base_agent import BaseAgent
 from .schemas.quant_risk import QuantRiskReport
 
 logger = logging.getLogger(__name__)
-
-
-# How far back to pull returns. ~1 year of trading days is enough for a stable
-# covariance estimate without letting a regime from three years ago dominate.
-_HISTORY_DAYS = 400
-
-# What-if scenarios are computed for the top risk contributors only — a scenario
-# per position would bloat the prompt without adding insight.
-_SCENARIO_COUNT = 2
-_SCENARIO_DELTA = 0.05     # +5 percentage points of portfolio weight
 
 
 _SYSTEM_PROMPT = """\
@@ -176,21 +158,19 @@ class QuantRiskAgent(BaseAgent):
     async def analyze(self, context: dict, capture: dict | None = None) -> QuantRiskReport:
         """
         Args:
-            context: ``holdings`` (list of dicts from ``portfolio_service``),
-                     optional ``macro_report`` (the Macro agent's dict),
-                     optional ``start_date`` / ``end_date``.
+            context: optional ``macro_report`` (the Macro agent's dict) to
+                     condition the reading on the market regime.
+
+        The risk numbers themselves come from ``services.portfolio_risk`` — the
+        same snapshot builder ``GET /portfolio/risk`` and the Trading Coach use
+        — so this agent's only remaining job is the LLM interpretation on top.
         """
-        holdings = context.get("holdings") or []
-        cash = context.get("cash") or {}
+        snapshot = await portfolio_risk.build_snapshot()
 
         # An empty portfolio is a normal state of the app, not an error — and
         # there is nothing for an LLM to interpret, so return a well-formed
         # report directly rather than spending a call on it.
-        #
-        # Cash alone is no longer this case: a book of only won has near-zero
-        # risk and a book of only dollars carries the exchange rate's own
-        # volatility. Both are real answers.
-        if not holdings and not cash:
+        if not snapshot.get("positions") and not snapshot.get("cash_positions"):
             return QuantRiskReport(
                 agent=self.agent_id,
                 confidence=1.0,
@@ -202,92 +182,11 @@ class QuantRiskAgent(BaseAgent):
                 risk_score=0,
             )
 
-        tickers = [h.get("ticker") for h in holdings if h.get("ticker")]
-        end = context.get("end_date")
-        start = context.get("start_date")
-        if not start or not end:
-            from datetime import date, timedelta
-            today = date.today()
-            end = end or today.isoformat()
-            start = start or (today - timedelta(days=_HISTORY_DAYS)).isoformat()
+        metrics = snapshot
+        scenarios = snapshot.get("scenarios", [])
+        dropped = snapshot.get("excluded_tickers", [])
 
-        from providers import fx_provider
-        from services import cash_service as cs
-        from services import portfolio_service as ps
-
-        currencies = {t: ps.resolve_asset_currency(t) for t in tickers}
-        base = cs.BASE_CURRENCY
-
-        # BOTH series: base-currency prices drive the risk model (so the
-        # stock/exchange-rate correlation is inside the returns), and the native
-        # ones drive the hedged comparison in `fx_risk`.
-        local_prices, dropped = await price_provider.fetch_price_history(
-            tickers, start, end
-        ) if tickers else (None, [])
-        try:
-            prices, dropped = await price_provider.fetch_price_history_base(
-                tickers, start, end, currencies, base=base
-            ) if tickers else (None, [])
-        except Exception as e:  # noqa: BLE001 — fall back rather than fail the run
-            logger.warning(
-                f"[quant_risk] base-currency series unavailable ({e}); "
-                f"falling back to native prices."
-            )
-            prices = local_prices
-
-        fx_returns = None
-        try:
-            fx = await fx_provider.fetch_fx_history(start, end)
-            if not fx.empty:
-                fx_returns = fx.pct_change().dropna()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[quant_risk] no FX history for risk model: {e}")
-
-        metrics = risk_metrics.compute_portfolio_risk(
-            holdings, prices, cash=cash, fx_returns=fx_returns,
-            base_currency=base, local_prices=local_prices,
-        )
-
-        # What-if scenarios on the biggest risk contributors (blueprint §2's
-        # "how does changing this position alter total risk"), now funded from
-        # the pocket the money would really come from.
-        scenarios: list[dict] = []
-        if metrics.get("positions") and prices is not None and not prices.empty:
-            import numpy as np
-            rets = risk_metrics.daily_returns(prices)
-            cash_rets = risk_metrics.cash_return_columns(
-                cash, fx_returns, rets.index, base
-            )
-            if not cash_rets.empty:
-                rets = pd.concat([rets, cash_rets], axis=1).dropna(how="any")
-            cols = list(rets.columns)
-            weight_by = {p["ticker"]: p["weight"] for p in metrics["positions"]}
-            weight_by.update({
-                f"{risk_metrics.CASH_PREFIX}{c['currency']}": c["weight"]
-                for c in metrics.get("cash_positions", [])
-            })
-            w = np.array([weight_by.get(c, 0.0) for c in cols], dtype=float)
-            for p in metrics["positions"][:_SCENARIO_COUNT]:
-                scenarios.append(
-                    risk_metrics.simulate_position_change(
-                        rets, w, p["ticker"], _SCENARIO_DELTA,
-                        asset_currency=currencies.get(p["ticker"]),
-                        base_currency=base,
-                    )
-                )
-            # A lever that touches no position at all, and that this user pulls
-            # every time they convert won to dollars to invest.
-            for c in metrics.get("cash_positions", []):
-                if c["currency"] != base and c["weight"] > 0:
-                    scenarios.append(
-                        risk_metrics.simulate_conversion(
-                            rets, w, c["currency"], 0.5, base_currency=base
-                        )
-                    )
-                    break
-
-        payload = {**metrics, "scenarios": scenarios, "excluded_tickers": dropped}
-        metrics_text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        metrics_text = json.dumps(metrics, ensure_ascii=False, indent=2, default=str)
         macro_text = _macro_summary(context.get("macro_report"))
 
         if capture is not None:

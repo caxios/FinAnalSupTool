@@ -5,8 +5,11 @@ The three-phase Multi-Agent System (MAS) analysis orchestration, extracted from
 the HTTP layer so the routers stay thin and the logic lives in exactly one place.
 
   Phase 1 — Independent analysis: the field agents run concurrently, capped at
-            two Gemini calls at a time (avoids 429s). The portfolio-wide Quant
-            Risk agent then runs, since it needs Phase 1's macro regime read.
+            two Gemini calls at a time (avoids 429s). Whole-portfolio
+            quantitative risk (VaR, CVaR, correlation, FX) is NOT computed
+            here — a single-company research run has no business touching the
+            user's whole book. That lives in ``services.portfolio_risk`` and
+            is consumed by ``GET /portfolio/risk`` and the Trading Coach.
   Phase 2 — True sequential debate over the agents that reported.
   Phase 3 — Manager synthesis + programmatic 3-axis gap scoring, then the run is
             persisted to history.
@@ -35,14 +38,14 @@ from agents import (
     MacroMarketAgent,
     YouTubeAgent,
     MacroHistoryAgent,
-    QuantRiskAgent,
+    PeerComparisonAgent,
     ManagerAgent,
     DebateTranscript,
     run_sequential_debate,
     FIELD_AGENT_IDS,
 )
 from services.storage import DocumentStore, DebateStore
-from services import company_service, portfolio_service
+from services import company_service
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +175,10 @@ async def analyze_pipeline(
                 "merged_tables": company_store.merged_tables,
                 "text_store": company_store.text_store,
                 "filing_meta": company_store.filing_meta,
+                # Raw per-period XBRL metrics (already fetched — this is not a
+                # new SEC/XBRL call) so the forensic QoE accrual table can be
+                # computed in Python rather than estimated by the LLM.
+                "metrics_store": company_store.metrics_store,
                 # For scoping the filing-text RAG index/retrieval to this run.
                 "ticker": ticker,
                 "run_id": analysis_id,
@@ -195,6 +202,7 @@ async def analyze_pipeline(
     )
     for agent_id, agent_cls in (
         ("earnings_call", EarningsCallAgent),
+        ("peer_comparison", PeerComparisonAgent),
         ("company_news", CompanyNewsAgent),
         ("macro_market", MacroMarketAgent),
         ("youtube_analysis", YouTubeAgent),
@@ -214,9 +222,7 @@ async def analyze_pipeline(
         if identified else no_company,
     ))
 
-    # The Quant Risk agent runs after the others (it needs the macro regime),
-    # but it counts toward the total so the progress bar doesn't jump at the end.
-    total = len(planned) + 1
+    total = len(planned)
     yield {"phase": 1, "status": "running", "agents_total": total, "agents_completed": 0}
 
     reports: dict[str, dict] = {}          # successful reports only (feed 2 & 3)
@@ -266,85 +272,10 @@ async def analyze_pipeline(
         yield {"phase": 1, "status": "agent_done", "agent": aid, "ok": ok,
                "agents_completed": done, "agents_total": total}
 
-    # ── Quant Risk: portfolio-wide, and it needs Phase 1's macro read. ──────
-    # It runs here rather than alongside the others because blueprint §2 requires
-    # conditioning the risk numbers on the macro regime, which only exists once
-    # the Macro agent has reported. Like MacroHistoryAgent it does NOT debate:
-    # every debating agent argues about one company, and a portfolio-level claim
-    # cannot rebut a company-level one.
-    try:
-        holdings = portfolio_service.list_holdings()
-    except Exception as e:  # noqa: BLE001 — a portfolio read must not fail a run
-        logger.warning(f"Could not read the portfolio for risk analysis: {e}")
-        holdings = []
-
-    # Cash in BASE CURRENCY, keyed by the currency it is actually held in — the
-    # key selects the return series (won: none, dollars: the exchange rate's),
-    # the value is what it is worth in won. A book of only cash is no longer
-    # "nothing to measure": it has near-zero risk in won and real risk in dollars.
-    cash_base: dict[str, float] = {}
-    try:
-        from providers import fx_provider
-        from services import cash_service
-
-        spot = None
-        balances = cash_service.balances()
-        if any(c != cash_service.BASE_CURRENCY and abs(v) > 1e-9
-               for c, v in balances.items()):
-            spot = (await fx_provider.fetch_spot()).rate
-        for currency, amount in balances.items():
-            if abs(amount) < 1e-9:
-                continue
-            converted = fx_provider.convert(
-                amount, currency, cash_service.BASE_CURRENCY, spot
-            )
-            if converted is not None:
-                cash_base[currency] = converted
-    except Exception as e:  # noqa: BLE001 — cash is additive; never fail the run
-        logger.warning(f"Could not read cash balances for risk analysis: {e}")
-
-    if holdings or cash_base:
-        try:
-            risk_report = await QuantRiskAgent().analyze(
-                {
-                    "holdings": holdings,
-                    "cash": cash_base,
-                    "macro_report": reports.get("macro_market"),
-                    "start_date": start_date,
-                    "end_date": end_date,
-                },
-                capture=_cap("quant_risk"),
-            )
-            payload = risk_report.model_dump()
-            reports["quant_risk"] = payload
-            slots["quant_risk"] = {"report": payload}
-            agent_contexts["quant_risk"] = {
-                "raw_data": captures.get("quant_risk", {}).get("raw_data", ""),
-                "report": payload,
-            }
-            done += 1
-            yield {"phase": 1, "status": "agent_done", "agent": "quant_risk",
-                   "ok": True, "agents_completed": done, "agents_total": total}
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Quant risk agent failed: {e}")
-            slots["quant_risk"] = {"error": str(e)}
-            done += 1
-            yield {"phase": 1, "status": "agent_done", "agent": "quant_risk",
-                   "ok": False, "agents_completed": done, "agents_total": total}
-    else:
-        slots["quant_risk"] = {
-            "error": "No positions in the portfolio; portfolio risk analysis was "
-                     "skipped. Add holdings on the Portfolio view to enable it."
-        }
-        done += 1
-        yield {"phase": 1, "status": "agent_done", "agent": "quant_risk",
-               "ok": False, "skipped": True,
-               "agents_completed": done, "agents_total": total}
-
     # ── Phase 2: TRUE sequential debate over the agents that reported. ───────
-    # The debate roster is limited to FIELD agents — the Macro History and
-    # Quant Risk agents do NOT participate (each produces an independent
-    # advisory report that the Manager receives alongside the debate).
+    # The debate roster is limited to FIELD agents — the Macro History agent
+    # does NOT participate (it produces an independent advisory report that
+    # the Manager receives alongside the debate).
     debate_contexts = {
         aid: ctx for aid, ctx in agent_contexts.items()
         if aid in FIELD_AGENT_IDS

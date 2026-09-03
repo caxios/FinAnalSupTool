@@ -31,6 +31,7 @@ import type {
   AnalyzeResult,
   AnalyzeProgressEvent,
   AnalysisHistoryResponse,
+  AnalysisTickersResponse,
   AnalysisRecord,
   PortfolioResponse,
   TradesResponse,
@@ -44,6 +45,10 @@ import type {
   JournalReviewRequest,
   StoredReviewsResponse,
   PendingReviewsResponse,
+  EdgeAnalytics,
+  TradingRule,
+  TradingRuleCreate,
+  TradingRulesResponse,
   CashPosition,
   CashFlow,
   CashFlowCreate,
@@ -53,6 +58,9 @@ import type {
   LedgerInitResponse,
   PerformanceReport,
   PerformanceWindow,
+  PortfolioRiskReport,
+  QueryDataScope,
+  QueryDataResponse,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -522,14 +530,24 @@ export async function runAnalysisStream(
   return result;
 }
 
-/** Past analysis-run summaries for a ticker (newest first). */
+/**
+ * Past analysis-run summaries, newest first. Omit `ticker` for a global feed
+ * across every company that has a persisted run.
+ */
 export async function getAnalysisHistory(
-  ticker: string,
+  ticker?: string | null,
   limit = 10
 ): Promise<AnalysisHistoryResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (ticker) params.set("ticker", ticker);
   return fetchJson<AnalysisHistoryResponse>(
-    `${API_BASE}/analysis/history?ticker=${encodeURIComponent(ticker)}&limit=${limit}`
+    `${API_BASE}/analysis/history?${params.toString()}`
   );
+}
+
+/** Every ticker with at least one persisted analysis run, with counts. */
+export async function getAnalysisTickers(): Promise<AnalysisTickersResponse> {
+  return fetchJson<AnalysisTickersResponse>(`${API_BASE}/analysis/tickers`);
 }
 
 /** Full stored record for one past run. */
@@ -537,6 +555,23 @@ export async function getAnalysisRun(runId: string): Promise<AnalysisRecord> {
   return fetchJson<AnalysisRecord>(
     `${API_BASE}/analysis/${encodeURIComponent(runId)}`
   );
+}
+
+/**
+ * Ask the Research Data Copilot one ad-hoc, grounded question against a
+ * company's already-available data (financials, filing text, the last
+ * analysis run's captured earnings-call material, and/or live peer metrics).
+ */
+export async function queryResearchData(
+  ticker: string,
+  query: string,
+  dataScope: QueryDataScope = "all"
+): Promise<QueryDataResponse> {
+  return fetchJson<QueryDataResponse>(`${API_BASE}/analysis/query-data`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticker, query, data_scope: dataScope }),
+  });
 }
 
 // =============================================================================
@@ -704,6 +739,59 @@ export async function getPendingReviews(): Promise<PendingReviewsResponse> {
 }
 
 // =============================================================================
+// Personal Trading Edge — expectancy, MAE/MFE, disposition effect, rules
+// =============================================================================
+
+/**
+ * Expectancy/Payoff Ratio (overall + segmented by rationale/strategy/emotion),
+ * the Disposition Effect, an MAE/MFE-derived empirical stop-loss, and
+ * Golden/Toxic rule candidates — computed from REALIZED, base-currency P/L on
+ * closed round trips.
+ */
+export async function getEdgeAnalytics(ticker?: string | null): Promise<EdgeAnalytics> {
+  const q = ticker ? `?ticker=${encodeURIComponent(ticker)}` : "";
+  return fetchJson<EdgeAnalytics>(`${API_BASE}/coach/edge-analytics${q}`);
+}
+
+/** The user's Golden Setup / Toxic Pattern / custom rules, newest first. */
+export async function getRules(params?: {
+  ruleType?: string;
+  activeOnly?: boolean;
+}): Promise<TradingRulesResponse> {
+  const qs = new URLSearchParams();
+  if (params?.ruleType) qs.set("rule_type", params.ruleType);
+  if (params?.activeOnly) qs.set("active_only", "true");
+  const q = qs.toString();
+  return fetchJson<TradingRulesResponse>(`${API_BASE}/coach/rules${q ? `?${q}` : ""}`);
+}
+
+/** Adopt a synthesized candidate, or write a custom rule. */
+export async function createRule(body: TradingRuleCreate): Promise<TradingRule> {
+  return fetchJson<TradingRule>(`${API_BASE}/coach/rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Toggle a rule active/inactive — the playbook's toggle switch. */
+export async function setRuleActive(id: number, isActive: boolean): Promise<TradingRule> {
+  return fetchJson<TradingRule>(`${API_BASE}/coach/rules/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ is_active: isActive }),
+  });
+}
+
+/** Remove a rule permanently. */
+export async function deleteRule(id: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/coach/rules/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Failed to delete rule ${id} (${res.status})`);
+  }
+}
+
+// =============================================================================
 // Cash ledger & performance
 // =============================================================================
 
@@ -787,5 +875,23 @@ export async function getPerformance(
 ): Promise<PerformanceReport> {
   return fetchJson<PerformanceReport>(
     `${API_BASE}/portfolio/performance?window=${window}`
+  );
+}
+
+/**
+ * Whole-portfolio quantitative risk: VaR, CVaR, volatility, per-position risk
+ * contribution vs. capital weight, correlation matrix, and FX risk. Cached on
+ * the backend for 5 minutes — pass `refresh: true` (e.g. right after logging
+ * a trade) to force a refetch.
+ */
+export async function getPortfolioRisk(
+  opts: { confidence?: number; refresh?: boolean } = {}
+): Promise<PortfolioRiskReport> {
+  const params = new URLSearchParams();
+  if (opts.confidence !== undefined) params.set("confidence", String(opts.confidence));
+  if (opts.refresh) params.set("refresh", "true");
+  const qs = params.toString();
+  return fetchJson<PortfolioRiskReport>(
+    `${API_BASE}/portfolio/risk${qs ? `?${qs}` : ""}`
   );
 }

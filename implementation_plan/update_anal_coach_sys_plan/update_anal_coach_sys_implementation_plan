@@ -1,0 +1,260 @@
+# Architecture & Feature Plan: Deep Analysis, Trading Coach & History Persistence
+
+## 1. Executive Summary
+
+This plan unifies the system's analytical architecture across four major pillars:
+
+1. **Domain Boundary Re-alignment (Quant Risk $\rightarrow$ Portfolio/Coach | Peer Comparison $\rightarrow$ Deep Analysis)**:
+   - Reallocate portfolio-level quantitative risk metrics (**VaR, CVaR, portfolio volatility, risk contribution, correlation matrix, FX VaR**) out of Deep Analysis and into **Portfolio & Trading Coach**.
+   - Equip Deep Analysis with **Peer Comparison Analysis** (comparing valuation multiples, margins, and growth against key industry rivals).
+
+2. **Deep Analysis as an Institutional Equity Research Platform & Forensic QoE**:
+   - Upgrade the Manager and Multi-Agent output from simple buy/sell scoring to an **Institutional Equity Research Paper** (증권사 기업분석 개시 보고서).
+   - **Forensic Quality of Earnings (QoE) & 3-Statement Reconciliation**:
+     - Cross-examine **Balance Sheet (BS)**, **Income Statement (IS)**, and **Cash Flow Statement (CFS)** together with **Footnotes (주석)** and **MD&A**.
+     - Unmask accounting illusions vs genuine structural growth: e.g., identifying when an earnings spike is merely a **Depreciation Cliff** (heavy historical PP&E CapEx reaching end of useful life, abruptly lowering D&A expense) versus real operational expansion or pricing power.
+     - Detect working capital anomalies, accrual ratios (Sloan Accrual), and non-operating transitory gains.
+   - **On-Demand Research Data Copilot** (`/analysis/query-data`): An interactive extraction assistant pulling specific financial tables, SEC filing quotes, earnings call transcripts, or peer ratios on demand as the user writes their research paper.
+
+3. **History Persistence & Seamless Navigation Decoupling**:
+   - Decouple analysis history and ticker discovery from the volatile in-memory `DocumentStore`.
+   - On page load, aggregate tickers and histories from disk (`backend/analysis_history/*.json`), SQLite (`portfolio.db`), and in-memory documents.
+   - Show all past analyzed runs across all companies immediately upon entering Deep Analysis, enabling instant one-click report view without requiring manual SEC re-fetching.
+
+4. **Trading Coach Evolution: Data-Driven Behavioral Mirror & Rule Incubator**:
+   - Transition AI Coach from an advice-dispensing lecturer into a **Meta-Cognitive Quant Mirror** that helps the user discover their own personalized trading edge:
+     - **Expectancy ($E$) & Payoff Ratio Matrix**: Segmented by user rationale & strategy type.
+     - **Disposition Effect Tracking**: Holding duration of winners vs losers to uncover loss-aversion traps.
+     - **1-Click Emotion Tags & PnL Correlation**: Correlate emotional states (`Calm`, `FOMO`, `Revenge`, `Boredom`, `Overconfidence`) with trade outcomes.
+     - **MAE / MFE Engine**: Quantify peak drawdown and peak run-up during hold to calculate empirical user-optimal stop-loss & take-profit levels.
+     - **Personal Trading Playbook Synthesizer**: Automatically cluster winning trades into **Golden Setups** and losing trades into **Toxic Patterns**, with real-time pre-trade guardrails.
+
+---
+
+## 2. User Review Required
+
+> [!IMPORTANT]
+> **Key Architecture Decisions**:
+> 1. **Quality of Earnings (QoE) Forensic Engine**:
+>    - `sec_filings_agent` and research paper generator will explicitly tie together PP&E trends on the BS, Depreciation in CFS, and Operating Margin in the IS with MD&A explanatory disclosures and Footnotes (PP&E useful life, revenue recognition, contingencies).
+> 2. **Deep Analysis Focus**:
+>    - `quant_risk` is removed from Deep Analysis. Instead, `peer_comparison` joins the MAS debate.
+> 3. **Portfolio Risk & Trading Coach Synergy**:
+>    - Quantitative portfolio risk (VaR, CVaR, Correlation) will reside in the Portfolio view and directly feed into the Trading Coach's pre-trade and post-trade reviews.
+> 4. **SEC Re-fetch Independence**:
+>    - Archived analysis runs will load instantly from disk JSON files with zero reliance on in-memory PDF/XBRL state.
+> 5. **Trading Coach Data Model Expansion**:
+>    - Add `emotion_tag` column to `trades` table.
+>    - Add `trading_rules` table in SQLite (`portfolio.db`) to persist user's adopted Golden and Toxic trading rules.
+
+---
+
+## 3. Proposed Changes
+
+### Phase 1: History Persistence & Ticker Independence (Problem 3)
+
+#### [MODIFY] [history_store.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/rag/history_store.py)
+- Update `get_analysis_history(ticker: str | None = None, limit: int = 50)`:
+  - If `ticker` is provided, filter by `f"{_safe(ticker)}_*.json"`.
+  - If `ticker` is `None` or omitted, load summaries from **all** `*.json` files in `backend/analysis_history/`, sorted by timestamp descending.
+- Add helper `get_latest_analysis(ticker: str) -> dict | None` to quickly fetch the most recent full report for any ticker.
+
+#### [MODIFY] [analysis.py (router)](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/analysis.py)
+- Make `ticker` optional in `GET /analysis/history`:
+  `ticker: str | None = Query(None, description="Ticker symbol (optional; returns all if omitted)")`
+- Ensure `GET /analysis/tickers` returns all distinct tickers with run counts.
+
+#### [MODIFY] [App.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/App.tsx)
+- Broaden `availableTickers` discovery by merging:
+  1. `getCompanies()` (currently in-memory filings)
+  2. `getAnalysisTickers()` (tickers with persisted history on disk)
+  3. `getPortfolio()` (tickers currently held in SQLite portfolio)
+- On fresh load or server restart, if `DocumentStore` is empty, `App` automatically selects the most recently analyzed ticker or first portfolio ticker, rather than collapsing to `null`.
+
+#### [MODIFY] [DeepAnalysis.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/DeepAnalysis.tsx)
+- If `ticker` is `null`, fetch and display the global history list across all companies with company/ticker badges.
+- Clicking any history item instantly sets `viewingPast` with the full stored record and sets `activeTicker` to that company, without prompting for an SEC fetch.
+- Add an explicit banner when viewing historical runs: *"Viewing archived report from [Date]. [Run New Analysis] [Fetch Fresh SEC]"*.
+
+---
+
+### Phase 2: Portfolio Quantitative Risk & Trading Coach Integration (Problem 1 - Part A)
+
+#### [MODIFY] [pipeline.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/pipeline.py)
+- Remove `QuantRiskAgent` execution and `quant_risk` slot from Phase 1 of `analyze_pipeline`.
+- Remove `quant_risk` imports and references from Deep Analysis.
+
+#### [MODIFY] [routers/portfolio.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/portfolio.py)
+- Add new endpoint: `GET /portfolio/risk`
+  - Retrieves current holdings and cash from `portfolio_service` and `cash_service`.
+  - Calls `risk_metrics.compute_portfolio_risk(...)`.
+  - Returns `PortfolioRiskResponse`:
+    - `value_at_risk` (95% 1-day Historical VaR & Parametric VaR)
+    - `conditional_var` (Expected Shortfall)
+    - `portfolio_volatility` (Annualized)
+    - `max_drawdown`
+    - `positions` (weights, individual volatility, marginal risk contribution % vs capital %)
+    - `correlation_matrix` (pairwise correlations among held assets)
+    - `fx_risk` (FX VaR and currency exposure breakdown)
+    - `stress_scenarios` (simulated impacts)
+
+#### [MODIFY] [coach_agent.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/coach_agent.py)
+- Integrate quantitative risk into `CoachAgent`:
+  - When reviewing a prospective or logged trade, evaluate how the trade shifts the portfolio's VaR, sector concentration, and correlation profile (e.g. warning against adding high-correlation tech stock when tech already contributes 65% of portfolio risk).
+
+#### [NEW] [PortfolioRiskPanel.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/PortfolioRiskPanel.tsx)
+- Create a dedicated **Portfolio Risk & Quant Health (⚖️)** dashboard inside `views/Portfolio.tsx`:
+  - **Top KPI Cards**: 95% Daily VaR, CVaR (Expected Shortfall), Annualized Volatility, Max Drawdown.
+  - **Risk vs Capital Allocation Bar Chart / Table**: Compare each position's Capital Weight vs Marginal Risk Share.
+  - **Asset Correlation Matrix**: Interactive heatmap highlighting high correlation clusters (> 0.7) and true diversifiers.
+  - **Currency & FX Risk**: Breakdown of USD vs KRW exposure and FX volatility impact.
+
+---
+
+### Phase 3: Peer Comparison Agent in Deep Analysis (Problem 1 - Part B)
+
+#### [NEW] [peer_provider.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/providers/peer_provider.py)
+- Utility to identify and fetch data for industry peers:
+  - Discovers peers via `yfinance` sector/industry mapping or default curated peer clusters (e.g. NVDA $\rightarrow$ AMD, INTC, TSM, AVGO, QCOM; AAPL $\rightarrow$ MSFT, GOOGL, AMZN, META; TSLA $\rightarrow$ RIVN, LCID, GM, F, BYD).
+  - Fetches trailing and forward valuation multiples (P/E, Forward P/E, EV/EBITDA, P/S, P/B), operating metrics (Gross/Operating/Net Margins, Revenue YoY Growth, ROE, ROIC), and financial health ratios (Debt/Equity, FCF Margin).
+
+#### [NEW] [peer_agent.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/peer_agent.py)
+- Create `PeerComparisonAgent`:
+  - Pre-computes deterministic peer tables (Peer group averages, medians, target company ranking/percentile, relative valuation premium/discount).
+  - Prompts LLM to analyze competitive moat, pricing power, and why valuation gap exists compared to peers.
+  - Generates `PeerComparisonReport`.
+
+#### [MODIFY] [debate.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/debate.py) & [pipeline.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/pipeline.py)
+- Register `peer_comparison` in `FIELD_AGENT_IDS` and add it to the debate sequence.
+- During debate rounds, agents can debate whether the stock's valuation premium over peers is justified by superior fundamentals.
+
+---
+
+### Phase 4: Institutional Equity Research Paper, Forensic QoE & Data Copilot (Problem 2)
+
+#### [MODIFY] [sec_filings_agent.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/sec_filings_agent.py) & [schemas/sec_filings.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/schemas/sec_filings.py)
+- Elevate SEC Filings Agent to conduct **Forensic 3-Statement Reconciliation & Footnote Analysis**:
+  - **3-Statement Triangulation**:
+    - Reconcile Net Income (IS) $\leftrightarrow$ Operating Cash Flow (CFS) $\leftrightarrow$ Working Capital changes (BS).
+    - Reconcile Capex & PP&E changes (BS) $\leftrightarrow$ Depreciation Expense (CFS/IS).
+  - **Depreciation Cliff & CapEx Cycle Detection**:
+    - Identify whether sudden operating margin / EBIT jumps are caused by historical Capex cycles reaching end of depreciation period (D&A reduction) versus organic business growth.
+  - **Footnote (주석) & MD&A Cross-Matching**:
+    - Cross-reference MD&A commentary with Notes to Financial Statements (PP&E useful lives, inventory write-downs, revenue recognition timing, restructuring charges, litigation reserves).
+    - Classify earnings drivers into **Structural (지속 가능한 구조적 요인)** vs **Transitory / Accounting Artifacts (일시적/회계적 요인)**.
+
+#### [MODIFY] [manager_agent.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/manager_agent.py) & [schemas/manager.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/schemas/manager.py)
+- Expand Manager schema and prompt to produce a full **Institutional Equity Research Paper**:
+  1. `executive_summary`: 3 core investment pillars, key catalysts, and target valuation.
+  2. `business_model_breakdown`: Segment revenues, geographic mix, and unit economics.
+  3. `industry_and_peers`: Competitive moat, TAM, and peer benchmarking.
+  4. `quality_of_earnings_forensic`: Detailed 3-statement reconciliation, depreciation cycle analysis, and structural vs transitory profit decomposition.
+  5. `valuation_thesis`: Peer multiple relative valuation + DCF scenario range.
+  6. `downside_risks`: Bull / Base / Bear scenarios and operational/macro risks.
+
+#### [NEW] [research_paper.py (router endpoint)](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/analysis.py)
+- Add `POST /analysis/query-data` (Interactive Research Data Assistant):
+  - Accepts: `{ ticker: str, query: str, data_scope?: "financials" | "sec_text" | "earnings" | "peers" | "all" }`
+  - Targets financial statement tables, SEC footnote text chunks, earnings call transcripts, and peer metrics.
+  - Returns grounded Markdown tables, exact quote citations with filing period references, and brief analytical context for direct copying into research notes.
+
+#### [NEW] [ResearchPaperView.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/analysis/ResearchPaperView.tsx)
+- Publication-ready view in `DeepAnalysis.tsx` formatting the synthesis into an Equity Research Report.
+- Features:
+  - Visual chapters with financial tables, peer benchmarks, and QoE forensic breakdowns.
+  - One-click "Copy as Markdown" / "Print / Export" for external report writing.
+
+#### [NEW] [ResearchCopilot.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/analysis/ResearchCopilot.tsx)
+- Interactive assistant panel inside Deep Analysis for on-demand financial and filing data queries with copyable data blocks.
+
+---
+
+### Phase 5: Trading Coach Evolution (Personal Edge & Behavioral Mirror)
+
+#### [MODIFY] [db.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/db.py)
+- Update `trades` table: add `emotion_tag TEXT` (e.g. `'calm'`, `'fomo'`, `'revenge'`, `'boredom'`, `'overconfidence'`, `'fear'`).
+- Add `trading_rules` table:
+  ```sql
+  CREATE TABLE IF NOT EXISTS trading_rules (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_type       TEXT NOT NULL CHECK (rule_type IN ('golden', 'toxic', 'custom')),
+      title           TEXT NOT NULL,
+      conditions_json TEXT NOT NULL,
+      description     TEXT NOT NULL,
+      win_rate        REAL,
+      payoff_ratio    REAL,
+      is_active       INTEGER NOT NULL DEFAULT 1,
+      created_at      TEXT NOT NULL
+  );
+  ```
+
+#### [MODIFY] [journal_analysis.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/journal_analysis.py)
+- **Expectancy ($E$) & Payoff Ratio Matrix**:
+  - Calculate:
+    - Win Rate ($W$), Loss Rate ($L = 1 - W$)
+    - Average Win ($\bar{G}$), Average Loss ($\bar{L}$)
+    - Payoff Ratio ($R = \bar{G} / \bar{L}$)
+    - Expectancy ($E = (W \times \bar{G}) - (L \times \bar{L})$)
+  - Segment metrics by user rationale keywords (e.g., Valuation vs Momentum vs Dip-buy) and emotion tags.
+- **Disposition Effect Tracker**:
+  - Compare `avg_holding_period_winners` vs `avg_holding_period_losers`.
+  - Flag premature profit-taking vs loss-holding behavior.
+- **MAE / MFE Quant Engine**:
+  - Pull intraday/daily price history between `executed_at` and exit for each closed position.
+  - Compute **MAE (Maximum Adverse Excursion)**: maximum drawdown experienced before exit.
+  - Compute **MFE (Maximum Favorable Excursion)**: maximum unrealized gain achieved before exit.
+  - Derive **Empirical Optimal Stop Loss**: 90th percentile MAE of winning trades (e.g., "90% of your winners never fell below -4.2%; any drop beyond -4.2% rarely recovers").
+  - Derive **Early Exit Bias**: Compare realized profit to MFE (e.g., "Exiting at +5% on trades that peaked at +18%").
+- **Personal Rule Synthesizer (Golden & Toxic Setups)**:
+  - Cluster historical trades into:
+    - **Golden Setups** (Conditions yielding top $E$ and high payoff ratio).
+    - **Toxic Patterns** (Conditions yielding negative expectancy and capital drawdown).
+
+#### [MODIFY] [routers/coach.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/coach.py)
+- Add endpoints:
+  - `GET /coach/edge-analytics`: Return Expectancy, Payoff ratio, MAE/MFE curve, and Emotion-PnL matrix.
+  - `GET /coach/rules`: List user's active trading rules (golden & toxic).
+  - `POST /coach/rules`: Adopt a synthesized rule or save a custom rule.
+  - `DELETE /coach/rules/{id}`: Toggle/remove a rule.
+- Enhance `POST /coach/review` (Pre-trade Review):
+  - Check proposed trade against active **Toxic Patterns** (warning banner if trade matches toxic setup by $\ge 70\%$).
+  - Check proposed trade against active **Golden Setups** (checklist validation).
+
+#### [MODIFY] [TradeForm.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/TradeForm.tsx)
+- Add 1-click **Emotion Tag Selector** (`😌 차분/원칙`, `⚡ FOMO/조급`, `🔥 복수/뇌동`, `🥱 지루함`, `🚀 과신`) alongside the `Entry Rationale` text box.
+
+#### [NEW] [PersonalEdgeDashboard.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/PersonalEdgeDashboard.tsx)
+- Create **Personal Trading Edge (🎯)** dashboard in `views/Portfolio.tsx`:
+  - **Expectancy & Payoff Cards**: Win Rate, Payoff Ratio, Net Expectancy ($E$), and Disposition Effect ratio.
+  - **MAE / MFE Optimal Thresholds Chart**: Visual curve showing optimal stop-loss cutoff and exit efficiency.
+  - **Emotion vs PnL Heatmap**: Interactive breakdown showing which mental states generate profits vs losses.
+  - **My Trading Rulebook (Playbook)**: Active Golden Rules and Toxic Rule guardrails with toggle switches.
+
+---
+
+## 4. Verification Plan
+
+### Automated Tests
+1. **Backend Tests**:
+   - Verify `history_store.get_analysis_history(None)` returns all past runs.
+   - Verify `GET /portfolio/risk` calculates valid VaR, CVaR, volatility, and correlation matrix without error.
+   - Verify `PeerComparisonAgent` successfully fetches peer multiples and compiles table metrics.
+   - Verify `POST /analysis/query-data` extracts targeted data points with proper citations.
+   - Verify `journal_analysis` computes valid Expectancy, Payoff Ratio, MAE/MFE, and Disposition Effect on trade series.
+   - Verify `trading_rules` CRUD and pre-trade toxic matching.
+2. **Frontend Typechecks & Build**:
+   - Run `npm run build` in `frontend` to verify TypeScript strict adherence.
+
+### Manual Verification
+1. **History Test**:
+   - Restart browser / reload page $\rightarrow$ confirm MRVL, MU, RKLB history runs are immediately visible in the Deep Analysis sidebar without fetching SEC.
+   - Click a past run $\rightarrow$ verify all scores, report panels, and debate logs populate instantly.
+2. **Portfolio Risk Test**:
+   - Navigate to Portfolio $\rightarrow$ verify VaR, CVaR, volatility, and correlation matrix are rendered cleanly in the new Risk Panel.
+3. **Peer Comparison & Research Paper Test**:
+   - Run a Deep Analysis on a stock $\rightarrow$ confirm `Peer Comparison` agent participates and displays relative valuation table.
+   - Switch to Research Paper View $\rightarrow$ inspect institutional research sections and QoE Forensic analysis.
+   - Query the Research Copilot $\rightarrow$ test on-demand extraction of specific financial or filing data.
+4. **Trading Coach Test**:
+   - Open Personal Trading Edge dashboard in Portfolio $\rightarrow$ check Expectancy, MAE/MFE optimal stop-loss calculation, and Emotion heatmap.
+   - Log a new trade with an emotion tag $\rightarrow$ verify analytics and rule matching update in real time.

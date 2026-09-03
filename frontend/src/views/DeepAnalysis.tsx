@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import type {
   AnalyzeResult,
   AnalyzeProgressEvent,
@@ -26,7 +27,11 @@ import {
   getAnalysisRun,
 } from "../api";
 import AnalysisReport from "../components/AnalysisReport";
+import ResearchPaperView from "../components/analysis/ResearchPaperView";
+import ResearchCopilot from "../components/analysis/ResearchCopilot";
 import { AGENT_ORDER, AGENT_NAMES, AGENT_ICONS } from "../components/agentMeta";
+
+type ViewMode = "agents" | "paper";
 
 type AgentStatus = "pending" | "ok" | "error" | "skipped";
 type Phase = "idle" | "analyzing" | "debating" | "synthesis" | "done";
@@ -110,7 +115,7 @@ function signalChipClass(tone: string | null | undefined): string {
 }
 
 export default function DeepAnalysis() {
-  const { company, periods, activeTicker } = useDashboard();
+  const { company, periods, activeTicker, setActiveTicker } = useDashboard();
   // The header's selection is authoritative — a company store can exist before
   // its identity resolves from XBRL, and the pipeline is keyed on this ticker.
   const ticker = activeTicker ?? company?.ticker ?? null;
@@ -123,15 +128,18 @@ export default function DeepAnalysis() {
   const [viewingPast, setViewingPast] = useState<AnalysisRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<AnalysisHistoryItem[]>([]);
+  const [viewMode, setViewMode] = useState<ViewMode>("agents");
+  const [copilotOpen, setCopilotOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
+  // With a ticker, scope history to that company. Without one (no filings
+  // ingested this session and nothing in the portfolio/analysis history to
+  // auto-select), fall back to a global feed across every company that has
+  // ever been analyzed — that is what lets the sidebar populate before any
+  // SEC fetch happens at all.
   const loadHistory = useCallback(async () => {
-    if (!ticker) {
-      setHistory([]);
-      return;
-    }
     try {
-      const res = await getAnalysisHistory(ticker);
+      const res = await getAnalysisHistory(ticker ?? undefined, ticker ? 10 : 25);
       setHistory(res.history);
     } catch {
       setHistory([]);
@@ -142,8 +150,16 @@ export default function DeepAnalysis() {
     loadHistory();
   }, [loadHistory]);
 
-  // Switching companies must not leave the previous company's report on screen.
+  // Switching companies must not leave the previous company's report on
+  // screen — EXCEPT when the ticker just changed because openPastRun synced
+  // it to match a just-loaded archived record; that record must survive this
+  // clear, so it sets skipClearRef to swallow the next run of this effect.
+  const skipClearRef = useRef(false);
   useEffect(() => {
+    if (skipClearRef.current) {
+      skipClearRef.current = false;
+      return;
+    }
     setResult(null);
     setViewingPast(null);
     setError(null);
@@ -206,16 +222,27 @@ export default function DeepAnalysis() {
     }
   }, [running, ticker, startDate, endDate, loadHistory]);
 
-  const openPastRun = useCallback(async (runId: string) => {
-    setError(null);
-    try {
-      const record = await getAnalysisRun(runId);
-      setViewingPast(record);
-      setResult(null);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }, []);
+  const openPastRun = useCallback(
+    async (runId: string) => {
+      setError(null);
+      try {
+        const record = await getAnalysisRun(runId);
+        setViewingPast(record);
+        setResult(null);
+        // A global (multi-company) history list can carry a run from a
+        // different company than the one currently in view — sync the shell
+        // so the header, sidebar, and this view all agree on which company
+        // is being looked at.
+        if (record.ticker && record.ticker !== ticker) {
+          skipClearRef.current = true;
+          setActiveTicker(record.ticker);
+        }
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    },
+    [ticker, setActiveTicker]
+  );
 
   // What to render in the report area: a loaded past run takes precedence.
   const shown:
@@ -248,14 +275,25 @@ export default function DeepAnalysis() {
   return (
     <div className="view-scroll deep-analysis">
       <div className="view-head">
-        <h1 className="view-title">Deep Analysis</h1>
-        <p className="view-subtitle">
-          Six specialist agents analyze, debate, and synthesize a 3-axis
-          (fundamental vs. sentiment vs. price) investment read.
-        </p>
+        <div>
+          <h1 className="view-title">Deep Analysis</h1>
+          <p className="view-subtitle">
+            Six specialist agents analyze, debate, and synthesize a 3-axis
+            (fundamental vs. sentiment vs. price) investment read.
+          </p>
+        </div>
+        <div className="view-head-right">
+          <button
+            className={`btn-secondary-sm ${copilotOpen ? "is-active" : ""}`}
+            onClick={() => setCopilotOpen((v) => !v)}
+            title="Ask an ad-hoc, grounded question about this company's data"
+          >
+            🔎 Data Copilot
+          </button>
+        </div>
       </div>
 
-      <div className="deep-layout">
+      <div className={`deep-layout ${copilotOpen ? "deep-layout-with-copilot" : ""}`}>
         <div className="deep-main">
           {/* Setup panel */}
           <section className="report-card setup-card">
@@ -331,22 +369,62 @@ export default function DeepAnalysis() {
             <>
               {viewingPast && (
                 <div className="viewing-past-bar">
-                  Viewing a past run.{" "}
-                  {result && (
-                    <button className="link-btn" onClick={() => setViewingPast(null)}>
-                      Back to latest
-                    </button>
-                  )}
+                  <span>
+                    Viewing archived analysis from{" "}
+                    {viewingPast.timestamp?.slice(0, 10) ?? "an earlier run"}
+                    {viewingPast.ticker ? ` for ${viewingPast.ticker}` : ""}.
+                  </span>
+                  <span className="viewing-past-actions">
+                    {result && (
+                      <button className="link-btn" onClick={() => setViewingPast(null)}>
+                        Back to latest
+                      </button>
+                    )}
+                    {!cannotRun && (
+                      <button className="link-btn" onClick={handleRun}>
+                        Run Fresh Analysis
+                      </button>
+                    )}
+                    {noFilings && !noCompany && (
+                      <Link className="link-btn" to="/">
+                        Fetch Fresh SEC
+                      </Link>
+                    )}
+                  </span>
                 </div>
               )}
-              <AnalysisReport
-                scores={shown.scores}
-                manager={shown.manager}
-                reports={shown.reports}
-                debate={shown.debate}
-                period={shown.period}
-                company={shown.company}
-              />
+              <div className="view-mode-tabs">
+                <button
+                  className={`ledger-tab ${viewMode === "agents" ? "is-active" : ""}`}
+                  onClick={() => setViewMode("agents")}
+                >
+                  🧭 Agent View
+                </button>
+                <button
+                  className={`ledger-tab ${viewMode === "paper" ? "is-active" : ""}`}
+                  onClick={() => setViewMode("paper")}
+                >
+                  📄 Research Paper
+                </button>
+              </div>
+              {viewMode === "paper" ? (
+                <ResearchPaperView
+                  manager={shown.manager}
+                  reports={shown.reports}
+                  period={shown.period}
+                  company={shown.company}
+                  ticker={ticker}
+                />
+              ) : (
+                <AnalysisReport
+                  scores={shown.scores}
+                  manager={shown.manager}
+                  reports={shown.reports}
+                  debate={shown.debate}
+                  period={shown.period}
+                  company={shown.company}
+                />
+              )}
             </>
           )}
 
@@ -361,14 +439,14 @@ export default function DeepAnalysis() {
         {/* History sidebar */}
         <aside className="deep-history">
           <h3 className="deep-history-title">
-            History{ticker ? ` · ${ticker}` : ""}
+            History{ticker ? ` · ${ticker}` : " · All companies"}
           </h3>
-          {!ticker ? (
+          {history.length === 0 ? (
             <p className="deep-history-empty">
-              Past runs appear here once a ticker is identified.
+              {ticker
+                ? "No past runs yet for this company."
+                : "No past runs yet. Run Deep Analysis on any company to build a history."}
             </p>
-          ) : history.length === 0 ? (
-            <p className="deep-history-empty">No past runs yet for this company.</p>
           ) : (
             <ul className="deep-history-list">
               {history.map((h) => (
@@ -394,6 +472,12 @@ export default function DeepAnalysis() {
                         {h.timestamp?.slice(0, 10)}
                       </span>
                     </div>
+                    {!ticker && (
+                      <div className="history-ticker-badge">
+                        {h.ticker ?? "—"}
+                        {h.company && h.company !== h.ticker ? ` · ${h.company}` : ""}
+                      </div>
+                    )}
                     <div className="history-period">{h.analysis_period}</div>
                     <div className="history-scores">
                       <span title="Fundamental">F {h.fundamental_score ?? "—"}</span>
@@ -406,6 +490,10 @@ export default function DeepAnalysis() {
             </ul>
           )}
         </aside>
+
+        {copilotOpen && (
+          <ResearchCopilot ticker={ticker} onClose={() => setCopilotOpen(false)} />
+        )}
       </div>
     </div>
   );

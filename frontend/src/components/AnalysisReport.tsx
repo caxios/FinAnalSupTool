@@ -19,6 +19,7 @@ import type {
 } from "../types";
 import ThreeAxisChart from "./ThreeAxisChart";
 import DebateLog from "./DebateLog";
+import PeerComparisonCard from "./PeerComparisonCard";
 import {
   AGENT_ORDER,
   AGENT_NAMES,
@@ -107,11 +108,14 @@ export default function AnalysisReport({
   const mgrError =
     manager && !isManagerReport(manager) ? (manager as { error: string }).error : null;
 
-  // Order agent panels by the canonical roster, then any extras.
+  // Order agent panels by the canonical roster, then any extras. Peer
+  // comparison gets its own dedicated card below (a richer render than the
+  // generic JSON-dump accordion), so it is excluded here to avoid showing the
+  // same report twice.
   const agentIds = [
     ...AGENT_ORDER.filter((a) => a in reports),
     ...Object.keys(reports).filter((a) => !AGENT_ORDER.includes(a)),
-  ];
+  ].filter((a) => a !== "peer_comparison");
 
   return (
     <div className="analysis-report">
@@ -184,6 +188,9 @@ export default function AnalysisReport({
           </>
         )}
       </section>
+
+      {/* Peer comparison matrix */}
+      <PeerComparisonCard slot={reports.peer_comparison} />
 
       {/* Per-agent reports */}
       <section className="report-card">

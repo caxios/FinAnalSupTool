@@ -40,6 +40,7 @@ from .api_schemas import (
     AddChannelRequest,
     SentimentResponse,
     AnalyzeRequest,
+    QueryDataRequest,
     HoldingCreate,
     Holding,
     TradeCreate,
@@ -63,6 +64,10 @@ from .api_schemas import (
     HoldingCreatedResponse,
     TradesResponse,
     ErrorDetail,
+    TradingRuleCreate,
+    TradingRule,
+    TradingRulesResponse,
+    RuleActiveUpdate,
 )
 
 __all__ = [
@@ -92,6 +97,7 @@ __all__ = [
     "AddChannelRequest",
     "SentimentResponse",
     "AnalyzeRequest",
+    "QueryDataRequest",
     "HoldingCreate",
     "Holding",
     "TradeCreate",
@@ -115,4 +121,8 @@ __all__ = [
     "HoldingCreatedResponse",
     "TradesResponse",
     "ErrorDetail",
+    "TradingRuleCreate",
+    "TradingRule",
+    "TradingRulesResponse",
+    "RuleActiveUpdate",
 ]

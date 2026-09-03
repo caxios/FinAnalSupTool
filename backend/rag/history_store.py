@@ -111,18 +111,49 @@ def save_analysis(
         return ""
 
 
-def get_analysis_history(ticker: str, limit: int = 10) -> list[dict]:
-    """Lightweight summaries of past runs for a ticker, newest first."""
+def get_analysis_history(ticker: str | None = None, limit: int = 50) -> list[dict]:
+    """
+    Lightweight summaries of past runs, newest first.
+
+    With a ``ticker``, scoped to that company as before. Without one, scans
+    every stored run across all companies — this is what lets the history
+    sidebar and cold-boot ticker selection work before any filing has been
+    fetched into the in-memory ``DocumentStore`` this session.
+    """
     if not _HISTORY_DIR.exists():
         return []
-    files = sorted(_HISTORY_DIR.glob(f"{_safe(ticker)}_*.json"), reverse=True)[:limit]
+    pattern = f"{_safe(ticker)}_*.json" if ticker else "*.json"
+    # Filenames encode the run timestamp last, but the ticker prefix sorts
+    # first — a lexicographic sort would group by ticker, not by recency.
+    # Sort by each file's mtime instead so a global listing is newest-first
+    # across tickers.
+    files = sorted(_HISTORY_DIR.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
     out: list[dict] = []
     for f in files:
+        if len(out) >= limit:
+            break
         try:
             out.append(_summary(json.loads(f.read_text(encoding="utf-8"))))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Skipping unreadable history file {f.name}: {e}")
     return out
+
+
+def get_latest_analysis(ticker: str) -> dict | None:
+    """The most recent full stored record for a ticker, or None if it has none."""
+    if not _HISTORY_DIR.exists():
+        return None
+    files = sorted(
+        _HISTORY_DIR.glob(f"{_safe(ticker)}_*.json"),
+        key=lambda f: f.stat().st_mtime, reverse=True,
+    )
+    if not files:
+        return None
+    try:
+        return json.loads(files[0].read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read latest history record for {ticker}: {e}")
+        return None
 
 
 def get_analysis(run_id: str) -> dict | None:

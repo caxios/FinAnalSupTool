@@ -17,7 +17,14 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Routes, Route } from "react-router-dom";
 import type { PeriodInfo, CompanyInfo, FilingMeta } from "./types";
-import { getPeriods, getCompany, getCompanies } from "./api";
+import {
+  getPeriods,
+  getCompany,
+  getCompanies,
+  getAnalysisTickers,
+  getAnalysisHistory,
+  getPortfolio,
+} from "./api";
 import { DashboardContext } from "./context/DashboardContext";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
@@ -31,22 +38,42 @@ import Portfolio from "./views/Portfolio";
 export default function App() {
   const [activeTicker, setActiveTicker] = useState<string | null>(null);
   const [availableTickers, setAvailableTickers] = useState<string[]>([]);
+  // Tickers with LIVE in-memory filings this session (a subset of
+  // availableTickers, which also includes tickers known only from disk
+  // history or the SQLite portfolio — those can't drive getPeriods/getCompany
+  // but are still valid to view in Deep Analysis history / Portfolio).
+  const [liveTickers, setLiveTickers] = useState<string[]>([]);
   const [periods, setPeriods] = useState<PeriodInfo[]>([]);
   const [company, setCompany] = useState<CompanyInfo | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
 
   // ── Which companies do we have data for? ───────────────────
-  // Returns the fresh list so callers can act on it immediately (the state
-  // update below won't be visible until the next render).
+  // Merges three sources so the app survives a backend restart: the volatile
+  // in-memory DocumentStore, persisted Deep Analysis history on disk, and
+  // tickers held in the SQLite portfolio. Returns the fresh merged list so
+  // callers can act on it immediately (the state update below won't be
+  // visible until the next render).
   const refreshCompanies = useCallback(async (): Promise<string[]> => {
     try {
-      const res = await getCompanies();
-      const tickers = res.companies
+      const [companiesRes, analysisRes, portfolioRes] = await Promise.all([
+        getCompanies(),
+        getAnalysisTickers().catch(() => ({ tickers: [] })),
+        getPortfolio().catch(() => null),
+      ]);
+      const fromCompanies = companiesRes.companies
         .map((c) => c.ticker)
         .filter((t): t is string => Boolean(t));
-      setAvailableTickers(tickers);
-      return tickers;
+      const fromAnalysis = analysisRes.tickers.map((t) => t.ticker);
+      const fromPortfolio = (portfolioRes?.holdings ?? [])
+        .map((h) => h.ticker)
+        .filter((t): t is string => Boolean(t));
+      const merged = Array.from(
+        new Set([...fromCompanies, ...fromAnalysis, ...fromPortfolio])
+      ).sort();
+      setAvailableTickers(merged);
+      setLiveTickers(fromCompanies);
+      return merged;
     } catch (err) {
       console.error("Failed to load company list:", err);
       return [];
@@ -58,16 +85,38 @@ export default function App() {
   }, [refreshCompanies]);
 
   // Auto-select on first load, and recover if the active company disappears
-  // (e.g. the backend restarted and its in-memory stores were cleared).
+  // (e.g. the backend restarted and its in-memory stores were cleared). On a
+  // cold boot with no live filings, prefer the most recently analyzed
+  // ticker (persisted on disk) so the user lands on something viewable
+  // instead of a blank state, falling back to the first portfolio holding.
   useEffect(() => {
     if (availableTickers.length === 0) {
       if (activeTicker !== null) setActiveTicker(null);
       return;
     }
-    if (!activeTicker || !availableTickers.includes(activeTicker)) {
-      setActiveTicker(availableTickers[0]);
+    if (activeTicker && availableTickers.includes(activeTicker)) return;
+
+    if (liveTickers.length > 0) {
+      setActiveTicker(liveTickers[0]);
+      return;
     }
-  }, [availableTickers, activeTicker]);
+
+    let cancelled = false;
+    (async () => {
+      let pick = availableTickers[0];
+      try {
+        const hist = await getAnalysisHistory(undefined, 1);
+        const recent = hist.history[0]?.ticker;
+        if (recent && availableTickers.includes(recent)) pick = recent;
+      } catch {
+        // fall through to the default pick below
+      }
+      if (!cancelled) setActiveTicker(pick);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [availableTickers, liveTickers, activeTicker]);
 
   // ── Load the ACTIVE company's data (periods + identity) ────
   useEffect(() => {

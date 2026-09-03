@@ -284,6 +284,7 @@ def record_trade(
     fx_rate: float | None = None,
     fee: float = 0.0,
     tax: float = 0.0,
+    emotion_tag: str | None = None,
 ) -> dict:
     """
     Log a trade, update the position, **and move the cash**, atomically.
@@ -307,6 +308,10 @@ def record_trade(
     Fees and taxes are written as their own typed rows rather than folded into
     the trade's amount, so a year's friction can be totalled on its own.
 
+    ``emotion_tag`` is the user's self-reported state at entry (phase 5) — one
+    of ``db.EMOTION_TAGS``, or ``None``. It never affects the cash leg; it only
+    feeds ``journal_analysis.edge_analytics`` and the pre-trade rule matcher.
+
     Returns the inserted trade row plus a ``cash_warning`` key when the buy
     exceeded the balance available at that moment.
     """
@@ -321,6 +326,11 @@ def record_trade(
     fee, tax = float(fee or 0.0), float(tax or 0.0)
     if fee < 0 or tax < 0:
         raise InvalidTrade("fee and tax must not be negative.")
+    emotion_tag = (emotion_tag or "").strip().lower() or None
+    if emotion_tag is not None and emotion_tag not in db.EMOTION_TAGS:
+        raise InvalidTrade(
+            f"emotion_tag must be one of {db.EMOTION_TAGS} (got {emotion_tag!r})."
+        )
 
     price = float(execution_price) if execution_price is not None else None
     currency = resolve_asset_currency(t)
@@ -431,10 +441,10 @@ def record_trade(
             "INSERT INTO trades (ticker, side, quantity, executed_at,"
             " execution_price, total_value, fx_rate, entry_rationale,"
             " avg_price_after, realized_pnl, realized_pnl_base, fee, tax,"
-            " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " emotion_tag, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (t, side, float(quantity), executed_at, price, total_value,
              rate, entry_rationale, new_avg, realized_pnl, realized_pnl_base,
-             fee or None, tax or None, now),
+             fee or None, tax or None, emotion_tag, now),
         )
         trade_id = cur.lastrowid
 

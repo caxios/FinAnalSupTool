@@ -32,6 +32,7 @@ import {
   getCash,
   getCashFlows,
   getPerformance,
+  getPortfolioRisk,
 } from "../api";
 import TradeForm from "../components/portfolio/TradeForm";
 import TradeHistory from "../components/portfolio/TradeHistory";
@@ -50,6 +51,8 @@ import CashPanel from "../components/portfolio/CashPanel";
 import CashLedger from "../components/portfolio/CashLedger";
 import AttributionPanel from "../components/portfolio/AttributionPanel";
 import PerformancePanel from "../components/portfolio/PerformancePanel";
+import PortfolioRiskPanel from "../components/portfolio/PortfolioRiskPanel";
+import PersonalEdgeDashboard from "../components/portfolio/PersonalEdgeDashboard";
 
 /** Map a signed number to the app's existing tone classes. */
 function tone(n: number | null | undefined): "positive" | "negative" | "neutral" {
@@ -172,6 +175,10 @@ export default function Portfolio() {
   const cash = useAsync(() => getCash(), [version]);
   const cashFlows = useAsync(() => getCashFlows({ limit: 300 }), [version]);
   const performance = useAsync(() => getPerformance(perfWindow), [version, perfWindow]);
+  // Bypass the 5-minute backend cache once a trade/holding/cash change has
+  // happened this session (any `version` bump, including the panel's own
+  // manual refresh button) — the first load can still use a warm cache.
+  const risk = useAsync(() => getPortfolioRisk({ refresh: version > 0 }), [version]);
 
   // The whole-record review. Scoped by the journal's own ticker filter, so
   // "review my AAPL trades" needs no second control.
@@ -492,6 +499,19 @@ export default function Portfolio() {
         )}
       </section>
 
+      {/* ── Portfolio risk ──────────────────────────────────── */}
+      {holdings.length > 0 && (
+        <section className="view-section">
+          <h2 className="section-title">⚖️ Portfolio Risk</h2>
+          <PortfolioRiskPanel
+            report={risk.data}
+            loading={risk.loading}
+            error={risk.error}
+            onRefresh={refresh}
+          />
+        </section>
+      )}
+
       {/* ── Where the return came from ─────────────────────── */}
       {holdings.length > 0 && portfolio.data && (
         <section className="view-section">
@@ -588,6 +608,12 @@ export default function Portfolio() {
             error={cashFlows.error}
           />
         )}
+      </section>
+
+      {/* ── Personal Trading Edge ──────────────────────────────── */}
+      <section className="view-section">
+        <h2 className="section-title">🎯 Personal Trading Edge</h2>
+        <PersonalEdgeDashboard />
       </section>
     </div>
     </CurrencyViewProvider>

@@ -64,11 +64,13 @@ class DebateTranscript(BaseModel):
 # Roster
 # =============================================================================
 
-# Speaking order for every debate round. Fundamentals lead, momentum closes.
-# The order is inteded(by my personal view), since technical/macro might have an impact on fundamentals.
+# Speaking order for every debate round: fundamentals lead, peers contextualize
+# them against the industry, news/media add sentiment, and macro/technical
+# close — since those might have an impact on how the fundamentals get priced.
 DEBATE_ORDER: list[str] = [
     "sec_filings",
     "earnings_call",
+    "peer_comparison",
     "company_news",
     "youtube_analysis",
     "macro_market",
@@ -82,6 +84,7 @@ FIELD_AGENT_IDS: frozenset[str] = frozenset(DEBATE_ORDER)
 AGENT_DISPLAY_NAMES: dict[str, str] = {
     "sec_filings": "SEC Filings Analyst",
     "earnings_call": "Earnings Call Analyst",
+    "peer_comparison": "Peer & Industry Analyst",
     "company_news": "Company News Analyst",
     "youtube_analysis": "Analyst-Commentary (YouTube) Analyst",
     "macro_market": "Macro & Market Analyst",

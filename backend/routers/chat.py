@@ -113,6 +113,11 @@ Ground rules:
 - Weights are shares of NET WORTH (positions plus cash), so position weights sum
   to less than 1 and the remainder is cash. Do not describe the portfolio as
   fully invested.
+- PORTFOLIO RISK below is computed the same way the Portfolio Risk dashboard
+  computes it — VaR, CVaR, per-position risk contribution vs. capital weight,
+  and pairwise correlation. Cite only numbers that appear in it; if it says a
+  position's risk share far exceeds its capital weight, or a `risk_warnings`
+  entry is present, say so plainly.
 - Be concise and use Markdown.
 
 === THE USER'S TRADING JOURNAL (real logged trades + outcomes) ===
@@ -126,6 +131,10 @@ Ground rules:
 === CASH, SIZING AND CURRENCY (computed, in KRW; weights are of NET WORTH) ===
 {position}
 === END POSITION ===
+
+=== PORTFOLIO RISK (computed — VaR/CVaR/correlation over the WHOLE book) ===
+{risk}
+=== END PORTFOLIO RISK ===
 
 === WHAT YOU HAVE ALREADY TOLD THIS USER (past reviews) ===
 {reviews}
@@ -178,8 +187,9 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
     # Cash, sizing and currency, so "how much cash do I have?", "what is my
     # biggest position?" and "how exposed am I to the dollar?" are answerable
     # without a ticker and without any prior analysis.
-    from agents.coach_agent import position_context
+    from agents.coach_agent import position_context, portfolio_risk_context
     position = await position_context(None, None, None)
+    risk = await portfolio_risk_context(ticker, None, None)
 
     sec_report = technical_report = None
     if ticker:
@@ -200,6 +210,9 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
         position=dump(position) if position else
                  "(The portfolio could not be valued, so no cash or sizing "
                  "figures are available.)",
+        risk=dump(risk) if risk else
+             "(Portfolio risk could not be computed — do not cite VaR, "
+             "correlation, or risk contribution figures.)",
         reviews=dump(reviews) if reviews else
                 "(You have not reviewed anything for this user yet.)",
         pending=(
@@ -253,7 +266,7 @@ def _agent_chat_persona(
             transcript=rendered,
         )
 
-    if agent_id in FIELD_AGENT_IDS or agent_id in ("macro_history", "quant_risk"):
+    if agent_id in FIELD_AGENT_IDS or agent_id == "macro_history":
         ctx = (debate.get("agent_contexts") or {}).get(agent_id)
         if not ctx:
             raise HTTPException(
@@ -273,7 +286,7 @@ def _agent_chat_persona(
     raise HTTPException(
         status_code=400,
         detail=f"Unknown agent_id '{agent_id}'. Use one of "
-               f"{sorted(FIELD_AGENT_IDS | {'macro_history', 'quant_risk'})}, "
+               f"{sorted(FIELD_AGENT_IDS | {'macro_history'})}, "
                f"'manager', 'trading_coach', or omit it for the general assistant.",
     )
 

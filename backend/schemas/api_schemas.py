@@ -453,6 +453,24 @@ class AnalyzeRequest(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Research Data Copilot (POST /analysis/query-data)
+# ─────────────────────────────────────────────────────────────
+
+class QueryDataRequest(BaseModel):
+    """
+    Request body for POST /analysis/query-data — an on-demand, grounded
+    extraction question against one company's already-available data.
+    """
+
+    ticker: str = Field(description="Company to query, e.g. 'AAPL'")
+    query: str = Field(description="The analyst's question, e.g. '3-year segment revenue table'")
+    data_scope: str = Field(
+        "all",
+        description="'financials' | 'sec_text' | 'earnings' | 'peers' | 'all'",
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # Portfolio & Trading Journal Models (GET/POST /portfolio*)
 # ─────────────────────────────────────────────────────────────
 
@@ -563,6 +581,15 @@ class TradeCreate(BaseModel):
     tax: float = Field(
         0.0, ge=0, description="Transaction tax, in the asset's own currency"
     )
+    emotion_tag: str | None = Field(
+        None,
+        description=(
+            "The user's self-reported emotional state at entry: 'calm', "
+            "'fomo', 'revenge', 'boredom', 'overconfidence', or 'fear'. Feeds "
+            "the Personal Edge dashboard's emotion-segmented expectancy and "
+            "the pre-trade coach's toxic-pattern matcher."
+        ),
+    )
 
     @field_validator("ticker")
     @classmethod
@@ -578,6 +605,18 @@ class TradeCreate(BaseModel):
         v = (v or "").strip().lower()
         if v not in ("buy", "sell"):
             raise ValueError("side must be 'buy' or 'sell'")
+        return v
+
+    @field_validator("emotion_tag")
+    @classmethod
+    def _emotion_tag_valid(cls, v: str | None) -> str | None:
+        # Mirrors `services.db.EMOTION_TAGS` / the trades.emotion_tag CHECK
+        # constraint — kept as a literal here rather than imported, the same
+        # way `side`'s ('buy', 'sell') above is not imported from the schema.
+        valid = ("calm", "fomo", "revenge", "boredom", "overconfidence", "fear")
+        v = (v or "").strip().lower() or None
+        if v is not None and v not in valid:
+            raise ValueError(f"emotion_tag must be one of {valid}")
         return v
 
     @field_validator("executed_at")
@@ -611,6 +650,7 @@ class Trade(BaseModel):
     avg_price_after: float | None = Field(
         None, description="Position's average price after this trade was applied"
     )
+    emotion_tag: str | None = None
     created_at: str | None = None
 
 
@@ -763,6 +803,11 @@ class CoachReviewRequest(BaseModel):
         min_length=1,
         description="The user's own words on why they want to make this trade",
     )
+    emotion_tag: str | None = Field(
+        None,
+        description="The user's proposed emotional state, if selected — checked "
+                    "against their own active Toxic Pattern / Golden Setup rules",
+    )
 
     @field_validator("proposed_side")
     @classmethod
@@ -778,6 +823,74 @@ class CoachReviewRequest(BaseModel):
     @classmethod
     def _ticker_upper(cls, v: str | None) -> str | None:
         return (v or "").strip().upper() or None
+
+    @field_validator("emotion_tag")
+    @classmethod
+    def _emotion_tag_valid(cls, v: str | None) -> str | None:
+        valid = ("calm", "fomo", "revenge", "boredom", "overconfidence", "fear")
+        v = (v or "").strip().lower() or None
+        if v is not None and v not in valid:
+            raise ValueError(f"emotion_tag must be one of {valid}")
+        return v
+
+
+# ─────────────────────────────────────────────────────────────
+# Personal Trading Edge — Rules (GET/POST/PATCH/DELETE /coach/rules)
+# ─────────────────────────────────────────────────────────────
+
+class TradingRuleCreate(BaseModel):
+    """
+    Request body for POST /coach/rules — adopt a synthesized candidate from
+    GET /coach/edge-analytics, or write a custom rule from scratch.
+    """
+
+    rule_type: str = Field(description="'golden', 'toxic', or 'custom'")
+    title: str = Field(min_length=1)
+    conditions: dict[str, str] = Field(
+        default_factory=dict,
+        description="{'rationale_type', 'strategy_type', 'emotion_tag'} — the "
+                    "same segment labels journal_analysis classifies trades "
+                    "into; a proposed trade matching >=70% of these is flagged",
+    )
+    description: str = Field(min_length=1)
+    win_rate: float | None = Field(
+        None, description="Empirical win rate behind an adopted candidate"
+    )
+    payoff_ratio: float | None = None
+    expectancy: float | None = None
+
+    @field_validator("rule_type")
+    @classmethod
+    def _rule_type_valid(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("golden", "toxic", "custom"):
+            raise ValueError("rule_type must be 'golden', 'toxic', or 'custom'")
+        return v
+
+
+class TradingRule(BaseModel):
+    """One Golden Setup / Toxic Pattern rule, as stored."""
+
+    id: int
+    rule_type: str
+    title: str
+    conditions: dict[str, str]
+    description: str
+    win_rate: float | None = None
+    payoff_ratio: float | None = None
+    expectancy: float | None = None
+    is_active: bool
+    created_at: str
+
+
+class TradingRulesResponse(BaseModel):
+    rules: list[TradingRule] = []
+    count: int = 0
+
+
+class RuleActiveUpdate(BaseModel):
+    """Request body for PATCH /coach/rules/{id} — the playbook's toggle switch."""
+    is_active: bool
 
 
 class FxInfo(BaseModel):

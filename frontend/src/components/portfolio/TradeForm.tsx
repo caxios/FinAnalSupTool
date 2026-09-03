@@ -16,9 +16,18 @@
  */
 
 import { useState } from "react";
-import type { CoachReport, Trade, TradeResponse } from "../../types";
+import type { CoachReport, EmotionTag, Trade, TradeResponse } from "../../types";
 import { logTrade, reviewTrade } from "../../api";
 import CoachReview from "./CoachReview";
+
+const EMOTION_OPTIONS: { tag: EmotionTag; emoji: string; label: string }[] = [
+  { tag: "calm", emoji: "😌", label: "Calm/Systematic" },
+  { tag: "fomo", emoji: "⚡", label: "FOMO/Rush" },
+  { tag: "revenge", emoji: "🔥", label: "Revenge/Impulsive" },
+  { tag: "boredom", emoji: "🥱", label: "Boredom" },
+  { tag: "overconfidence", emoji: "🚀", label: "Overconfident" },
+  { tag: "fear", emoji: "😨", label: "Fear" },
+];
 
 interface TradeFormProps {
   /** Tickers already held, offered as suggestions. */
@@ -129,6 +138,7 @@ export default function TradeForm({
   const [executedAt, setExecutedAt] = useState(nowLocalInput());
   const [quantity, setQuantity] = useState("");
   const [rationale, setRationale] = useState("");
+  const [emotionTag, setEmotionTag] = useState<EmotionTag | null>(null);
   const [overridePrice, setOverridePrice] = useState("");
   const [showOverride, setShowOverride] = useState(false);
 
@@ -160,6 +170,7 @@ export default function TradeForm({
           proposed_side: side,
           proposed_quantity: qty > 0 ? qty : null,
           entry_rationale: rationale.trim(),
+          emotion_tag: emotionTag,
         })
       );
     } catch (err) {
@@ -185,6 +196,7 @@ export default function TradeForm({
         quantity: qty,
         executed_at: toUtcIso(executedAt),
         entry_rationale: rationale.trim() || null,
+        emotion_tag: emotionTag,
         // Omitted unless the user explicitly opened the override.
         execution_price:
           showOverride && overridePrice !== "" ? Number(overridePrice) : null,
@@ -195,6 +207,7 @@ export default function TradeForm({
       // trade on the same position doesn't mean retyping everything.
       setQuantity("");
       setRationale("");
+      setEmotionTag(null);
       setOverridePrice("");
       setExecutedAt(nowLocalInput());
       // The review described a decision that is now made; keeping it on screen
@@ -293,6 +306,27 @@ export default function TradeForm({
           across your trades.
         </span>
       </label>
+
+      {/* 1-click emotion tag — feeds the Personal Edge dashboard's emotion-
+          segmented expectancy and the pre-trade coach's toxic-pattern matcher. */}
+      <div className="trade-field">
+        <span className="trade-label">How are you feeling about this? (optional)</span>
+        <div className="emotion-selector">
+          {EMOTION_OPTIONS.map((o) => (
+            <button
+              key={o.tag}
+              type="button"
+              className={`emotion-btn ${emotionTag === o.tag ? "is-active" : ""}`}
+              onClick={() => setEmotionTag(emotionTag === o.tag ? null : o.tag)}
+              disabled={submitting}
+              title={o.label}
+            >
+              <span className="emotion-btn-emoji">{o.emoji}</span>
+              <span className="emotion-btn-label">{o.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Manual override, tucked away so it never looks like a required field. */}
       <div className="trade-override">

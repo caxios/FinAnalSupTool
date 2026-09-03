@@ -5,7 +5,7 @@ The Multi-Agent System endpoints and the persisted analysis history:
 
   POST /analyze          — Run the full three-phase pipeline, return final report
   POST /analyze/stream   — Same pipeline, streamed as Server-Sent Events
-  GET  /analysis/history — Past-run summaries for a ticker
+  GET  /analysis/history — Past-run summaries (optionally scoped to a ticker)
   GET  /analysis/tickers — Distinct tickers with stored runs
   GET  /analysis/{run_id}— Full stored record for one run
 
@@ -21,8 +21,9 @@ import logging
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 
-from schemas import AnalyzeRequest
+from schemas import AnalyzeRequest, QueryDataRequest
 from rag import history_store
+from services import research_copilot
 from services.storage import (
     DocumentStore,
     DebateStore,
@@ -108,10 +109,12 @@ async def run_analysis_stream(
 
 @router.get("/analysis/history")
 async def analysis_history(
-    ticker: str = Query(..., description="Ticker symbol, e.g. 'AAPL'"),
+    ticker: str | None = Query(
+        None, description="Ticker symbol (optional; returns recent runs across all tickers if omitted)"
+    ),
     limit: int = Query(10, ge=1, le=50),
 ):
-    """Lightweight summaries of past analysis runs for a ticker, newest first."""
+    """Lightweight summaries of past analysis runs, newest first. Omit `ticker` for a global feed."""
     return {
         "ticker": ticker,
         "history": history_store.get_analysis_history(ticker, limit=limit),
@@ -122,6 +125,41 @@ async def analysis_history(
 async def analysis_tickers():
     """Distinct tickers that have stored runs, with run counts (for the sidebar)."""
     return {"tickers": history_store.list_tickers()}
+
+
+# =============================================================================
+# Research Data Copilot
+# =============================================================================
+
+@router.post("/analysis/query-data", response_model=research_copilot.QueryDataResponse)
+async def query_data(
+    body: QueryDataRequest,
+    store: DocumentStore = Depends(get_document_store),
+    debate_store: DebateStore = Depends(get_debate_store),
+):
+    """
+    Answer one ad-hoc, grounded data question against a company's already-
+    available data — financial tables, filing text, the last analysis run's
+    captured earnings-call material, and/or live peer metrics.
+
+    This is NOT a MAS agent and does not run the pipeline: it is a single
+    extraction call scoped to `data_scope`, meant for drafting a research note
+    without leaving the Deep Analysis workspace.
+    """
+    company_store = store.get_company_store(body.ticker.strip().upper())
+    try:
+        return await research_copilot.query_data(
+            company_store=company_store,
+            debate_store=debate_store,
+            ticker=body.ticker,
+            query=body.query,
+            data_scope=body.data_scope,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 — an extraction failure is not a 500
+        logger.error(f"Research copilot query failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Research copilot query failed: {e}")
 
 
 @router.get("/analysis/{run_id}")

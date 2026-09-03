@@ -6,27 +6,35 @@
  * progress tracker, report panels, and debate log all label agents identically.
  */
 
+// "quant_risk" is intentionally absent here: whole-portfolio risk no longer
+// runs as part of Deep Analysis (it moved to the Portfolio Risk dashboard /
+// GET /portfolio/risk), so it must not appear in the live progress tracker or
+// the agent-chat persona list. AGENT_NAMES/AGENT_ICONS below still carry an
+// entry for it so an OLDER archived run that has a `quant_risk` report
+// section still renders with a proper label — AnalysisReport.tsx appends any
+// report key not in AGENT_ORDER after the fixed ones instead of dropping it.
 export const AGENT_ORDER: string[] = [
   "sec_filings",
   "earnings_call",
+  "peer_comparison",
   "company_news",
   "youtube_analysis",
   "macro_market",
   "macro_history",
   "technical_analysis",
-  "quant_risk",
   "trading_coach",
 ];
 
 export const AGENT_NAMES: Record<string, string> = {
   sec_filings: "SEC Filings",
   earnings_call: "Earnings Call",
+  peer_comparison: "Peer & Industry",
   company_news: "Company News",
   youtube_analysis: "Analyst Videos",
   macro_market: "Macro & Market",
   macro_history: "Macro History",
   technical_analysis: "Technical (Price)",
-  quant_risk: "Portfolio Risk",
+  quant_risk: "Portfolio Risk (archived)",
   trading_coach: "Trading Coach",
   manager: "Manager (Synthesis)",
 };
@@ -34,6 +42,7 @@ export const AGENT_NAMES: Record<string, string> = {
 export const AGENT_ICONS: Record<string, string> = {
   sec_filings: "📑",
   earnings_call: "🎙️",
+  peer_comparison: "🏢",
   company_news: "📰",
   youtube_analysis: "▶️",
   macro_market: "🌐",

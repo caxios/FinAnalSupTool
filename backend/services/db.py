@@ -142,6 +142,31 @@ CREATE INDEX IF NOT EXISTS idx_reviews_type_time
     ON coach_reviews (review_type, created_at)
 """
 
+# Golden Setup / Toxic Pattern rules the user has adopted from
+# `journal_analysis`'s rule-synthesis candidates, or written themselves. Read
+# by the pre-trade coach review to warn against (or validate against) the
+# user's own empirically-derived patterns — never auto-populated, only ever
+# written via an explicit user action (adopt / create custom).
+#
+# `conditions_json` rather than exploded columns for the same reason
+# `coach_reviews.report_json` is a blob: the condition shape (rationale_type /
+# strategy_type / emotion_tag today) may grow, and an old rule must stay
+# readable after it does.
+_SCHEMA_TRADING_RULES = """
+CREATE TABLE IF NOT EXISTS trading_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_type       TEXT NOT NULL CHECK (rule_type IN ('golden', 'toxic', 'custom')),
+    title           TEXT NOT NULL,
+    conditions_json TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    win_rate        REAL,
+    payoff_ratio    REAL,
+    expectancy      REAL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL
+)
+"""
+
 # The cash ledger. Every movement of money is one row here, and a balance is a
 # SUM over them — there is deliberately no stored balance column anywhere, because
 # a stored balance eventually disagrees with its own ledger and nothing can then
@@ -200,6 +225,7 @@ _SCHEMA_STATEMENTS = (
     _SCHEMA_REVIEWS_TYPE_INDEX,
     _SCHEMA_CASH_FLOWS,
     _SCHEMA_CASH_FLOWS_INDEX,
+    _SCHEMA_TRADING_RULES,
 )
 
 
@@ -274,6 +300,14 @@ def transaction() -> Iterator[sqlite3.Connection]:
 # missing. Every entry must be nullable — SQLite cannot add a NOT NULL column
 # without a default, and back-filling a real value is the caller's job, not the
 # migration's.
+#: The only values `trades.emotion_tag` accepts — enforced at the schema level
+#: (a CHECK constraint below) rather than only in the API layer, matching how
+#: `trades.side` is constrained: a typo'd tag would silently vanish from every
+#: emotion-segmented statistic in `journal_analysis`.
+EMOTION_TAGS: tuple[str, ...] = (
+    "calm", "fomo", "revenge", "boredom", "overconfidence", "fear",
+)
+
 _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "trades": (
         # Realized in the asset's own currency, and in base currency at the
@@ -283,6 +317,12 @@ _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("realized_pnl_base", "REAL"),
         ("fee", "REAL"),
         ("tax", "REAL"),
+        # The user's self-reported emotional state at entry (phase 5). Nullable
+        # — most trades will predate this column, and a trade logged without
+        # tagging one is itself a legitimate (if less informative) state.
+        ("emotion_tag",
+         "TEXT CHECK (emotion_tag IS NULL OR emotion_tag IN ("
+         + ",".join(f"'{t}'" for t in EMOTION_TAGS) + "))"),
     ),
     "cash_flows": (
         # On a conversion: the mid-market rate that day, kept beside the rate
@@ -318,7 +358,7 @@ def init_db() -> None:
         _ensure_columns(conn)
     logger.info(
         "Portfolio database schema ready "
-        "(holdings, trades, coach_reviews, cash_flows)."
+        "(holdings, trades, coach_reviews, cash_flows, trading_rules)."
     )
 
 

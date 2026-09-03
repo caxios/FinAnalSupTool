@@ -9,6 +9,11 @@ The trading coach — blueprint §3.
   GET  /coach/reviews                   past reviews, newest first
   GET  /coach/reviews/pending           logged trades still awaiting feedback
   GET  /coach/reviews/trade/{trade_id}  every review of one trade
+  GET  /coach/edge-analytics            Expectancy/Payoff/MAE-MFE/rule candidates
+  GET  /coach/rules                     the user's Golden/Toxic rules
+  POST /coach/rules                     adopt a candidate or write a custom rule
+  PATCH  /coach/rules/{id}              toggle a rule active/inactive
+  DELETE /coach/rules/{id}              remove a rule
 
 Why there are three review endpoints
 ────────────────────────────────────
@@ -39,12 +44,18 @@ from schemas import (
     CoachReviewRequest,
     JournalReviewRequest,
     PendingReviewsResponse,
+    RuleActiveUpdate,
     StoredReview,
     StoredReviewsResponse,
     Trade,
+    TradingRule,
+    TradingRuleCreate,
+    TradingRulesResponse,
 )
+from services import journal_analysis as ja
 from services import portfolio_service as ps
 from services import review_store
+from services import trading_rules as tr
 from services.storage import DebateStore, get_debate_store
 
 logger = logging.getLogger(__name__)
@@ -104,6 +115,7 @@ async def review_trade(
             "entry_rationale": req.entry_rationale,
             "proposed_side": req.proposed_side,
             "proposed_quantity": req.proposed_quantity,
+            "emotion_tag": req.emotion_tag,
             "sec_report": sec_report,
             "technical_report": technical_report,
         })
@@ -256,3 +268,75 @@ async def reviews_for_trade(trade_id: int):
     return StoredReviewsResponse(
         reviews=[_stored(r) for r in rows], count=len(rows)
     )
+
+
+# =============================================================================
+# Personal Trading Edge — quantitative analytics + the rules playbook
+# =============================================================================
+
+@router.get("/edge-analytics")
+async def edge_analytics(ticker: str | None = Query(None, description="Scope to one ticker")):
+    """
+    Expectancy, Payoff Ratio, and win rate — overall and segmented by rationale
+    type, strategy type, and emotion tag — plus the Disposition Effect, an
+    empirical MAE/MFE-derived stop-loss, and Golden/Toxic rule candidates.
+
+    Computed entirely from REALIZED P/L on closed round trips (never the
+    30-day-price-outcome proxy the rest of the coach uses), in KRW, so a USD
+    and a KRW trade are never silently averaged together. Below
+    ``journal_analysis.MIN_TRADES_FOR_PATTERN`` closed trips this returns a
+    well-formed but empty result with ``sufficient: False``.
+    """
+    try:
+        return await ja.edge_analytics(ticker=ticker)
+    except Exception as e:  # noqa: BLE001 — a stats failure is not a 500
+        logger.error(f"Edge analytics failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Edge analytics failed: {e}")
+
+
+@router.get("/rules", response_model=TradingRulesResponse)
+async def list_rules(
+    rule_type: str | None = Query(None, description="'golden', 'toxic', or 'custom'"),
+    active_only: bool = Query(False),
+):
+    """The user's Golden Setup / Toxic Pattern / custom rules, newest first."""
+    rows = tr.list_rules(rule_type=rule_type, active_only=active_only)
+    return TradingRulesResponse(rules=[TradingRule(**r) for r in rows], count=len(rows))
+
+
+@router.post("/rules", response_model=TradingRule, status_code=201)
+async def create_rule(body: TradingRuleCreate):
+    """
+    Adopt a Golden/Toxic candidate from ``GET /coach/edge-analytics``, or write
+    a custom rule. A candidate is only a hypothesis until this makes it active
+    — the pre-trade review checks a proposed trade against active rules only.
+    """
+    try:
+        row = tr.create_rule(
+            body.rule_type, body.title, body.conditions, body.description,
+            win_rate=body.win_rate, payoff_ratio=body.payoff_ratio,
+            expectancy=body.expectancy,
+        )
+    except tr.RuleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return TradingRule(**row)
+
+
+@router.patch("/rules/{rule_id}", response_model=TradingRule)
+async def update_rule_active(rule_id: int, body: RuleActiveUpdate):
+    """Toggle a rule active/inactive — the playbook's toggle switch."""
+    try:
+        row = tr.set_active(rule_id, body.is_active)
+    except tr.RuleError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return TradingRule(**row)
+
+
+@router.delete("/rules/{rule_id}", status_code=204)
+async def delete_rule(rule_id: int):
+    """Remove a rule permanently."""
+    try:
+        tr.delete_rule(rule_id)
+    except tr.RuleError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return None

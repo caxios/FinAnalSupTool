@@ -115,6 +115,61 @@ export default function CoachReview({
         )}
       </header>
 
+      {/* Prominent, empirical — "the last N times you did this, you lost
+          money", never a generic lecture. This is the single most important
+          thing in a pre-trade review when present, so it renders before even
+          the alignment score. */}
+      {report.toxic_pattern_matches.length > 0 && (
+        <div className="coach-rule-banner coach-rule-banner-toxic">
+          <div className="coach-rule-banner-title">
+            ⚠ Matches your own Toxic Pattern
+          </div>
+          {report.toxic_pattern_matches.map((m) => (
+            <div key={m.id} className="coach-rule-match">
+              <div className="coach-rule-match-title">{m.title}</div>
+              <div className="coach-rule-match-stats">
+                {m.win_rate !== null && <span>{(m.win_rate * 100).toFixed(0)}% win rate</span>}
+                {m.expectancy !== null && (
+                  <span>expectancy {m.expectancy >= 0 ? "+" : ""}₩{Math.round(m.expectancy).toLocaleString()}</span>
+                )}
+                <span>{Math.round(m.match_score * 100)}% match</span>
+              </div>
+              <p className="coach-rule-match-desc">{m.description}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {report.golden_setup_matches.length > 0 && (
+        <div className="coach-rule-banner coach-rule-banner-golden">
+          <div className="coach-rule-banner-title">
+            ✓ Matches your own Golden Setup
+          </div>
+          {report.golden_setup_matches.map((m) => (
+            <div key={m.id} className="coach-rule-match">
+              <div className="coach-rule-match-title">{m.title}</div>
+              <div className="coach-rule-match-stats">
+                {m.win_rate !== null && <span>{(m.win_rate * 100).toFixed(0)}% win rate</span>}
+                {m.expectancy !== null && (
+                  <span>expectancy {m.expectancy >= 0 ? "+" : ""}₩{Math.round(m.expectancy).toLocaleString()}</span>
+                )}
+                <span>{Math.round(m.match_score * 100)}% match</span>
+              </div>
+              <p className="coach-rule-match-desc">{m.description}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {report.risk_warnings.length > 0 && (
+        <div className="coach-rule-banner coach-rule-banner-risk">
+          <div className="coach-rule-banner-title">⚖ Portfolio risk</div>
+          <ul className="coach-risk-warning-list">
+            {report.risk_warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+
       <div className="coach-align">
         <div className="coach-align-label">
           {retro ? "Quality of the reasoning" : "Alignment with the data"}
