@@ -72,17 +72,30 @@ CREATE TABLE IF NOT EXISTS holdings (
 
 # `side` is constrained at the schema level: a typo'd side would silently corrupt
 # every downstream average-price calculation, so the database rejects it outright.
+# It is nullable and widened beyond ('buy', 'sell') to also carry a non-trade
+# entry's DECISION TYPE ('pass', 'contemplating', 'note', 'hold', 'observe') —
+# see `JOURNAL_DECISION_TYPES` below. `entry_type` is the authoritative category
+# ('trade' vs. a reflection); `side` free-text-within-the-CHECK further describes
+# what kind of reflection it was.
 #
-# The FK to holdings(ticker) — rather than holdings(id) — is deliberate: the
-# ticker is the natural key the whole app already routes on (see
-# `DocumentStore._normalize`), and it keeps trade rows readable on their own.
-# It requires holdings.ticker to be UNIQUE, which it is.
+# There is deliberately NO foreign key to holdings(ticker) (there was one,
+# ticker -> holdings.ticker ON DELETE CASCADE, before journal entries existed).
+# A diary reflection must be loggable against a ticker the user does not (yet)
+# hold — "contemplating whether to buy MU" — or against no ticker at all (a
+# general market note), and a real trade already cannot be inserted for an
+# unheld ticker except in the same transaction that creates the holding (see
+# `record_trade`), so the FK was only ever a redundant guard for that path.
+# `remove_holding` now deletes a ticker's trades explicitly instead of relying
+# on cascade.
 _SCHEMA_TRADES = """
 CREATE TABLE IF NOT EXISTS trades (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker          TEXT    NOT NULL,
-    side            TEXT    NOT NULL CHECK (side IN ('buy', 'sell')),
-    quantity        REAL    NOT NULL,
+    ticker          TEXT,
+    entry_type      TEXT    NOT NULL DEFAULT 'trade'
+                      CHECK (entry_type IN ('trade', 'note', 'pass', 'review')),
+    side            TEXT    CHECK (side IS NULL OR side IN
+                      ('buy', 'sell', 'pass', 'contemplating', 'note', 'hold', 'observe')),
+    quantity        REAL    NOT NULL DEFAULT 0,
     executed_at     TEXT    NOT NULL,
     execution_price REAL,
     total_value     REAL,
@@ -93,8 +106,7 @@ CREATE TABLE IF NOT EXISTS trades (
     realized_pnl_base REAL,
     fee               REAL,
     tax               REAL,
-    created_at      TEXT    NOT NULL,
-    FOREIGN KEY (ticker) REFERENCES holdings (ticker) ON DELETE CASCADE
+    created_at      TEXT    NOT NULL
 )
 """
 
@@ -308,6 +320,20 @@ EMOTION_TAGS: tuple[str, ...] = (
     "calm", "fomo", "revenge", "boredom", "overconfidence", "fear",
 )
 
+#: The journal's two entry categories. 'trade' is a real, executed buy/sell —
+#: everything the app did before this feature. The other three are
+#: non-executed reflections: 'pass' (chose not to act), 'note' (a market idea
+#: or a contemplated-but-undecided dilemma), 'review' (retrospective musing on
+#: a past decision). They carry no quantity and never touch holdings or cash.
+JOURNAL_ENTRY_TYPES: tuple[str, ...] = ("trade", "note", "pass", "review")
+
+#: Values `trades.side` accepts for a non-trade entry — what KIND of reflection
+#: it was. Kept separate from `entry_type` so "contemplating" and "a market
+#: idea" can both be stored as entry_type='note' without losing which is which.
+JOURNAL_DECISION_TYPES: tuple[str, ...] = (
+    "pass", "contemplating", "note", "hold", "observe",
+)
+
 _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "trades": (
         # Realized in the asset's own currency, and in base currency at the
@@ -348,10 +374,70 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
                 logger.info(f"Added column {table}.{name}")
 
 
+def _migrate_trades_for_journal_entries(conn: sqlite3.Connection) -> None:
+    """
+    One-time rebuild of a pre-existing ``trades`` table onto the schema above.
+
+    SQLite cannot ALTER a CHECK constraint, a NOT NULL constraint, or drop a
+    foreign key in place — only ``_ADDED_COLUMNS``-style bare column additions
+    are possible with ``ALTER TABLE ADD COLUMN``. Widening ``side``, making
+    ``ticker`` nullable, dropping the ``holdings`` FK, and adding ``entry_type``
+    all require recreating the table.
+
+    Detected once via ``entry_type``'s absence from ``PRAGMA table_info`` — a
+    no-op on every startup after the first. Explicit ``id`` values are carried
+    over in the ``INSERT ... SELECT``, which is what keeps every existing
+    ``coach_reviews.trade_id`` / ``cash_flows.trade_id`` foreign key intact
+    (SQLite's AUTOINCREMENT counter advances to cover them, per its own
+    guarantee that a rowid is never reused).
+
+    **Never renames `trades` itself.** Both ``coach_reviews`` and
+    ``cash_flows`` hold ``trade_id -> trades(id) ON DELETE CASCADE``. Renaming
+    ``trades`` would make SQLite rewrite THEIR foreign key text to follow it —
+    and since the replacement is renamed back INTO the name ``trades`` rather
+    than out of it, that rewrite would leave them pointing at a name that no
+    longer exists. So the new table is built under a temporary name and
+    swapped into place instead: create ``trades_new``, copy the data across,
+    drop the original ``trades``, then rename ``trades_new`` to ``trades``.
+    Foreign key enforcement is OFF for the whole sequence — with it on, SQLite
+    performs an implicit ``DELETE FROM trades`` before dropping a table that is
+    an active FK parent, which would CASCADE and wipe every review and cash
+    flow. This is safe only because ``init_db`` runs at startup, before any
+    concurrent request can observe the connection with enforcement relaxed.
+    """
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(trades)").fetchall()]
+    if not cols or "entry_type" in cols:
+        return  # table doesn't exist yet, or already migrated
+
+    logger.info("Migrating trades table: adding entry_type, relaxing side/ticker.")
+    with _write_lock:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute(
+                _SCHEMA_TRADES.replace(
+                    "CREATE TABLE IF NOT EXISTS trades (", "CREATE TABLE trades_new (", 1,
+                )
+            )
+            col_list = ", ".join(cols)
+            conn.execute(
+                f"INSERT INTO trades_new ({col_list}, entry_type) "
+                f"SELECT {col_list}, 'trade' FROM trades"
+            )
+            conn.execute("DROP TABLE trades")
+            conn.execute("ALTER TABLE trades_new RENAME TO trades")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
+
 def init_db() -> None:
     """
     Create the schema if it isn't there yet. Idempotent — safe on every startup.
     """
+    _migrate_trades_for_journal_entries(get_connection())
     with transaction() as conn:
         for statement in _SCHEMA_STATEMENTS:
             conn.execute(statement)

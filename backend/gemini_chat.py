@@ -165,6 +165,7 @@ def build_context(
     extra_context: str | None = None,
     *,
     filing_text_override: str | None = None,
+    archived_findings: str | None = None,
 ) -> str:
     """
     Assemble the full data context that the assistant is allowed to reason over:
@@ -175,6 +176,14 @@ def build_context(
     too large for the model's optimal window, the caller passes a pre-assembled
     RAG excerpts block as `filing_text_override`; it is then used verbatim in
     place of rendering every section from `text_store`.
+
+    `archived_findings` is the LAST resort, pre-formatted by the caller (see
+    `routers/chat.py`): a condensed summary of a prior Deep Analysis run's own
+    computed findings (MD&A insights, financial health, QoE forensic read, ...),
+    used when NEITHER live filing text NOR a RAG excerpt is available for this
+    company — e.g. after a server restart with nothing re-uploaded. It is
+    labelled distinctly so the assistant is honest about answering from a
+    summary rather than the primary source.
 
     Returns a single Markdown string. Empty stores yield a short notice.
     """
@@ -235,13 +244,19 @@ def build_context(
                 parts.append(content.strip())
                 parts.append("")
 
+    # ── Archived analysis findings (last resort — no live text/RAG excerpt) ──
+    has_archived = bool(archived_findings and archived_findings.strip())
+    if has_archived and not has_text:
+        parts.append(archived_findings.strip())
+        parts.append("")
+
     # ── Media / macro context (from Views 2 & 3, if the user has visited them) ──
     has_extra = bool(extra_context and extra_context.strip())
     if has_extra:
         parts.append(extra_context.strip())
         parts.append("")
 
-    if not has_numbers and not has_text and not has_extra:
+    if not has_numbers and not has_text and not has_archived and not has_extra:
         return "(No filing data has been uploaded yet.)"
 
     return "\n".join(parts)
@@ -263,9 +278,21 @@ Rules:
 knowledge about the company's actuals.
 - For news/sentiment, attribute to the source and note it reflects that \
 outlet's reporting, not verified fact.
-- If the data needed to answer isn't present, say so plainly and tell the \
-user which filing to upload or which view (Company Media / Macro Sentiment) \
-to open so it gets fetched.
+- If the data needed to answer isn't present ANYWHERE in the DATA section \
+below (including the archived-findings block, if present), say so plainly \
+and tell the user which filing to upload or which view (Company Media / \
+Macro Sentiment) to open so it gets fetched.
+- If the DATA section contains a block headed "Archived Analysis Findings" \
+instead of full filing text, that means the primary filing text is not \
+currently loaded (e.g. after a server restart) but a PRIOR Deep Analysis \
+run's own computed findings are available. ANSWER FROM THOSE FINDINGS rather \
+than refusing — open with something like "Based on the archived analysis \
+findings for this company..." so the user knows the source, then answer as \
+specifically as the findings allow. Only say the data is missing if the \
+archived findings genuinely don't cover what was asked.
+- If the DATA section contains a block headed "RELEVANT EXCERPTS (from a \
+previously indexed run)" or similar, treat it exactly like filing text, but \
+note that only the retrieved passages — not the full document — are available.
 - Quantify where possible: cite the specific line item, period, and value. \
 When useful, compute changes/growth from the numbers given.
 - Financial statement values are in USD millions unless the label says \

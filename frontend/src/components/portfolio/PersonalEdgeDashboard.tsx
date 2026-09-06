@@ -14,7 +14,9 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import type { EdgeAnalytics, ExpectancyStats, RuleCandidate, TradingRule } from "../../types";
+import type {
+  EdgeAnalytics, ExpectancyStats, RuleCandidate, TraderArchetype, TradingRule,
+} from "../../types";
 import { getEdgeAnalytics, getRules, createRule, setRuleActive, deleteRule } from "../../api";
 
 function pct(n: number | null | undefined, digits = 1): string {
@@ -43,6 +45,41 @@ const SEGMENT_LABELS: Record<string, string> = {
 
 function segLabel(key: string): string {
   return SEGMENT_LABELS[key] ?? key;
+}
+
+/**
+ * The user's own demonstrated trading style — descriptive, never a target.
+ * The coach's whole philosophy hinges on this: it helps the user execute
+ * THIS style better, and should never read as a nudge toward a different one.
+ */
+function ArchetypeBadge({ archetype }: { archetype: TraderArchetype }) {
+  if (!archetype.sufficient || !archetype.label) {
+    return (
+      <div className="edge-archetype-badge edge-archetype-pending">
+        <span className="edge-archetype-label">Trading Style</span>
+        <span className="edge-archetype-note">{archetype.note}</span>
+      </div>
+    );
+  }
+  const s = archetype.signals;
+  return (
+    <div className="edge-archetype-badge">
+      <span className="edge-archetype-title">{archetype.label}</span>
+      <span className="edge-archetype-score">
+        Aggression score: {archetype.aggression_score}/100
+      </span>
+      <span className="edge-archetype-note">
+        {s.avg_holding_days !== null && s.avg_holding_days !== undefined &&
+          `Avg hold ${s.avg_holding_days.toFixed(1)}d`}
+        {s.high_intensity_emotion_share !== null && s.high_intensity_emotion_share !== undefined &&
+          ` · ${pct(s.high_intensity_emotion_share, 0)} high-intensity entries`}
+      </span>
+      <span className="edge-archetype-philosophy">
+        This describes your style, not a target — the coach helps you execute
+        it better, never talks you into a different one.
+      </span>
+    </div>
+  );
 }
 
 function ExpectancyCard({
@@ -220,14 +257,22 @@ export default function PersonalEdgeDashboard() {
     setAdoptingKey(key);
     try {
       const c = candidate.conditions;
+      const condition = `${segLabel(c.strategy_type)} entries described as ${segLabel(c.rationale_type).toLowerCase()} while feeling ${segLabel(c.emotion_tag).toLowerCase()}`;
+      const payoff = candidate.payoff_ratio !== null
+        ? `, ${candidate.payoff_ratio.toFixed(2)}x payoff ratio`
+        : "";
       await createRule({
         rule_type: ruleType,
         title: `${segLabel(c.rationale_type)} / ${segLabel(c.strategy_type)} / ${segLabel(c.emotion_tag)}`,
         conditions: c,
         description:
           ruleType === "golden"
-            ? `Synthesized from your journal: this setup has a ${pct(candidate.win_rate, 0)} win rate and ${krw(candidate.expectancy)} average expectancy across ${candidate.count} trades.`
-            : `Synthesized from your journal: this setup has a ${pct(candidate.win_rate, 0)} win rate and ${krw(candidate.expectancy)} average expectancy across ${candidate.count} trades — a pattern to avoid.`,
+            ? `IF ${condition} → this is a demonstrated edge, not a hunch: ` +
+              `${pct(candidate.win_rate, 0)} win rate${payoff}, ${krw(candidate.expectancy)} ` +
+              `average expectancy across ${candidate.count} closed trades. Keep taking these.`
+            : `IF ${condition} → avoid or drastically resize: ` +
+              `${pct(candidate.win_rate, 0)} win rate${payoff}, ${krw(candidate.expectancy)} ` +
+              `average expectancy across ${candidate.count} closed trades — this setup loses money on average.`,
         win_rate: candidate.win_rate, payoff_ratio: candidate.payoff_ratio,
         expectancy: candidate.expectancy,
       });
@@ -270,6 +315,8 @@ export default function PersonalEdgeDashboard() {
 
   return (
     <div className="edge-dashboard">
+      <ArchetypeBadge archetype={data.archetype} />
+
       <p className="edge-dashboard-note">{data.note}</p>
 
       <div className="edge-kpis">

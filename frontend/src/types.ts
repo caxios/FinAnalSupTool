@@ -599,7 +599,14 @@ export interface Holding {
   roi_usd: number | null;
 }
 
-/** One journal entry. */
+/** 'trade' is a real execution; the rest are non-executed diary reflections. */
+export type JournalEntryType = "trade" | "note" | "pass" | "review";
+
+/** What KIND of reflection a non-trade entry is (stored in `side`). */
+export type DecisionType =
+  | "pass" | "contemplating" | "note" | "hold" | "observe";
+
+/** One journal entry — a real trade, or a non-trade diary reflection. */
 export interface Trade {
   /** On a sell, net of fees, in the asset's own currency. */
   realized_pnl?: number | null;
@@ -609,10 +616,16 @@ export interface Trade {
   fee?: number | null;
   tax?: number | null;
   id: number;
-  ticker: string;
-  side: "buy" | "sell";
+  /** Null for a general market note with no specific stock. */
+  ticker: string | null;
+  /** 'trade' (default) or a diary entry_type ('note' / 'pass' / 'review'). */
+  entry_type: JournalEntryType;
+  /** 'buy'/'sell' for a trade; a `DecisionType` for a diary entry. */
+  side: "buy" | "sell" | DecisionType | null;
+  /** Always 0 for a diary entry — there was no execution to size. */
   quantity: number;
   executed_at: string;
+  /** The fill for a trade; a benchmark price snapshot for a diary entry. */
   execution_price: number | null;
   total_value: number | null;
   fx_rate: number | null;
@@ -761,10 +774,18 @@ export type EmotionTag =
   | "calm" | "fomo" | "revenge" | "boredom" | "overconfidence" | "fear";
 
 export interface TradeCreate {
-  ticker: string;
-  side: "buy" | "sell";
-  quantity: number;
+  /** Required for a trade; optional for a diary entry (may be a general note). */
+  ticker?: string | null;
+  /** Defaults to 'trade' server-side when omitted. */
+  entry_type?: JournalEntryType;
+  /** For entry_type != 'trade' only — what kind of reflection this is. */
+  decision_type?: DecisionType | null;
+  /** Required ('buy'/'sell') when entry_type == 'trade'; omit otherwise. */
+  side?: "buy" | "sell" | null;
+  /** Required (>0) when entry_type == 'trade'; omit or 0 for a diary entry. */
+  quantity?: number;
   executed_at: string;
+  /** Required for a diary entry — it is the whole content of the reflection. */
   entry_rationale?: string | null;
   /** Manual override; omit so the backend derives the fill from market data. */
   execution_price?: number | null;
@@ -980,6 +1001,23 @@ export interface RuleCandidate extends ExpectancyStats {
   conditions: RuleConditions;
 }
 
+/**
+ * A descriptive label for the style the user's own closed trades already
+ * show — computed in `journal_analysis.trader_archetype`, never a target.
+ */
+export interface TraderArchetype {
+  sufficient: boolean;
+  label: string | null;
+  aggression_score: number | null;
+  signals: {
+    aggressive_strategy_share?: number | null;
+    measured_strategy_share?: number | null;
+    high_intensity_emotion_share?: number | null;
+    avg_holding_days?: number | null;
+  };
+  note: string;
+}
+
 export interface EdgeAnalytics {
   ticker: string | null;
   total_trades: number;
@@ -997,6 +1035,7 @@ export interface EdgeAnalytics {
     golden_candidates: RuleCandidate[];
     toxic_candidates: RuleCandidate[];
   };
+  archetype: TraderArchetype;
 }
 
 export interface TradingRuleCreate {
@@ -1031,6 +1070,8 @@ export interface CoachReviewRequest {
   ticker?: string | null;
   proposed_side?: "buy" | "sell" | null;
   proposed_quantity?: number | null;
+  /** For a non-trade reflection with no proposed_side/proposed_quantity. */
+  decision_type?: DecisionType | null;
   entry_rationale: string;
   emotion_tag?: EmotionTag | null;
 }

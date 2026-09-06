@@ -98,6 +98,16 @@ export default function CoachReview({
     ? QUADRANTS[report.luck_vs_skill.trim().toLowerCase()]
     : undefined;
 
+  // Reviews stored before these fields existed on CoachReport have no key for
+  // them at all in their persisted JSON (not even an empty array) — reading
+  // `report.toxic_pattern_matches.length` on one of those throws and takes
+  // down the whole tree (no error boundary here), which is what "the screen
+  // goes black" was. Defaulting once, here, keeps every reference below safe
+  // regardless of which schema version a given stored review was saved under.
+  const riskWarnings = report.risk_warnings ?? [];
+  const toxicMatches = report.toxic_pattern_matches ?? [];
+  const goldenMatches = report.golden_setup_matches ?? [];
+
   return (
     <section className="coach-review">
       <header className="coach-head">
@@ -119,12 +129,12 @@ export default function CoachReview({
           money", never a generic lecture. This is the single most important
           thing in a pre-trade review when present, so it renders before even
           the alignment score. */}
-      {report.toxic_pattern_matches.length > 0 && (
+      {toxicMatches.length > 0 && (
         <div className="coach-rule-banner coach-rule-banner-toxic">
           <div className="coach-rule-banner-title">
             ⚠ Matches your own Toxic Pattern
           </div>
-          {report.toxic_pattern_matches.map((m) => (
+          {toxicMatches.map((m) => (
             <div key={m.id} className="coach-rule-match">
               <div className="coach-rule-match-title">{m.title}</div>
               <div className="coach-rule-match-stats">
@@ -140,12 +150,12 @@ export default function CoachReview({
         </div>
       )}
 
-      {report.golden_setup_matches.length > 0 && (
+      {goldenMatches.length > 0 && (
         <div className="coach-rule-banner coach-rule-banner-golden">
           <div className="coach-rule-banner-title">
             ✓ Matches your own Golden Setup
           </div>
-          {report.golden_setup_matches.map((m) => (
+          {goldenMatches.map((m) => (
             <div key={m.id} className="coach-rule-match">
               <div className="coach-rule-match-title">{m.title}</div>
               <div className="coach-rule-match-stats">
@@ -161,11 +171,11 @@ export default function CoachReview({
         </div>
       )}
 
-      {report.risk_warnings.length > 0 && (
+      {riskWarnings.length > 0 && (
         <div className="coach-rule-banner coach-rule-banner-risk">
           <div className="coach-rule-banner-title">⚖ Portfolio risk</div>
           <ul className="coach-risk-warning-list">
-            {report.risk_warnings.map((w, i) => <li key={i}>{w}</li>)}
+            {riskWarnings.map((w, i) => <li key={i}>{w}</li>)}
           </ul>
         </div>
       )}

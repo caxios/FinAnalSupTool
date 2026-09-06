@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from starlette.concurrency import run_in_threadpool
 
 from schemas import FilingMeta, ResolvedFiling
-from services import sec_fetch
+from services import filing_cache, sec_fetch
 from services.ingestion import ingest_pdf, staging_path
 from services.storage import DocumentStore
 
@@ -149,9 +149,13 @@ async def fetch_and_ingest_range(
             document_url=fetched.document_url,
         ))
 
-    # ── Step 3: refresh the merged-tables cache once per company touched ──
+    # ── Step 3: refresh the merged-tables cache once per company touched, and
+    # persist the raw text/tables to disk so a later server restart doesn't
+    # strand the AI Chat assistant with no evidence for this ticker. ──
     for tk in result.affected_tickers:
-        store.get_company_store(tk).rebuild_merged_tables()
+        company_store = store.get_company_store(tk)
+        company_store.rebuild_merged_tables()
+        filing_cache.save_company_store(tk, company_store)
 
     logger.info(
         f"[sec] {ticker} {form_type}: "

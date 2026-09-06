@@ -36,6 +36,7 @@ from parsers.pdf_utils import (
     SECTION_MAP_10K,
     SECTION_MAP_10Q,
 )
+from services import filing_cache
 from services.ingestion import ingest_pdf, staging_path
 from services.storage import CompanyStore, DocumentStore, get_document_store
 
@@ -115,9 +116,13 @@ async def upload_filings(
             affected_tickers.add(meta.ticker)
 
     # Rebuild the merged tables cache for each company touched this batch, so
-    # GET /financials reflects the newly uploaded data.
+    # GET /financials reflects the newly uploaded data. Also cache the raw
+    # text/tables to disk so the AI Chat assistant can still ground answers
+    # for this ticker after a server restart, without re-uploading.
     for tk in affected_tickers:
-        store.get_company_store(tk).rebuild_merged_tables()
+        company_store = store.get_company_store(tk)
+        company_store.rebuild_merged_tables()
+        filing_cache.save_company_store(tk, company_store)
 
     return UploadResponse(total_files=len(results), filings=results)
 

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from gemini_chat import gemini_api_key
 from agents import CoachAgent
@@ -56,7 +56,6 @@ from services import journal_analysis as ja
 from services import portfolio_service as ps
 from services import review_store
 from services import trading_rules as tr
-from services.storage import DebateStore, get_debate_store
 
 logger = logging.getLogger(__name__)
 
@@ -82,32 +81,21 @@ def _stored(row: dict) -> StoredReview:
 # =============================================================================
 
 @router.post("/review", response_model=CoachReport)
-async def review_trade(
-    req: CoachReviewRequest,
-    debate_store: DebateStore = Depends(get_debate_store),
-):
+async def review_trade(req: CoachReviewRequest):
     """
     Hold the user's stated rationale against the objective data and their history,
     **before** they commit to the trade.
 
-    The fundamental and technical reports come from that company's most recent
-    ``POST /analyze`` run. If none has been run, the review still works — it
-    falls back to the journal alone and says explicitly in ``data_limitations``
-    what it could not see, rather than pretending to a fundamental view it does
-    not have.
+    The fundamental/peer/technical digest is retrieved by the agent itself, on
+    demand, via ``CoachAgent.fetch_fundamental_analysis`` — this router no
+    longer pre-fetches it. If no analysis has been run for this ticker, the
+    review still works — it falls back to the journal alone and says
+    explicitly in ``data_limitations`` what it could not see, rather than
+    pretending to a fundamental view it does not have.
     """
     _require_key()
 
     ticker = (req.ticker or "").strip().upper() or None
-
-    # Pull the two analytical pillars from the last analysis of THIS company.
-    # `debate_store` is keyed by ticker, so no other company's view leaks in.
-    sec_report = technical_report = None
-    if ticker:
-        record = debate_store.get(ticker) or {}
-        reports = record.get("reports") or {}
-        sec_report = reports.get("sec_filings")
-        technical_report = reports.get("technical_analysis")
 
     try:
         report = await CoachAgent().analyze({
@@ -115,22 +103,12 @@ async def review_trade(
             "entry_rationale": req.entry_rationale,
             "proposed_side": req.proposed_side,
             "proposed_quantity": req.proposed_quantity,
+            "decision_type": req.decision_type,
             "emotion_tag": req.emotion_tag,
-            "sec_report": sec_report,
-            "technical_report": technical_report,
         })
     except Exception as e:  # noqa: BLE001 — surface a clean message, not a 500
         logger.error(f"Coach review failed: {e}")
         raise HTTPException(status_code=502, detail=f"Coach review failed: {e}")
-
-    # Be explicit about a missing pillar: silence here would read as "the coach
-    # considered the fundamentals and had no concerns".
-    if ticker and sec_report is None and technical_report is None:
-        report.data_limitations.append(
-            f"No analysis has been run for {ticker}, so this review is based on "
-            f"your trading journal alone — not on the company's fundamentals or "
-            f"price action. Run a Deep Analysis for a fuller picture."
-        )
 
     # Persisted even though this trade may never be logged: a warning that was
     # given and then ignored is one of the most informative records the journal

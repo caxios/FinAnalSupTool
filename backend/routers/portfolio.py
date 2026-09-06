@@ -172,16 +172,39 @@ async def get_trades(
 @router.post("/trades", response_model=TradeResponse, status_code=201)
 async def create_trade(body: TradeCreate):
     """
-    Log a trade and update the position in one transaction.
+    Log a trade — or a non-trade diary entry — in one call.
 
-    The user supplies the transaction time, quantity, and their **entry
-    rationale** — nothing else. The fill price is looked up from intraday market
-    data at that timestamp, the total value follows from it, and the position's
-    new average price is computed server-side.
-
+    ``entry_type == 'trade'`` (the default): the user supplies the transaction
+    time, quantity, and their **entry rationale**. The fill price is looked up
+    from intraday market data at that timestamp, the total value follows from
+    it, and the position's new average price is computed server-side.
     ``execution_price`` in the body is a manual override for a fill the lookup
     gets wrong; when it is absent (the normal case) the automation runs.
+
+    ``entry_type in ('note', 'pass', 'review')``: an "Investment Diary" entry —
+    a dilemma, a decision to pass, or a retrospective musing, with no quantity
+    and no effect on holdings or cash. A benchmark price at ``executed_at`` is
+    still looked up best-effort (never blocking the save) so the entry can
+    later be checked against what the stock actually did.
     """
+    if body.entry_type != "trade":
+        try:
+            entry = await ps.record_journal_entry_auto(
+                body.ticker, body.entry_type, body.executed_at,
+                entry_rationale=body.entry_rationale or "",
+                decision_type=body.decision_type,
+                execution_price=body.execution_price,
+                emotion_tag=body.emotion_tag,
+            )
+        except ps.PortfolioError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return TradeResponse(
+            trade=Trade(**entry),
+            holding=_holding_model(ps.get_holding(body.ticker)) if body.ticker else None,
+            price_resolution=None,
+            cash_warning=None,
+        )
+
     resolution: PriceResolution | None = None
     price = body.execution_price
 

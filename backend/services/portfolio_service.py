@@ -231,13 +231,19 @@ def add_holding(
 
 def remove_holding(ticker: str) -> None:
     """
-    Delete a holding. Its trades go with it via ``ON DELETE CASCADE`` — which is
-    only enforced because ``db._configure`` turns on ``PRAGMA foreign_keys``.
+    Delete a holding and its trades/journal entries, in one transaction.
+
+    There is no longer a ``trades.ticker -> holdings.ticker`` foreign key (a
+    diary reflection must be loggable against a ticker that is not held), so
+    this deletes the ticker's ``trades`` rows explicitly rather than relying on
+    ``ON DELETE CASCADE``. ``cash_flows.trade_id -> trades.id ON DELETE CASCADE``
+    is untouched and still fires, taking each deleted trade's cash legs with it.
     """
     t = _require_ticker(ticker)
     if get_holding(t) is None:
         raise HoldingNotFound(f"{t} is not in the portfolio.")
     with db.transaction() as conn:
+        conn.execute("DELETE FROM trades WHERE ticker = ?", (t,))
         conn.execute("DELETE FROM holdings WHERE ticker = ?", (t,))
     logger.info(f"[portfolio] removed holding {t} (and its trades)")
 
@@ -486,6 +492,98 @@ def record_trade(
     if cash_warning:
         result["cash_warning"] = cash_warning
     return result
+
+
+def is_trade_entry(row: dict) -> bool:
+    """Whether a journal row is a real executed trade rather than a reflection."""
+    return (row.get("entry_type") or "trade") == "trade"
+
+
+def record_journal_entry(
+    ticker: str | None,
+    entry_type: str,
+    executed_at: str,
+    entry_rationale: str,
+    decision_type: str | None = None,
+    execution_price: float | None = None,
+    emotion_tag: str | None = None,
+) -> dict:
+    """
+    Log a non-trade journal entry — a pass, a dilemma, a market note, or a
+    retrospective musing — blueprint's "Investment Diary" extension.
+
+    Unlike :func:`record_trade`, this touches **only** the ``trades`` row: no
+    holdings mutation, no cost-basis recompute, no cash flow. ``quantity`` is
+    always stored as 0 — there was no execution to size. ``execution_price``,
+    when given, is a **benchmark** snapshot (the market price at the moment of
+    the reflection), kept so a later query can ask what the stock did
+    afterwards; it is never treated as a fill and never moves money.
+
+    ``ticker`` may be ``None`` for a general market note with no specific
+    stock. A non-``None`` ticker need NOT already be a holding — that is the
+    whole point of being able to log "contemplating buying MU" before owning it.
+    """
+    if entry_type not in ("note", "pass", "review"):
+        raise InvalidTrade(
+            f"entry_type must be 'note', 'pass', or 'review' for a journal "
+            f"entry (got {entry_type!r})."
+        )
+    if not (entry_rationale or "").strip():
+        raise InvalidTrade("entry_rationale is required for a diary entry.")
+
+    t = normalize_ticker(ticker) if ticker else None
+    decision_type = (decision_type or "").strip().lower() or None
+    if decision_type is not None and decision_type not in db.JOURNAL_DECISION_TYPES:
+        raise InvalidTrade(
+            f"decision_type must be one of {db.JOURNAL_DECISION_TYPES} "
+            f"(got {decision_type!r})."
+        )
+    emotion_tag = (emotion_tag or "").strip().lower() or None
+    if emotion_tag is not None and emotion_tag not in db.EMOTION_TAGS:
+        raise InvalidTrade(
+            f"emotion_tag must be one of {db.EMOTION_TAGS} (got {emotion_tag!r})."
+        )
+    price = float(execution_price) if execution_price is not None else None
+
+    now = db.utc_now_iso()
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO trades (ticker, entry_type, side, quantity, executed_at,"
+            " execution_price, entry_rationale, emotion_tag, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (t, entry_type, decision_type, 0.0, executed_at, price,
+             entry_rationale.strip(), emotion_tag, now),
+        )
+        entry_id = cur.lastrowid
+
+    logger.info(
+        f"[portfolio] logged {entry_type} entry"
+        + (f" for {t}" if t else " (no ticker)")
+    )
+    row = db.get_connection().execute(
+        "SELECT * FROM trades WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return dict(row)
+
+
+async def record_journal_entry_auto(
+    ticker: str | None, entry_type: str, executed_at: str, **kwargs,
+) -> dict:
+    """
+    :func:`record_journal_entry`, best-effort-resolving a benchmark price when
+    the caller did not supply one.
+
+    Unlike a real trade, a failed price lookup must not block saving the
+    reflection — the user's words are the point, and the benchmark is only for
+    later retrospective comparison. A lookup failure is swallowed, not raised.
+    """
+    if kwargs.get("execution_price") is None and ticker:
+        try:
+            resolved = await resolve_execution_price(ticker, executed_at)
+            kwargs["execution_price"] = resolved.price
+        except InvalidTrade as e:
+            logger.info(f"[portfolio] no benchmark price for diary entry: {e}")
+    return record_journal_entry(ticker, entry_type, executed_at, **kwargs)
 
 
 def _effective_entry_fx(conn, ticker: str, currency: str,

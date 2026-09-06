@@ -37,6 +37,11 @@ export default function JournalReview({
   report: JournalReport;
   onDismiss: () => void;
 }) {
+  // Reviews stored before `risk_warnings` existed on JournalReport have no key
+  // for it at all in their persisted JSON — `undefined.length` would crash
+  // the whole tree with no error boundary to catch it.
+  const riskWarnings = report.risk_warnings ?? [];
+
   return (
     <section className="coach-review journal-review">
       <header className="coach-head">
@@ -65,11 +70,11 @@ export default function JournalReview({
         </div>
       )}
 
-      {report.risk_warnings.length > 0 && (
+      {riskWarnings.length > 0 && (
         <div className="coach-rule-banner coach-rule-banner-risk">
           <div className="coach-rule-banner-title">⚖ Portfolio risk</div>
           <ul className="coach-risk-warning-list">
-            {report.risk_warnings.map((w, i) => <li key={i}>{w}</li>)}
+            {riskWarnings.map((w, i) => <li key={i}>{w}</li>)}
           </ul>
         </div>
       )}

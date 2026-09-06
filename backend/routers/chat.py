@@ -16,6 +16,25 @@ Two modes, selected by the request's ``agent_id``:
 
 Both modes are scoped by the request's ``ticker``, so a session holding several
 companies never mixes one company's evidence into another's answer.
+
+Grounding a COLD ticker (general assistant only)
+─────────────────────────────────────────────────
+``DocumentStore`` is in-memory and process-local, so a server restart — or
+simply opening an archived Deep Analysis run without re-fetching — leaves it
+empty for a ticker that was fully analyzed in an earlier session. Rather than
+telling the user to re-upload filings the app already has evidence for, the
+general-assistant path tries, in order:
+  1. The live in-memory ``CompanyStore`` (the common case, nothing changes).
+  2. Disk-cache rehydration (``services.filing_cache``) — the raw text/tables
+     from the last time this ticker was ingested, restored into memory.
+  3. A cross-run RAG search (``sec_rag.query_by_ticker``) — chunks indexed
+     from an earlier run/session, found by ticker rather than a specific
+     run_id (only populated for large multi-period runs; see its docstring).
+  4. The persisted analysis summary (``rag.history_store``) — the SEC Filings
+     agent's own MD&A insights / financial health / QoE findings from the
+     last stored Deep Analysis run, when none of the above yield anything.
+Only when all four are empty does the assistant say there's nothing to answer
+from.
 """
 
 from __future__ import annotations
@@ -26,7 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from schemas import ChatRequest, ChatResponse
 from gemini_chat import build_context, ask_gemini, ask_persona, gemini_api_key
-from rag import sec_rag
+from rag import history_store, sec_rag
 from agents import render_transcript, display_name, FIELD_AGENT_IDS
 from services.storage import (
     DocumentStore,
@@ -36,7 +55,7 @@ from services.storage import (
     get_media_cache,
     get_debate_store,
 )
-from services import media_service, journal_analysis, review_store
+from services import filing_cache, media_service, journal_analysis, review_store
 
 router = APIRouter(tags=["chat"])
 
@@ -291,6 +310,52 @@ def _agent_chat_persona(
     )
 
 
+def _archived_findings_block(record: dict) -> str:
+    """
+    Condense a stored analysis record's own computed findings into a labelled
+    Markdown block — the general assistant's LAST-resort grounding when no
+    live filing text and no RAG excerpt are available for this ticker (see the
+    module docstring's fallback chain).
+
+    Deliberately narrow: only the SEC Filings agent's structured findings (the
+    closest thing this app has to "what the filing said") plus the Manager's
+    executive summary, never the full report set — this is meant to read as a
+    condensed brief, not a data dump the assistant might over-interpret.
+    """
+    reports = record.get("reports") or {}
+    sec = reports.get("sec_filings") or {}
+    manager = record.get("manager") or {}
+
+    parts = [
+        "# Archived Analysis Findings",
+        f"(From a prior Deep Analysis run — period {record.get('analysis_period', 'unknown')}, "
+        f"run {str(record.get('timestamp', ''))[:10] or 'unknown date'}. Full "
+        f"extracted filing text is NOT currently loaded; these are the SEC "
+        f"Filings agent's own computed findings from when the filing WAS "
+        f"loaded, not the primary source.)",
+        "",
+    ]
+    if sec.get("financial_health"):
+        parts += ["## Financial Health",
+                   json.dumps(sec["financial_health"], ensure_ascii=False, indent=2), ""]
+    if sec.get("mda_insights"):
+        parts += ["## MD&A Insights", *[f"- {i}" for i in sec["mda_insights"]], ""]
+    if sec.get("multi_period_trends"):
+        parts += ["## Multi-Period Trends",
+                   json.dumps(sec["multi_period_trends"], ensure_ascii=False, indent=2), ""]
+    if sec.get("quality_of_earnings_forensic"):
+        parts += ["## Quality of Earnings — Forensic Findings",
+                   json.dumps(sec["quality_of_earnings_forensic"], ensure_ascii=False, indent=2), ""]
+    if sec.get("risk_assessment"):
+        parts += ["## Risk Assessment",
+                   json.dumps(sec["risk_assessment"], ensure_ascii=False, indent=2), ""]
+    if manager.get("executive_summary"):
+        parts += ["## Manager's Executive Summary (from the same run)",
+                   manager["executive_summary"], ""]
+
+    return "\n".join(parts)
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -357,11 +422,24 @@ async def chat(
     # Only the named company's filings are in scope. Without a ticker the
     # assistant is macro-only (no filing data at all).
     # Look up without creating: an unknown ticker must not register an empty
-    # store, it just means there's no filing data to ground the answer in.
+    # store, it just means there's no filing data to ground the answer in yet
+    # — `filing_cache.rehydrate_company_store` below still gets a chance to
+    # populate it (it operates on the ticker directly, not on this lookup).
     company = (
         store.get_company_store(ticker)
         if ticker and store.has_company(ticker) else None
     )
+    has_live_data = bool(company and (company.text_store or company.table_store))
+
+    # COLD ticker: nothing in memory for it (fresh process, or an archived
+    # analysis opened without re-fetching). Try to rehydrate from the disk
+    # cache written at ingestion time — see the module docstring's fallback
+    # chain. This never overwrites live data; it only fills an empty store.
+    if ticker and not has_live_data:
+        if filing_cache.rehydrate_company_store(ticker, store):
+            company = store.get_company_store(ticker)
+            has_live_data = bool(company.text_store or company.table_store)
+
     merged_tables = company.merged_tables if company else {}
     text_store = company.text_store if company else {}
     filing_meta = company.filing_meta if company else {}
@@ -380,15 +458,31 @@ async def chat(
         except Exception:  # noqa: BLE001 — best-effort; fall back to full text
             filing_text_override = None
 
+    # STILL cold (nothing ingested this session, and the disk cache was empty
+    # or missing too) — fall further down the chain rather than answering from
+    # nothing: a cross-run RAG search, then the persisted analysis summary.
+    archived_findings = None
+    if ticker and not text_store:
+        try:
+            filing_text_override = await sec_rag.query_by_ticker(ticker, question)
+        except Exception:  # noqa: BLE001 — best-effort
+            filing_text_override = None
+        if not filing_text_override:
+            record = history_store.get_latest_analysis(ticker)
+            if record:
+                archived_findings = _archived_findings_block(record)
+
     context = build_context(
         merged_tables, text_store, filing_meta,
         extra_context=media_context,
         filing_text_override=filing_text_override,
+        archived_findings=archived_findings,
     )
 
-    # Short-circuit only when there's truly nothing to talk about — no filings
-    # AND no media/macro data has been fetched (the Macro view needs no upload).
-    if not filing_meta and not media_context.strip():
+    # Short-circuit only when there's truly nothing to talk about anywhere in
+    # the fallback chain, AND no media/macro data has been fetched (the Macro
+    # view needs no upload).
+    if not filing_meta and not archived_findings and not media_context.strip():
         return ChatResponse(
             answer="No data yet. Upload SEC 10-K / 10-Q PDFs on the Dashboard, "
                    "or open the Company Media / Macro Sentiment views to pull in "

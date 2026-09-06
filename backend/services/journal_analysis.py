@@ -214,6 +214,7 @@ def _journal_row(trade: dict) -> dict:
     return {
         "id": trade.get("id"),
         "ticker": trade.get("ticker"),
+        "entry_type": trade.get("entry_type") or "trade",
         "side": trade.get("side"),
         "quantity": trade.get("quantity"),
         "executed_at": trade.get("executed_at"),
@@ -239,9 +240,13 @@ async def compute_outcomes(trade: dict, as_of: datetime | None = None) -> dict:
     executed = _parse_dt(trade.get("executed_at"))
     entry = trade.get("execution_price")
     ticker, side = trade.get("ticker"), trade.get("side")
+    # A diary reflection (pass/note/review) was never a directional bet, so its
+    # price move is reported raw — signing it by `side` would treat "observe"
+    # or "contemplating" as an implicit sell, which is not what it means.
+    is_trade = portfolio_service.is_trade_entry(trade)
     outcomes: dict = {}
 
-    if not (executed and entry):
+    if not (executed and entry) or not ticker:
         return outcomes
 
     for days in OUTCOME_HORIZONS_DAYS:
@@ -257,8 +262,9 @@ async def compute_outcomes(trade: dict, as_of: datetime | None = None) -> dict:
             res = await price_provider.fetch_execution_price(ticker, target)
             later = res.price
             raw = (later - float(entry)) / float(entry)
-            # Sign by intent: a sell is "right" when the price falls.
-            signed = raw if side == "buy" else -raw
+            # Sign by intent: a sell is "right" when the price falls. A diary
+            # reflection has no intent to sign by — report the raw move.
+            signed = raw if not is_trade else (raw if side == "buy" else -raw)
             outcomes[key] = {
                 "price": later, "return": round(signed, 6), "note": None,
             }
@@ -286,6 +292,22 @@ async def outcomes_for_trade(trade_id: int) -> dict | None:
     row = _journal_row(trade)
     row["outcomes"] = await compute_outcomes(trade)
     return row
+
+
+async def diary_reflections(ticker: str | None = None, limit: int | None = 50) -> list[dict]:
+    """
+    Every logged non-trade reflection (pass / note / review) joined to what the
+    price did afterwards, for the whole-journal coach review — blueprint's
+    "Investment Diary" extension to pattern discovery.
+
+    Reuses :func:`trade_outcomes`, so the price move is already RAW (not signed
+    by a buy/sell direction that never happened — see `compute_outcomes`). This
+    lets the coach observe things like "the last three times you wrote you were
+    hesitating on a dip, the stock kept falling for another two weeks" without
+    the module inventing a second, parallel outcome computation.
+    """
+    rows = await trade_outcomes(ticker=ticker, limit=limit)
+    return [r for r in rows if r["entry_type"] != "trade"]
 
 
 async def rationale_corpus(ticker: str | None = None, limit: int | None = 50) -> list[dict]:
@@ -337,7 +359,7 @@ async def pattern_summary(ticker: str | None = None) -> dict:
     surface that rather than reporting the (meaningless) numbers.
     """
     rows = await trade_outcomes(ticker=ticker)
-    real = [r for r in rows if not r["is_opening_entry"]]
+    real = [r for r in rows if not r["is_opening_entry"] and r["entry_type"] == "trade"]
 
     summary: dict = {
         "total_trades": len(real),
@@ -682,6 +704,128 @@ def _closed_round_trips(real_trades: list[dict]) -> list[dict]:
     return trips
 
 
+# =============================================================================
+# Trading archetype — descriptive, never prescriptive
+# =============================================================================
+# The Coach's philosophy (per the Adaptive Trading Coach architecture) is to
+# help the user execute THEIR OWN style with better risk-reward and discipline
+# — never to steer an aggressive momentum trader toward passive value investing
+# or vice versa. This function only DESCRIBES the style their own closed
+# trades already show; it is handed to the LLM as context, never as a target.
+#
+# Three signals, all free (pure Python over `_closed_round_trips`'s output —
+# no network calls), so this is cheap enough to compute on every pre-trade
+# coach review, not just the on-demand edge-analytics dashboard:
+#   - strategy mix:  momentum/breakout entries vs. valuation/dip-buy entries
+#   - emotion mix:   high-intensity (fomo/revenge/overconfidence) vs. calm
+#   - holding speed: shorter average holds read as more aggressive/momentum
+#
+# Same crude-but-transparent status as `classify_rationale`/`classify_strategy`
+# — a heuristic label, not a diagnosis, and the LLM is told so.
+_AGGRESSIVE_STRATEGIES = {"momentum", "technical_breakout"}
+_MEASURED_STRATEGIES = {"valuation", "dip_buy"}
+_UNLABELED_STRATEGIES = {"none", "unclassified", "mixed"}
+_HIGH_INTENSITY_EMOTIONS = {"fomo", "revenge", "overconfidence"}
+_UNLABELED_EMOTIONS = {"untagged"}
+
+# Holding-speed normalization: at or under this many days reads as maximally
+# aggressive (1.0); at or over this many days reads as maximally patient (0.0).
+_FAST_HOLD_DAYS = 3.0
+_SLOW_HOLD_DAYS = 45.0
+
+
+def _labeled_share(values: list[str], wanted: set[str], unlabeled: set[str]) -> float | None:
+    """
+    Share of VALUES belonging to ``wanted``, over only the labeled ones.
+
+    Excluding unlabeled values from the denominator (rather than counting them
+    as a neutral 0.5) matters: a journal that is mostly "unclassified" or
+    "untagged" must not manufacture a confident-looking score out of noise.
+    """
+    labeled = [v for v in values if v not in unlabeled]
+    return (sum(1 for v in labeled if v in wanted) / len(labeled)) if labeled else None
+
+
+def trader_archetype(trips: list[dict]) -> dict:
+    """
+    A descriptive label for the style the user's own closed trades already
+    show — e.g. "Aggressive Momentum Trader" — plus the 0-100 score and the
+    raw signals behind it, computed entirely from ``trips``
+    (:func:`_closed_round_trips`'s output).
+
+    Gated by :data:`MIN_TRADES_FOR_PATTERN` like every other behavioural
+    statistic in this module: below it, the label is ``None`` and ``note``
+    says why, rather than confidently naming a style from a handful of trades.
+    """
+    if len(trips) < MIN_TRADES_FOR_PATTERN:
+        return {
+            "sufficient": False, "label": None, "aggression_score": None,
+            "signals": {}, "note": (
+                f"Only {len(trips)} closed round trip(s) logged — fewer than "
+                f"{MIN_TRADES_FOR_PATTERN} needed to describe a style."
+            ),
+        }
+
+    strategies = [t["strategy_type"] for t in trips]
+    emotions = [t["emotion_tag"] for t in trips]
+    holding_days = [t["holding_days"] for t in trips]
+
+    strategy_signal = _labeled_share(strategies, _AGGRESSIVE_STRATEGIES, _UNLABELED_STRATEGIES)
+    measured_signal = _labeled_share(strategies, _MEASURED_STRATEGIES, _UNLABELED_STRATEGIES)
+    emotion_signal = _labeled_share(emotions, _HIGH_INTENSITY_EMOTIONS, _UNLABELED_EMOTIONS)
+    avg_hold = _mean(holding_days)
+    hold_signal = (
+        round(max(0.0, min(1.0, (_SLOW_HOLD_DAYS - avg_hold) / (_SLOW_HOLD_DAYS - _FAST_HOLD_DAYS))), 4)
+        if avg_hold is not None else None
+    )
+
+    signals = [s for s in (strategy_signal, emotion_signal, hold_signal) if s is not None]
+    score = round(100 * sum(signals) / len(signals)) if signals else 50
+    momentum_lean = (strategy_signal or 0.0) >= (measured_signal or 0.0)
+
+    if score >= 65:
+        label = "⚡ Aggressive Momentum Trader" if momentum_lean else "🎯 Aggressive Contrarian Trader"
+    elif score >= 40:
+        label = "📈 Balanced Swing Trader"
+    else:
+        label = "🛡️ Disciplined Value/Patient Investor" if not momentum_lean else "🌱 Cautious, Still Building a Style"
+
+    return {
+        "sufficient": True,
+        "label": label,
+        "aggression_score": score,
+        "signals": {
+            "aggressive_strategy_share": strategy_signal,
+            "measured_strategy_share": measured_signal,
+            "high_intensity_emotion_share": emotion_signal,
+            "avg_holding_days": avg_hold,
+        },
+        "note": (
+            "Computed from your own closed round trips' strategy/emotion "
+            "labels and holding periods. This describes your demonstrated "
+            "style — it is not a target. Help the user execute THIS style "
+            "with better risk-reward and discipline; never steer them toward "
+            "a fundamentally different one."
+        ),
+    }
+
+
+def archetype_for(ticker: str | None = None) -> dict:
+    """
+    :func:`trader_archetype`, self-contained: fetches and filters the journal
+    and matches round trips, for a caller (the Coach agent) that does not
+    already have ``trips`` on hand. Pure Python, no network calls — cheap
+    enough for the hot pre-trade-review path.
+    """
+    trades = portfolio_service.list_trades(ticker=ticker)
+    real = [
+        t for t in trades
+        if not portfolio_service.is_opening_entry(t)
+        and portfolio_service.is_trade_entry(t)
+    ]
+    return trader_archetype(_closed_round_trips(real))
+
+
 def disposition_effect(trips: list[dict]) -> dict:
     """
     Whether losers are held longer than winners — the classic loss-aversion
@@ -845,7 +989,11 @@ async def edge_analytics(ticker: str | None = None) -> dict:
     result with `sufficient: False` rather than a noisy figure from 2 trades.
     """
     trades = portfolio_service.list_trades(ticker=ticker)
-    real = [t for t in trades if not portfolio_service.is_opening_entry(t)]
+    real = [
+        t for t in trades
+        if not portfolio_service.is_opening_entry(t)
+        and portfolio_service.is_trade_entry(t)
+    ]
 
     result: dict = {
         "ticker": ticker,
@@ -861,6 +1009,7 @@ async def edge_analytics(ticker: str | None = None) -> dict:
         "disposition_effect": {},
         "mae_mfe": {},
         "rule_candidates": {"golden_candidates": [], "toxic_candidates": []},
+        "archetype": trader_archetype([]),
     }
     if len(real) < MIN_TRADES_FOR_PATTERN:
         result["note"] = (
@@ -899,6 +1048,7 @@ async def edge_analytics(ticker: str | None = None) -> dict:
     result["disposition_effect"] = disposition_effect(trips)
     result["mae_mfe"] = await mae_mfe_analysis(trips)
     result["rule_candidates"] = synthesize_rules(trips, result["overall"])
+    result["archetype"] = trader_archetype(trips)
 
     result["sufficient"] = True
     result["note"] = (

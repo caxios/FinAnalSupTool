@@ -16,7 +16,14 @@
  */
 
 import { useState } from "react";
-import type { CoachReport, EmotionTag, Trade, TradeResponse } from "../../types";
+import type {
+  CoachReport,
+  DecisionType,
+  EmotionTag,
+  JournalEntryType,
+  Trade,
+  TradeResponse,
+} from "../../types";
 import { logTrade, reviewTrade } from "../../api";
 import CoachReview from "./CoachReview";
 
@@ -27,6 +34,20 @@ const EMOTION_OPTIONS: { tag: EmotionTag; emoji: string; label: string }[] = [
   { tag: "boredom", emoji: "🥱", label: "Boredom" },
   { tag: "overconfidence", emoji: "🚀", label: "Overconfident" },
   { tag: "fear", emoji: "😨", label: "Fear" },
+];
+
+/** The diary mode's "Action / Decision Type" dropdown — each maps to an
+ * (entry_type, decision_type) pair rather than a 1:1 field, since two of the
+ * four (Contemplating / Market Note) share entry_type 'note'. */
+const DECISION_OPTIONS: {
+  value: DecisionType;
+  entryType: JournalEntryType;
+  label: string;
+}[] = [
+  { value: "pass", entryType: "pass", label: "Observe / Pass (관망/매수 보류)" },
+  { value: "contemplating", entryType: "note", label: "Contemplating (진입 고민/갈등)" },
+  { value: "hold", entryType: "review", label: "Retrospective Review (매매 복기)" },
+  { value: "note", entryType: "note", label: "Market Note / Idea (아이디어/메모)" },
 ];
 
 interface TradeFormProps {
@@ -133,8 +154,10 @@ export default function TradeForm({
   defaultTicker,
   onLogged,
 }: TradeFormProps) {
+  const [mode, setMode] = useState<"trade" | "diary">("trade");
   const [ticker, setTicker] = useState(defaultTicker ?? "");
   const [side, setSide] = useState<"buy" | "sell">("buy");
+  const [decisionType, setDecisionType] = useState<DecisionType>("pass");
   const [executedAt, setExecutedAt] = useState(nowLocalInput());
   const [quantity, setQuantity] = useState("");
   const [rationale, setRationale] = useState("");
@@ -152,11 +175,14 @@ export default function TradeForm({
   const [coachReport, setCoachReport] = useState<CoachReport | null>(null);
   const [coachError, setCoachError] = useState<string | null>(null);
 
+  const isDiary = mode === "diary";
   const qty = Number(quantity);
-  const canSubmit =
-    !submitting && ticker.trim() !== "" && quantity !== "" && qty > 0 && !!executedAt;
+  const canSubmit = isDiary
+    ? !submitting && rationale.trim().length > 0 && !!executedAt
+    : !submitting && ticker.trim() !== "" && quantity !== "" && qty > 0 && !!executedAt;
   // The coach needs something to evaluate; a blank rationale has no logic in it.
   const canReview = !coaching && !submitting && rationale.trim().length > 0;
+  const decisionOption = DECISION_OPTIONS.find((o) => o.value === decisionType)!;
 
   async function handleReview() {
     if (!canReview) return;
@@ -165,13 +191,22 @@ export default function TradeForm({
     setCoachReport(null);
     try {
       setCoachReport(
-        await reviewTrade({
-          ticker: ticker.trim().toUpperCase() || null,
-          proposed_side: side,
-          proposed_quantity: qty > 0 ? qty : null,
-          entry_rationale: rationale.trim(),
-          emotion_tag: emotionTag,
-        })
+        await reviewTrade(
+          isDiary
+            ? {
+                ticker: ticker.trim().toUpperCase() || null,
+                decision_type: decisionType,
+                entry_rationale: rationale.trim(),
+                emotion_tag: emotionTag,
+              }
+            : {
+                ticker: ticker.trim().toUpperCase() || null,
+                proposed_side: side,
+                proposed_quantity: qty > 0 ? qty : null,
+                entry_rationale: rationale.trim(),
+                emotion_tag: emotionTag,
+              }
+        )
       );
     } catch (err) {
       setCoachError(
@@ -190,17 +225,29 @@ export default function TradeForm({
     setError(null);
     setResult(null);
     try {
-      const res = await logTrade({
-        ticker: ticker.trim().toUpperCase(),
-        side,
-        quantity: qty,
-        executed_at: toUtcIso(executedAt),
-        entry_rationale: rationale.trim() || null,
-        emotion_tag: emotionTag,
-        // Omitted unless the user explicitly opened the override.
-        execution_price:
-          showOverride && overridePrice !== "" ? Number(overridePrice) : null,
-      });
+      const res = await logTrade(
+        isDiary
+          ? {
+              ticker: ticker.trim().toUpperCase() || null,
+              entry_type: decisionOption.entryType,
+              decision_type: decisionType,
+              executed_at: toUtcIso(executedAt),
+              entry_rationale: rationale.trim(),
+              emotion_tag: emotionTag,
+            }
+          : {
+              ticker: ticker.trim().toUpperCase(),
+              entry_type: "trade",
+              side,
+              quantity: qty,
+              executed_at: toUtcIso(executedAt),
+              entry_rationale: rationale.trim() || null,
+              emotion_tag: emotionTag,
+              // Omitted unless the user explicitly opened the override.
+              execution_price:
+                showOverride && overridePrice !== "" ? Number(overridePrice) : null,
+            }
+      );
       setResult(res);
       onLogged(res);
       // Clear the per-trade fields; keep ticker and side so logging a follow-up
@@ -215,7 +262,11 @@ export default function TradeForm({
       setCoachReport(null);
       setCoachError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to log the trade.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : isDiary ? "Failed to save the diary entry." : "Failed to log the trade."
+      );
     } finally {
       setSubmitting(false);
     }
@@ -223,15 +274,40 @@ export default function TradeForm({
 
   return (
     <form className="trade-form" onSubmit={handleSubmit}>
+      <div className="trade-mode-toggle" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={!isDiary}
+          className={`trade-mode-btn ${!isDiary ? "is-active" : ""}`}
+          onClick={() => setMode("trade")}
+          disabled={submitting}
+        >
+          🛒 Log Trade (매매 기록)
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={isDiary}
+          className={`trade-mode-btn ${isDiary ? "is-active" : ""}`}
+          onClick={() => setMode("diary")}
+          disabled={submitting}
+        >
+          📓 Investment Diary / Reflection (투자 일기 / 복기)
+        </button>
+      </div>
+
       <div className="trade-form-row">
         <label className="trade-field">
-          <span className="trade-label">Ticker</span>
+          <span className="trade-label">
+            Ticker{isDiary && " (optional)"}
+          </span>
           <input
             className="trade-input"
             list="portfolio-tickers"
             value={ticker}
             onChange={(e) => setTicker(e.target.value.toUpperCase())}
-            placeholder="AAPL"
+            placeholder={isDiary ? "AAPL, or leave blank for a general note" : "AAPL"}
             disabled={submitting}
           />
           <datalist id="portfolio-tickers">
@@ -241,18 +317,36 @@ export default function TradeForm({
           </datalist>
         </label>
 
-        <label className="trade-field trade-field-narrow">
-          <span className="trade-label">Side</span>
-          <select
-            className="trade-input trade-side-select"
-            value={side}
-            onChange={(e) => setSide(e.target.value as "buy" | "sell")}
-            disabled={submitting}
-          >
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-        </label>
+        {isDiary ? (
+          <label className="trade-field">
+            <span className="trade-label">Action / Decision Type</span>
+            <select
+              className="trade-input trade-side-select"
+              value={decisionType}
+              onChange={(e) => setDecisionType(e.target.value as DecisionType)}
+              disabled={submitting}
+            >
+              {DECISION_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className="trade-field trade-field-narrow">
+            <span className="trade-label">Side</span>
+            <select
+              className="trade-input trade-side-select"
+              value={side}
+              onChange={(e) => setSide(e.target.value as "buy" | "sell")}
+              disabled={submitting}
+            >
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+        )}
 
         <label className="trade-field">
           <span className="trade-label">Transaction time</span>
@@ -265,30 +359,35 @@ export default function TradeForm({
           />
         </label>
 
-        <label className="trade-field trade-field-narrow">
-          <span className="trade-label">Quantity</span>
-          <input
-            className="trade-input"
-            type="number"
-            min="0"
-            step="any"
-            value={quantity}
-            onChange={(e) => setQuantity(e.target.value)}
-            placeholder="10"
-            disabled={submitting}
-          />
-        </label>
+        {!isDiary && (
+          <label className="trade-field trade-field-narrow">
+            <span className="trade-label">Quantity</span>
+            <input
+              className="trade-input"
+              type="number"
+              min="0"
+              step="any"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              placeholder="10"
+              disabled={submitting}
+            />
+          </label>
+        )}
       </div>
 
       <p className="trade-form-hint">
-        No price field — the execution price is looked up from market data at the
-        time you enter above.
+        {isDiary
+          ? "No quantity, no holdings change — this is a thought, not an execution. " +
+            "A benchmark price at this moment is still recorded, so you can later see what the stock did."
+          : "No price field — the execution price is looked up from market data at the " +
+            "time you enter above."}
       </p>
 
       {/* ── Entry Rationale: the feature's centerpiece, not a footnote. ── */}
       <label className="trade-field trade-field-rationale">
         <span className="trade-label trade-label-emphasis">
-          Entry Rationale (진입 이유)
+          {isDiary ? "Thoughts / Reflection (생각/복기)" : "Entry Rationale (진입 이유)"}
         </span>
         <textarea
           className="trade-textarea"
@@ -297,8 +396,11 @@ export default function TradeForm({
           rows={4}
           disabled={submitting}
           placeholder={
-            "Why now? What are you feeling — conviction, FOMO, fear?\n" +
-            "Be honest: your coach compares this against what the data actually said."
+            isDiary
+              ? "What are you weighing? A dilemma, a reason you're passing, an idea " +
+                "you're not ready to act on — write it as it actually feels."
+              : "Why now? What are you feeling — conviction, FOMO, fear?\n" +
+                "Be honest: your coach compares this against what the data actually said."
           }
         />
         <span className="trade-help">
@@ -328,32 +430,36 @@ export default function TradeForm({
         </div>
       </div>
 
-      {/* Manual override, tucked away so it never looks like a required field. */}
-      <div className="trade-override">
-        <button
-          type="button"
-          className="trade-override-toggle"
-          onClick={() => setShowOverride((v) => !v)}
-          disabled={submitting}
-        >
-          {showOverride ? "▾" : "▸"} Correct the fill price manually
-        </button>
-        {showOverride && (
-          <label className="trade-field trade-field-narrow">
-            <span className="trade-label">Execution price</span>
-            <input
-              className="trade-input"
-              type="number"
-              min="0"
-              step="any"
-              value={overridePrice}
-              onChange={(e) => setOverridePrice(e.target.value)}
-              placeholder="Leave blank to auto-detect"
-              disabled={submitting}
-            />
-          </label>
-        )}
-      </div>
+      {/* Manual override, tucked away so it never looks like a required field.
+          Not offered in diary mode: the recorded price there is a benchmark
+          snapshot, not a fill, so there is nothing to "correct". */}
+      {!isDiary && (
+        <div className="trade-override">
+          <button
+            type="button"
+            className="trade-override-toggle"
+            onClick={() => setShowOverride((v) => !v)}
+            disabled={submitting}
+          >
+            {showOverride ? "▾" : "▸"} Correct the fill price manually
+          </button>
+          {showOverride && (
+            <label className="trade-field trade-field-narrow">
+              <span className="trade-label">Execution price</span>
+              <input
+                className="trade-input"
+                type="number"
+                min="0"
+                step="any"
+                value={overridePrice}
+                onChange={(e) => setOverridePrice(e.target.value)}
+                placeholder="Leave blank to auto-detect"
+                disabled={submitting}
+              />
+            </label>
+          )}
+        </div>
+      )}
 
       <div className="trade-form-actions">
         <button
@@ -370,7 +476,9 @@ export default function TradeForm({
           {coaching ? "Reviewing…" : "🧠 Get coach review"}
         </button>
         <button className="btn-primary" type="submit" disabled={!canSubmit}>
-          {submitting ? "Looking up the fill…" : "Log trade"}
+          {isDiary
+            ? (submitting ? "Saving…" : "Save Diary Entry")
+            : (submitting ? "Looking up the fill…" : "Log trade")}
         </button>
       </div>
 
@@ -383,7 +491,29 @@ export default function TradeForm({
         />
       )}
       {result && (
-        <TradeConfirmation result={result} onDismiss={() => setResult(null)} />
+        result.trade.entry_type !== "trade" ? (
+          <div className="trade-confirm">
+            <div className="trade-confirm-head">
+              <span className="trade-confirm-title">
+                ✓ Saved diary entry{result.trade.ticker ? ` — ${result.trade.ticker}` : ""}
+              </span>
+              <button
+                className="btn-close"
+                onClick={() => setResult(null)}
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+            {result.trade.execution_price !== null && (
+              <div className="trade-confirm-note">
+                Benchmark price at this moment: ${result.trade.execution_price.toFixed(2)}
+              </div>
+            )}
+          </div>
+        ) : (
+          <TradeConfirmation result={result} onDismiss={() => setResult(null)} />
+        )
       )}
     </form>
   );

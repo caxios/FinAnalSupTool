@@ -33,6 +33,21 @@ const EMOTION_EMOJI: Record<string, string> = {
   overconfidence: "🚀", fear: "😨",
 };
 
+/** Badge shown for a non-trade diary entry, keyed by its `entry_type`. */
+const DIARY_BADGE: Record<string, { emoji: string; label: string }> = {
+  pass: { emoji: "⏸️", label: "PASS" },
+  note: { emoji: "🔍", label: "NOTE" },
+  review: { emoji: "📓", label: "REVIEW" },
+};
+
+const DECISION_LABEL: Record<string, string> = {
+  pass: "Observed / passed",
+  contemplating: "Contemplating",
+  hold: "Retrospective review",
+  observe: "Watching",
+  note: "Market note / idea",
+};
+
 interface TradeHistoryProps {
   trades: Trade[];
   loading: boolean;
@@ -194,27 +209,45 @@ export default function TradeHistory({
           <div className="journal-list">
             {pager.pageItems.map((t) => {
               const isOpening = t.entry_rationale === OPENING_RATIONALE;
+              const isDiary = t.entry_type && t.entry_type !== "trade";
               const rowReviews = reviews[t.id] ?? [];
               const latest = rowReviews[0];
               const latestReport = latest?.report as CoachReport | undefined;
               const canReview = !isOpening && !!t.entry_rationale;
               const isOpen = expanded === t.id;
+              const diaryBadge = isDiary ? DIARY_BADGE[t.entry_type] : undefined;
 
               return (
                 <article key={t.id} className="journal-entry">
                   <div className="journal-entry-head">
-                    <span
-                      className={`journal-side journal-side-${t.side}`}
-                      title={t.side === "buy" ? "Bought" : "Sold"}
-                    >
-                      {t.side === "buy" ? "BUY" : "SELL"}
+                    {isDiary ? (
+                      <span
+                        className="journal-side journal-side-diary"
+                        title={t.side ? DECISION_LABEL[t.side] ?? t.side : "Reflection"}
+                      >
+                        {diaryBadge ? `${diaryBadge.emoji} ${diaryBadge.label}` : "📓 DIARY"}
+                      </span>
+                    ) : (
+                      <span
+                        className={`journal-side journal-side-${t.side}`}
+                        title={t.side === "buy" ? "Bought" : "Sold"}
+                      >
+                        {t.side === "buy" ? "BUY" : "SELL"}
+                      </span>
+                    )}
+                    <span className="journal-ticker">{t.ticker ?? "General"}</span>
+                    <span className="journal-qty">
+                      {isDiary ? "—" : `${t.quantity} sh`}
                     </span>
-                    <span className="journal-ticker">{t.ticker}</span>
-                    <span className="journal-qty">{t.quantity} sh</span>
                     <span className="journal-price">
                       @ {money(t.execution_price)}
+                      {isDiary && t.execution_price !== null && (
+                        <span className="journal-benchmark-tag"> (benchmark)</span>
+                      )}
                     </span>
-                    <span className="journal-total">{money(t.total_value)}</span>
+                    <span className="journal-total">
+                      {isDiary ? "—" : money(t.total_value)}
+                    </span>
                     <span className="journal-when">{formatWhen(t.executed_at)}</span>
                     {t.emotion_tag && (
                       <span className="journal-emotion" title={t.emotion_tag}>

@@ -7,19 +7,34 @@ A meta-cognitive coach: it holds the user's stated **Entry Rationale** against
 what the objective data actually said, names the psychological bias when those
 two disagree, and cites the user's OWN past trades as evidence.
 
-Three pillars, all of which already existed before this agent
-────────────────────────────────────────────────────────────
-  1. Fundamental — the SEC Filings agent's report from the last /analyze run.
-  2. Technical   — the Technical Analysis agent's report from that same run.
-  3. Behavioural — ``services.journal_analysis``, which joins every logged trade
-                   to what the price did afterwards.
+Style-respecting rule incubator, not a lecturer
+────────────────────────────────────────────────
+The coach's mandate is NOT to push every user toward the same conservative
+disposition. It identifies the user's own trading archetype (from their real
+closed trades — see :func:`journal_analysis.trader_archetype`) and helps them
+execute THAT style with a better payoff ratio and more discipline — never
+talks an aggressive momentum trader into becoming a passive value investor,
+or the reverse. See the "STYLE" directive in ``_SYSTEM_PROMPT`` below.
 
-This agent adds no new data source. It is pure synthesis, which is why its one
-real risk is fabrication: a coaching claim about "your last three trades" is
-worthless unless those trades exist. So the journal statistics are computed in
-Python and handed over as structure, the prompt forbids inventing a date, and
-:func:`verify_citations` checks every date the model returns against the real
-journal before the report is served.
+Four pillars
+────────────
+  1. Fundamental/Peer/Technical — a condensed institutional digest (Manager
+     verdict, forensic QoE, peer valuation, technical levels), retrieved
+     ON DEMAND by :func:`fetch_fundamental_analysis` rather than stuffed into
+     every prompt regardless of whether the review names a ticker.
+  2. Behavioural — ``services.journal_analysis``, which joins every logged trade
+                   to what the price did afterwards.
+  3. Archetype   — the user's own demonstrated trading style (descriptive,
+                   never a target — see above).
+
+This agent adds no new RAW data source; :func:`fetch_fundamental_analysis`
+reads the same Manager/SEC/Peer/Technical reports Deep Analysis already
+produced, just condensed and fetched only when a ticker is actually named.
+The synthesis is still the risk: a coaching claim about "your last three
+trades" is worthless unless those trades exist. So the journal statistics are
+computed in Python and handed over as structure, the prompt forbids inventing
+a date or a figure, and :func:`verify_citations` checks every date the model
+returns against the real journal before the report is served.
 
 Debate participation
 ────────────────────
@@ -68,16 +83,213 @@ _TECH_FIELDS = (
 )
 
 
+# =============================================================================
+# Tool-augmented fundamental grounding
+# =============================================================================
+# The coach must ground a reflection in the SAME institutional research Deep
+# Analysis already produced for that ticker — Manager verdict, forensic QoE,
+# peer valuation, technical levels — but stuffing full reports into EVERY
+# coaching prompt regardless of whether the review even names a ticker would
+# exhaust the context budget and dilute the prompt for the reviews that don't.
+#
+# So this is retrieved ON DEMAND, exactly like a tool call the model would
+# issue for itself: `fetch_fundamental_analysis(ticker)` is called only when a
+# review names a ticker, and only for that ticker. It is implemented as a
+# direct Python call rather than a real Gemini function-calling round trip —
+# this app's LLM plumbing (`agents.llm_utils`) has no tool-calling loop, and
+# this is the same "compute/fetch in Python, hand the model a demarcated
+# section to interpret" pattern every other agent in this codebase already
+# uses (`sec_rag.prepare_context`, `portfolio_risk_context`, etc.) — a
+# pre-invocation resolution step rather than a mid-generation tool call.
+#
+# This is ALWAYS the latest available research — never time-scoped — so it is
+# only safe to call for a review that is inherently "as of now": the pre-trade
+# review and the whole-journal review. A retrospective review of a trade
+# already made must instead use `rag.history_store.analysis_as_of`, which
+# excludes anything the user could not have known at the time; see
+# `analyze_retrospective`, which never calls this function.
+
+_PEER_METRIC_HIGHLIGHTS = ("trailing_pe", "ev_ebitda", "gross_margin", "revenue_growth_yoy")
+
+
+def _condense_manager(manager) -> dict | None:
+    """
+    Normalize a Manager verdict to a plain dict, or ``None`` if there isn't a
+    usable one.
+
+    ``services.storage.DebateStore`` holds the LIVE run's manager result as
+    whatever ``ManagerAgent().analyze()`` returned — a ``ManagerReport``
+    Pydantic object on success, or a bare ``{"error": ...}`` dict on failure
+    (see ``services.pipeline``) — while a PERSISTED history record already
+    holds it as a plain dict. Both shapes reach this function.
+    """
+    if manager is None:
+        return None
+    if hasattr(manager, "model_dump"):
+        manager = manager.model_dump()
+    if not isinstance(manager, dict) or manager.get("error"):
+        return None
+    return {
+        "recommendation": manager.get("recommendation"),
+        "conviction": manager.get("conviction"),
+        "overall_score": manager.get("overall_score"),
+        "executive_summary": manager.get("executive_summary"),
+        "bull_case": manager.get("bull_case"),
+        "bear_case": manager.get("bear_case"),
+        "thesis_pillars": manager.get("thesis_pillars"),
+    }
+
+
+def _condense_qoe(sec: dict | None) -> dict | None:
+    """The forensic Quality-of-Earnings read, without the raw accrual table."""
+    qoe = (sec or {}).get("quality_of_earnings_forensic") or {}
+    if not qoe:
+        return None
+    return {
+        "qoe_score": qoe.get("qoe_score"),
+        "accrual_summary": qoe.get("accrual_summary"),
+        "capex_da_reconciliation": qoe.get("capex_da_reconciliation"),
+        "depreciation_cliff_detected": qoe.get("depreciation_cliff_detected"),
+        "depreciation_cliff_note": qoe.get("depreciation_cliff_note"),
+        "structural_drivers": qoe.get("structural_drivers"),
+        "transitory_drivers": qoe.get("transitory_drivers"),
+    }
+
+
+def _condense_peer(peer: dict | None) -> dict | None:
+    """Valuation stance + moat, without the full peer metrics table."""
+    if not peer:
+        return None
+    rows = {r.get("metric"): r for r in (peer.get("metrics_table") or [])}
+    highlights = [
+        {
+            "metric": rows[m].get("label"), "target": rows[m].get("target_value"),
+            "peer_median": rows[m].get("peer_median"),
+            "premium_discount_pct": rows[m].get("premium_discount_pct"),
+        }
+        for m in _PEER_METRIC_HIGHLIGHTS if m in rows
+    ]
+    return {
+        "valuation_assessment": peer.get("valuation_assessment"),
+        "competitive_moat": peer.get("competitive_moat"),
+        "key_differentiators": peer.get("key_differentiators"),
+        "valuation_highlights": highlights,
+    }
+
+
+def _condense_fundamental_digest(
+    *, status: str, manager=None, sec: dict | None = None,
+    peer: dict | None = None, technical: dict | None = None,
+    period: str | None = None, message: str | None = None,
+) -> dict:
+    """Assemble the compact institutional digest from whatever pieces exist."""
+    return {
+        "status": status,
+        "period": period,
+        "message": message,
+        "manager_verdict": _condense_manager(manager),
+        "quality_of_earnings": _condense_qoe(sec),
+        "peer_valuation": _condense_peer(peer),
+        "technical": (
+            {k: technical.get(k) for k in _TECH_FIELDS if technical.get(k) is not None}
+            if technical else None
+        ),
+        "downside_risks": (sec or {}).get("risk_assessment"),
+    }
+
+
+def fetch_fundamental_analysis(ticker: str) -> dict:
+    """
+    On-demand tool: the institutional research digest for ``ticker`` — Manager
+    verdict, forensic QoE, peer valuation, technical levels, and downside
+    risks — from the most recent /analyze run this session, falling back to
+    the latest persisted Deep Analysis. Never the raw filing text/tables;
+    those already have their own retrieval path (the AI Chat's RAG fallback
+    chain) and would drown a coaching prompt in detail it doesn't need.
+
+    Returns a well-formed digest with ``status`` in ``'active_run'``,
+    ``'persisted_history'``, or ``'no_prior_analysis'``/``'no_ticker'`` — never
+    raises. Missing pieces (e.g. no Peer Comparison agent ran) come back as
+    ``None`` fields rather than an error.
+    """
+    from rag import history_store
+    from services.storage import get_debate_store
+
+    t = (ticker or "").strip().upper()
+    if not t:
+        return _condense_fundamental_digest(status="no_ticker")
+
+    live = get_debate_store().get(t)
+    if live and live.get("reports"):
+        reports = live.get("reports") or {}
+        return _condense_fundamental_digest(
+            status="active_run", period=live.get("period"),
+            manager=live.get("manager"), sec=reports.get("sec_filings"),
+            peer=reports.get("peer_comparison"),
+            technical=reports.get("technical_analysis"),
+        )
+
+    record = history_store.get_latest_analysis(t)
+    if record:
+        reports = record.get("reports") or {}
+        return _condense_fundamental_digest(
+            status="persisted_history", period=record.get("analysis_period"),
+            manager=record.get("manager"), sec=reports.get("sec_filings"),
+            peer=reports.get("peer_comparison"),
+            technical=reports.get("technical_analysis"),
+        )
+
+    return _condense_fundamental_digest(
+        status="no_prior_analysis",
+        message=f"No Deep Analysis has been run for {t} yet.",
+    )
+
+
 _SYSTEM_PROMPT = """\
 You are a trading coach in a financial analysis system. Your job is NOT to pick
 stocks — it is to help this user see their own decision-making clearly.
 
-You are given four things:
-  1. The trade the user is considering, and THEIR OWN stated reason for it.
-  2. The fundamental analyst's report on the company (if available).
-  3. The technical analyst's report on the company (if available).
-  4. The user's real trading journal: past trades, what they wrote at the time,
+You are given five things:
+  1. The trade the user is considering, and THEIR OWN stated reason for it. This
+     may instead be a NON-TRADE REFLECTION — a dilemma, a decision to pass or
+     wait, or a market note with no proposed execution at all (look for
+     "Observing/passing on", "Contemplating a position in", or similar in
+     THE TRADE UNDER REVIEW). Do NOT assume an execution took place. Give
+     meta-cognitive feedback on the psychological conflict or the reasoning
+     itself — e.g. name the FOMO or hesitation, compare it against the
+     objective data — exactly as you would for a real trade, just without
+     talking about a fill, a position size change, or a cost basis.
+  2. FUNDAMENTAL MANAGER SYNTHESIS: an institutional digest retrieved ON DEMAND
+     for this ticker — the Lead Analyst's verdict/conviction, forensic Quality
+     of Earnings, peer valuation, technical levels, and downside risks. It may
+     say no Deep Analysis has been run yet — say so plainly rather than
+     inventing a fundamental view.
+  3. YOUR TRADING ARCHETYPE: a computed, descriptive label for the style the
+     user's own closed trades already show (e.g. "Aggressive Momentum Trader").
+     This is not a target — see the STYLE directive below.
+  4. YOUR OWN PLAYBOOK: the user's empirically-derived Golden Setup / Toxic
+     Pattern rules, matched against this proposed trade.
+  5. The user's real trading journal: past trades, what they wrote at the time,
      and what the price actually did 7/30/90 days later.
+
+STYLE — the single most important directive in this prompt:
+- Identify the user's trading archetype from ARCHETYPE below (or from the
+  journal itself if ARCHETYPE says the history is too short). NEVER attempt to
+  change their inherent disposition — do not tell an aggressive momentum
+  trader to become a passive value investor, and do not tell a patient value
+  investor to chase momentum. Your sole mandate is helping them execute their
+  OWN chosen style with a better payoff ratio and more discipline.
+- Formulate every actionable piece of `coaching_feedback` as a testable rule
+  where the data supports one: condition (what set this trade apart) →
+  execution criteria (what to require before entering) → stop/exit boundary
+  (when to cut it) → expected payoff (cite the real win rate/expectancy from
+  PLAYBOOK or the journal). A vague "be more careful" is not coaching; "your
+  aggressive breakouts bought on volume confirmation with sub-2% initial risk
+  have a 3.4:1 payoff ratio — the ones chased after already running 15%+ do
+  not" is.
+- Ground every claim in BOTH the user's own words (quote them) AND a specific
+  figure from FUNDAMENTAL MANAGER SYNTHESIS, PLAYBOOK, or the journal. Never
+  one without the other when both are available.
 
 ABSOLUTE RULES — violating these makes your advice harmful:
 - NEVER invent a past trade. Every date you cite in `past_occurrences` MUST
@@ -97,11 +309,11 @@ ABSOLUTE RULES — violating these makes your advice harmful:
   the data does not support — and it belongs under the same rule.
 
 WHAT TO DO:
-- Compare the user's stated rationale against the objective reports. Name the
-  conflict EXPLICITLY when they disagree. For example: "You're selling because
-  the technicals broke, but the fundamental report shows revenue up 20% and
-  margins expanding — those are different time horizons, and your reason only
-  addresses one of them."
+- Compare the user's stated rationale against FUNDAMENTAL MANAGER SYNTHESIS.
+  Name the conflict EXPLICITLY when they disagree. For example: "You're
+  selling because the technicals broke, but the Manager's verdict is bullish
+  on revenue up 20% and margins expanding — those are different time
+  horizons, and your reason only addresses one of them."
 - When the journal supports it, connect this decision to the user's own history:
   "The last two times you wrote something like this (2026-03-14, 2026-05-02),
   the position was higher 30 days later."
@@ -150,6 +362,24 @@ one position's size, which SIZING above already covers:
 - Never invent a VaR, correlation, or volatility figure. Every number you cite
   from this section must appear in it verbatim.
 
+FUNDAMENTAL MANAGER SYNTHESIS — use it when `status` is `active_run` or
+`persisted_history`; when it is `no_prior_analysis` or `no_ticker`, say so and
+do not invent a fundamental view:
+- `manager_verdict` (recommendation/conviction/thesis) is the Lead Analyst's
+  synthesized stance — cite it by name ("the Manager's bullish, high-conviction
+  call") rather than treating it as your own independent opinion.
+- `quality_of_earnings` (`qoe_score`, `accrual_summary`, a detected
+  depreciation cliff, structural vs. transitory drivers) is forensic, not a
+  vibe — if the user's rationale claims strong earnings growth, check it
+  against this before agreeing.
+- `peer_valuation` (`valuation_assessment`, the P/E or EV/EBITDA premium or
+  discount, `competitive_moat`) tells you whether the price the user is
+  paying is cheap or expensive RELATIVE to comparable companies — a fact the
+  user's own rationale usually never mentions.
+- Every figure you cite from this section must appear in it verbatim. A null
+  field (e.g. no Peer Comparison agent ran) means say nothing about that
+  dimension — never fill the gap with a guess.
+
 YOUR OWN PLAYBOOK — use PLAYBOOK below when it is present. `toxic_pattern_matches`
 and `golden_setup_matches` are the user's OWN empirically-derived rules
 (win rate, payoff ratio, expectancy — computed from their real closed trades in
@@ -197,13 +427,13 @@ _USER_TEMPLATE = """\
 {rationale}
 === END RATIONALE ===
 
-=== FUNDAMENTAL ANALYST REPORT ===
-{fundamental}
-=== END FUNDAMENTAL ===
+=== FUNDAMENTAL MANAGER SYNTHESIS (tool-retrieved on demand for this ticker) ===
+{fundamental_synthesis}
+=== END SYNTHESIS ===
 
-=== TECHNICAL ANALYST REPORT ===
-{technical}
-=== END TECHNICAL ===
+=== YOUR TRADING ARCHETYPE (computed from your own closed trades — descriptive, not a target) ===
+{archetype}
+=== END ARCHETYPE ===
 
 === THE USER'S TRADING JOURNAL (real logged trades) ===
 {journal}
@@ -547,6 +777,12 @@ _RETRO_PROCESS_PROMPT = """\
 You are a trading coach reviewing a decision the user ALREADY MADE. Your job in
 this pass is to judge the QUALITY OF THEIR REASONING — nothing else.
 
+THE TRADE UNDER REVIEW may instead be a NON-TRADE REFLECTION (look for a
+"[note/...]" or "[pass/...]" tag ahead of the ticker) — a dilemma, a decision
+to pass, or a market note, with no execution and no fill. Judge the reasoning
+the same way; just do not refer to a position size, a fill, or a cost basis
+that does not exist.
+
 CRITICAL: You have deliberately NOT been told what happened after this trade.
 You cannot know, and you must not guess. Judge the decision only against the
 information that existed at the moment it was made, which is all you have been
@@ -575,6 +811,11 @@ WHAT TO DO:
 - Detect biases only where you can evidence them, quoting the user's own words.
 - Be direct but not moralizing. A well-reasoned trade deserves to be told it was
   well reasoned, whatever became of it.
+- Judge the EXECUTION of this decision, not the trading style itself. A fast,
+  high-conviction breakout entry is not automatically "unsound reasoning" just
+  because it is aggressive — judge whether it was well-executed FOR that style
+  (confirmation used, risk sized, a plan for being wrong), not against a more
+  conservative style the user was never attempting.
 
 Output ONLY a single JSON object:
 {
@@ -692,9 +933,27 @@ exist at the level of the whole record:
   - Which behaviours actually RECUR, and are they getting better or worse?
   - Does good reasoning actually pay off for this user, or not?
   - What advice was given in earlier reviews, and what did the user then do?
+  - When DIARY / REFLECTION ENTRIES are present: did PASSING or HESITATING pay
+    off, or cost them? A "pass" followed by a big rally is a real, coachable
+    outcome — so is a "pass" followed by a further decline that validated it.
+
+STYLE — the single most important directive in this prompt:
+- ARCHETYPE below describes the trading style this user's own closed trades
+  already show. NEVER use `priorities` to push them toward a different
+  disposition — do not tell an aggressive momentum trader to become a passive
+  value investor, or a patient value investor to chase momentum. Every
+  priority must help them execute THEIR OWN style better, not a different one.
+- Where the data supports it, phrase a `priority` as a testable rule: condition
+  → execution criteria → stop/exit boundary → expected payoff (cite the real
+  win rate/expectancy from BEHAVIOURAL SUMMARY). This is what "formalize a
+  Golden Rule" means in practice — a vague "manage risk better" is not one.
+- When FUNDAMENTAL MANAGER SYNTHESIS is present (a single-ticker scope), ground
+  at least one observation in it — the Manager's verdict, the peer valuation,
+  or the forensic QoE read — not only in the user's own trading behaviour.
 
 ABSOLUTE RULES:
-- NEVER invent a trade. Every date in `occurrences` MUST appear in the journal.
+- NEVER invent a trade or a diary entry. Every date in `occurrences` MUST appear
+  in the journal OR the diary entries below.
 - NEVER invent a number.
 - A pattern needs at least two dated occurrences. One event is an anecdote; do
   not call it a pattern.
@@ -748,6 +1007,18 @@ _JOURNAL_TEMPLATE = """\
 {journal}
 === END JOURNAL ===
 
+=== DIARY / REFLECTION ENTRIES (non-trade: passes, dilemmas, notes — with the RAW price move afterwards, not signed by a direction that never executed) ===
+{diary}
+=== END DIARY ===
+
+=== YOUR TRADING ARCHETYPE (computed from your own closed trades — descriptive, not a target) ===
+{archetype}
+=== END ARCHETYPE ===
+
+=== FUNDAMENTAL MANAGER SYNTHESIS (tool-retrieved on demand — only present when scoped to one ticker) ===
+{fundamental_synthesis}
+=== END SYNTHESIS ===
+
 === BEHAVIOURAL SUMMARY (computed, not estimated) ===
 {patterns}
 === END SUMMARY ===
@@ -775,19 +1046,40 @@ class CoachAgent(BaseAgent):
         """
         Args:
             context: ``ticker``, ``entry_rationale``, optional ``proposed_side`` /
-                     ``proposed_quantity`` / ``emotion_tag``, and optional
-                     ``sec_report`` / ``technical_report`` dicts from the last
-                     /analyze run.
+                     ``proposed_quantity`` / ``decision_type`` / ``emotion_tag``.
+
+                     ``decision_type`` ('pass', 'contemplating', 'note', 'hold',
+                     'observe') describes a non-trade reflection — a dilemma or
+                     a decision to pass — when there is no ``proposed_side`` /
+                     ``proposed_quantity`` to execute.
+
+                     The fundamental/peer/technical digest is retrieved by this
+                     method itself, via :func:`fetch_fundamental_analysis` — a
+                     caller no longer pre-fetches ``sec_report``/
+                     ``technical_report`` from the debate store.
         """
         ticker = (context.get("ticker") or "").strip().upper() or None
         rationale = (context.get("entry_rationale") or "").strip()
         side = context.get("proposed_side")
         qty = context.get("proposed_quantity")
+        decision_type = context.get("decision_type")
         emotion_tag = context.get("emotion_tag")
 
-        proposed = " ".join(
-            str(x) for x in [side, qty, ticker] if x not in (None, "")
-        ) or "(no specific trade — general review)"
+        if side in ("buy", "sell") and qty:
+            proposed = " ".join(
+                str(x) for x in [side, qty, ticker] if x not in (None, "")
+            )
+        elif decision_type:
+            label = {
+                "pass": "Observing/passing on",
+                "contemplating": "Contemplating a position in",
+                "hold": "Holding without acting on",
+                "observe": "Watching",
+                "note": "A market note about",
+            }.get(decision_type, "Reflecting on")
+            proposed = f"{label} {ticker}" if ticker else f"{label} the market"
+        else:
+            proposed = "(no specific trade — general review)"
 
         # ── The behavioural pillar, computed in Python. ──
         journal = await journal_analysis.trade_outcomes(limit=_MAX_JOURNAL_ROWS)
@@ -802,8 +1094,13 @@ class CoachAgent(BaseAgent):
             "You must not cite any past trade.)"
         )
 
-        fundamental = _compact_report(context.get("sec_report"), _SEC_FIELDS)
-        technical = _compact_report(context.get("technical_report"), _TECH_FIELDS)
+        # ── Tool-augmented fundamental grounding: retrieved on demand, only
+        # when a ticker is actually named — never stuffed in regardless. ──
+        fundamental_digest = (
+            fetch_fundamental_analysis(ticker) if ticker
+            else _condense_fundamental_digest(status="no_ticker")
+        )
+        archetype = journal_analysis.archetype_for()
 
         sizing = await position_context(ticker, side, qty)
         risk_ctx = await portfolio_risk_context(
@@ -824,8 +1121,10 @@ class CoachAgent(BaseAgent):
         user_prompt = _USER_TEMPLATE.format(
             proposed=proposed,
             rationale=rationale or "(The user gave no rationale for this trade.)",
-            fundamental=fundamental,
-            technical=technical,
+            fundamental_synthesis=json.dumps(
+                fundamental_digest, ensure_ascii=False, indent=2, default=str
+            ),
+            archetype=json.dumps(archetype, ensure_ascii=False, indent=2, default=str),
             journal=journal_text,
             patterns=json.dumps(patterns, ensure_ascii=False, indent=2, default=str),
             sizing=(
@@ -874,6 +1173,16 @@ class CoachAgent(BaseAgent):
             note = patterns.get("note") or "Too few logged trades to establish a pattern."
             if note not in report.data_limitations:
                 report.data_limitations.append(note)
+
+        # Be explicit about a missing fundamental pillar: silence here would
+        # read as "the coach checked the fundamentals and had no concerns".
+        if ticker and fundamental_digest.get("status") == "no_prior_analysis":
+            report.data_limitations.append(
+                f"No Deep Analysis has been run for {ticker}, so this review "
+                f"is based on your trading journal alone — not the company's "
+                f"fundamentals, peer valuation, or price action. Run a Deep "
+                f"Analysis for a fuller picture."
+            )
         return report
 
     # =====================================================================
@@ -908,17 +1217,25 @@ class CoachAgent(BaseAgent):
                 f"Trade {trade_id} has an unreadable executed_at ({executed_at!r})."
             )
 
-        subject = (
-            f"{trade.get('side')} {trade.get('quantity')} {ticker} "
-            f"@ {trade.get('execution_price')} on {executed_at}"
-        )
+        if portfolio_service.is_trade_entry(trade):
+            subject = (
+                f"{trade.get('side')} {trade.get('quantity')} {ticker} "
+                f"@ {trade.get('execution_price')} on {executed_at}"
+            )
+        else:
+            subject = (
+                f"[{trade.get('entry_type')}/{trade.get('side') or 'reflection'}] "
+                f"{ticker or 'general market note'} "
+                f"(benchmark price {trade.get('execution_price')}) on {executed_at}"
+            )
 
         # ── Pass 1 input: nothing that postdates the trade. ──────────────
         prior = await journal_analysis.trade_outcomes(
             limit=_MAX_JOURNAL_ROWS, before=executed
         )
         prior = [r for r in prior
-                 if r.get("id") != trade_id and not r.get("is_opening_entry")]
+                 if r.get("id") != trade_id and not r.get("is_opening_entry")
+                 and r.get("entry_type") == "trade"]
 
         # The reports as they stood then, not as they stand now. A current
         # technical report already knows which way the price went.
@@ -1049,12 +1366,28 @@ class CoachAgent(BaseAgent):
         since = (scope.get("since") or "").strip() or None
         limit = scope.get("limit") or _MAX_JOURNAL_ROWS
 
-        journal = await journal_analysis.trade_outcomes(ticker=ticker, limit=limit)
-        journal = [r for r in journal if not r.get("is_opening_entry")]
+        rows = await journal_analysis.trade_outcomes(ticker=ticker, limit=limit)
+        journal = [
+            r for r in rows
+            if not r.get("is_opening_entry") and r.get("entry_type") == "trade"
+        ]
+        diary = [r for r in rows if r.get("entry_type") != "trade"]
         if since:
             journal = [r for r in journal if (r.get("executed_at") or "") >= since]
+            diary = [r for r in diary if (r.get("executed_at") or "") >= since]
 
         patterns = await journal_analysis.pattern_summary(ticker=ticker)
+        archetype = journal_analysis.archetype_for(ticker=ticker)
+
+        # Tool-augmented fundamental grounding — only when this review is
+        # scoped to one company; a portfolio-wide review has no single ticker
+        # to fetch a digest for. Always "as of now", which is correct here:
+        # unlike a retrospective review of a PAST trade, a whole-journal
+        # review is inherently a review as of today.
+        fundamental_digest = (
+            fetch_fundamental_analysis(ticker) if ticker
+            else _condense_fundamental_digest(status="no_ticker")
+        )
 
         # What the coach has already said. This is the only source for
         # `advice_followed`, and it is why every review is persisted.
@@ -1096,6 +1429,15 @@ class CoachAgent(BaseAgent):
                 "(The journal is EMPTY for this scope. You must not cite any "
                 "past trade.)"
             ),
+            diary=(
+                json.dumps(diary, ensure_ascii=False, indent=2, default=str)
+                if diary else
+                "(No diary/reflection entries for this scope.)"
+            ),
+            archetype=json.dumps(archetype, ensure_ascii=False, indent=2, default=str),
+            fundamental_synthesis=json.dumps(
+                fundamental_digest, ensure_ascii=False, indent=2, default=str
+            ),
             patterns=json.dumps(patterns, ensure_ascii=False, indent=2, default=str),
             prior_reviews=(
                 json.dumps(prior_reviews, ensure_ascii=False, indent=2, default=str)
@@ -1117,7 +1459,7 @@ class CoachAgent(BaseAgent):
 
         # ── Enforce what the prompt only asked for. ──────────────────────
         from services import cash_service as cs
-        verify_citations(report, journal, flows=cs.list_flows(limit=200))
+        verify_citations(report, journal + diary, flows=cs.list_flows(limit=200))
 
         report.risk_warnings = risk_ctx.get("risk_warnings", [])
         report.scope_description = scope_text

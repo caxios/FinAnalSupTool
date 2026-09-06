@@ -96,15 +96,20 @@ async def prepare_context(
     if estimate_total_tokens(text_store, ordered) < RAG_THRESHOLD_TOKENS:
         return None
 
-    scope = f"{ticker or 'NA'}:{run_id}"
+    ticker_norm = (ticker or "NA").strip().upper()
+    scope = f"{ticker_norm}:{run_id}"
 
     # Index every section's chunks (scoped to this run). The whole document is
-    # indexed, so retrieval can reach any passage regardless of position.
+    # indexed, so retrieval can reach any passage regardless of position. Also
+    # tagged with the bare ticker (independent of `scope`'s run_id) so
+    # `query_by_ticker` can find these chunks from a LATER run/session that
+    # doesn't know this run_id — see its docstring.
     indexed_any = False
     for pk, section_key, text in _iter_sections(text_store, ordered):
         chunks = chunking.chunk_sec_text(text, pk, section_key)
         for c in chunks:
             c["metadata"]["scope"] = scope
+            c["metadata"]["ticker"] = ticker_norm
         written = await vector_store.index_chunks(
             "sec_filings_text", chunks,
             id_prefix=f"{scope}:{pk}:{section_key}".replace(" ", "_"),
@@ -162,5 +167,61 @@ async def prepare_context(
     logger.info(
         f"SEC filings RAG: indexed sections for {scope}, retrieved "
         f"{len(retrieved)} chunk(s) across {len(by_period)} period(s)."
+    )
+    return "\n".join(parts)
+
+
+# Chunks retrieved for a cross-run fallback query (no run_id in scope).
+_CROSS_RUN_RESULTS = 8
+
+
+async def query_by_ticker(ticker: str, question: str) -> str | None:
+    """
+    Best-effort fallback for a ticker with NO filing text in memory right now
+    (nothing ingested this session, and the disk cache in
+    ``services.filing_cache`` came up empty too): search for chunks indexed
+    for this ticker under ANY prior run_id/session, not just the current scope.
+
+    This only finds something when a past run's combined filing text crossed
+    `RAG_THRESHOLD_TOKENS` (small runs are never chunked/indexed at all — see
+    `prepare_context`'s early return above) or a past chat call already
+    indexed it under `run_id="chat"`. It is a genuine but PARTIAL fallback,
+    not a substitute for the disk cache being present.
+
+    Returns an excerpts block, or None (store unavailable, or nothing indexed
+    /retrieved for this ticker).
+    """
+    if not vector_store.is_available():
+        return None
+    ticker_norm = (ticker or "").strip().upper()
+    if not ticker_norm or not (question or "").strip():
+        return None
+
+    hits = await vector_store.query(
+        "sec_filings_text", question, n_results=_CROSS_RUN_RESULTS,
+        where={"ticker": ticker_norm},
+    )
+    if not hits:
+        return None
+
+    from parsers.pdf_utils import SECTION_LABELS
+
+    parts = [
+        "# Filing Text — RELEVANT EXCERPTS (from a previously indexed run)",
+        "(Retrieved from an EARLIER session's indexed filing text — the full "
+        "text is not currently loaded, so treat absence of a detail here as "
+        "'not retrieved', not 'not disclosed'.)",
+        "",
+    ]
+    for h in hits:
+        label = SECTION_LABELS.get(h["metadata"].get("section_key", ""), "Filing Text")
+        period = h["metadata"].get("period", "unknown period")
+        parts.append(f"### {label} — {period}")
+        parts.append(h["text"])
+        parts.append("")
+
+    logger.info(
+        f"SEC filings RAG: cross-run fallback for {ticker_norm} retrieved "
+        f"{len(hits)} chunk(s)."
     )
     return "\n".join(parts)
