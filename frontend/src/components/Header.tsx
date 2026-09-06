@@ -14,9 +14,10 @@
  * isolated store, so changing it re-loads every view for the newly chosen one.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PeriodInfo, FilingMeta } from "../types";
 import { useDashboard } from "../context/DashboardContext";
+import { getRules, getRuleProposals } from "../api";
 import UploadModal from "./UploadModal";
 
 type ModalMode = "upload" | "sec";
@@ -26,12 +27,43 @@ interface HeaderProps {
   periods: PeriodInfo[];
   /** Callback fired after a successful upload — parent should refresh data */
   onUploadComplete: (filings: FilingMeta[]) => void;
+  /** Opens the Investment Rules modal (App.tsx owns modal/docked state so it
+   * can lay the docked drawer out alongside the main view). */
+  onOpenRules: () => void;
+  /** Bumped whenever a rule/proposal changes elsewhere, so this button's
+   * badge counts stay in sync without polling. */
+  rulesRefreshKey: number;
 }
 
-export default function Header({ periods, onUploadComplete }: HeaderProps) {
+export default function Header({
+  periods, onUploadComplete, onOpenRules, rulesRefreshKey,
+}: HeaderProps) {
   // null = modal closed; "upload" | "sec" = modal open in that mode
   const [modalMode, setModalMode] = useState<ModalMode | null>(null);
   const { activeTicker, setActiveTicker, availableTickers } = useDashboard();
+
+  const [activeRuleCount, setActiveRuleCount] = useState(0);
+  const [pendingProposalCount, setPendingProposalCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [rulesRes, proposalsRes] = await Promise.all([
+          getRules({ activeOnly: true }),
+          getRuleProposals("pending"),
+        ]);
+        if (cancelled) return;
+        setActiveRuleCount(rulesRes.count);
+        setPendingProposalCount(proposalsRes.count);
+      } catch {
+        // The badge is a convenience; the header must still render without it.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [rulesRefreshKey]);
 
   const hasCompanies = availableTickers.length > 0;
 
@@ -71,6 +103,18 @@ export default function Header({ periods, onUploadComplete }: HeaderProps) {
               {periods.length} filing{periods.length !== 1 ? "s" : ""} loaded
             </span>
           )}
+
+          {/* Investment Rules — accessible from any route */}
+          <button
+            className="btn-rules"
+            onClick={onOpenRules}
+            title="Your Golden Setup / Toxic Pattern rules and pending evolutions"
+          >
+            📜 Rules ({activeRuleCount})
+            {pendingProposalCount > 0 && (
+              <span className="btn-rules-badge">🟡 {pendingProposalCount}</span>
+            )}
+          </button>
 
           {/* SEC auto-fetch button */}
           <button

@@ -1055,12 +1055,98 @@ export interface TradingRule {
   payoff_ratio: number | null;
   expectancy: number | null;
   is_active: boolean;
+  /** Bumped each time an evolution proposal is applied to this rule. */
+  version: number;
+  /** Closed round trips CURRENTLY matching this rule as adherence (a Golden/
+   * Custom match) — recomputed on every review, not an event counter. */
+  adherence_count: number;
+  /** Closed round trips CURRENTLY matching this rule as a violation (a Toxic match). */
+  violation_count: number;
+  last_evaluated_at: string | null;
+  /** Qualitative evolutionary rationale from the most recently applied proposal. */
+  notes: string | null;
   created_at: string;
 }
 
 export interface TradingRulesResponse {
   rules: TradingRule[];
   count: number;
+}
+
+// =============================================================================
+// Rule Evolution Engine
+// =============================================================================
+
+export type RuleChangeType =
+  | "created" | "condition_refined" | "stats_updated"
+  | "risk_tightened" | "user_edited" | "deprecated";
+
+export type RuleTriggerSource = "trade_review" | "journal_review" | "manual" | "edge_synthesis";
+
+/** One immutable entry in a rule's Evolution Timeline. */
+export interface RuleEvolutionHistoryItem {
+  id: number;
+  rule_id: number;
+  version: number;
+  change_type: RuleChangeType;
+  trigger_source: RuleTriggerSource;
+  trigger_id: number | null;
+  summary: string;
+  details: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface RuleHistoryResponse {
+  history: RuleEvolutionHistoryItem[];
+  count: number;
+}
+
+export type ProposalType = "refine_existing" | "new_rule" | "tighten_risk" | "deprecate";
+export type ProposalStatus = "pending" | "applied" | "dismissed";
+
+/** One AI Coach-generated evolution proposal awaiting approval. */
+export interface RuleEvolutionProposal {
+  id: number;
+  rule_id: number | null;
+  proposal_type: ProposalType;
+  rule_type: "golden" | "toxic" | "custom" | string;
+  title: string;
+  conditions: Record<string, string>;
+  description: string;
+  rationale: string;
+  evidence_review_id: number | null;
+  evidence_trade_ids: number[];
+  status: ProposalStatus;
+  created_at: string;
+}
+
+export interface RuleEvolutionProposalsResponse {
+  proposals: RuleEvolutionProposal[];
+  count: number;
+}
+
+export interface GenerateProposalsRequest {
+  ticker?: string | null;
+  review_limit?: number;
+}
+
+/** One active rule a trade matches — the compact shape a journal-row badge needs. */
+export interface TradeRuleMatch {
+  id: number;
+  rule_type: "golden" | "toxic" | "custom" | string;
+  title: string;
+  version: number;
+}
+
+export interface TradeRuleMatches {
+  golden: TradeRuleMatch[];
+  toxic: TradeRuleMatch[];
+  custom: TradeRuleMatch[];
+}
+
+/** Rule matches for every trade in the journal, keyed by trade id (as a string). */
+export interface TradeRuleMatchesResponse {
+  matches: Record<string, TradeRuleMatches>;
 }
 
 export interface CoachReviewRequest {

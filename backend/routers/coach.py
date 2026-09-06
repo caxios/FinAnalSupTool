@@ -14,6 +14,23 @@ The trading coach — blueprint §3.
   POST /coach/rules                     adopt a candidate or write a custom rule
   PATCH  /coach/rules/{id}              toggle a rule active/inactive
   DELETE /coach/rules/{id}              remove a rule
+  GET  /coach/rules/{id}/history               a rule's Evolution Timeline
+  GET  /coach/rules/proposals                  pending/applied/dismissed evolution proposals
+  POST /coach/rules/proposals/generate         on-demand: synthesize new proposals now
+  POST /coach/rules/proposals/{id}/apply       approve a proposal (v1 -> v2)
+  POST /coach/rules/proposals/{id}/dismiss     reject a proposal
+  GET  /coach/rules/trade-matches              every trade's rule matches, for journal-row badges
+
+Rule Evolution
+──────────────
+A retrospective or whole-journal review recomputes every active rule's
+adherence/violation counts against the CURRENT journal (cheap, deterministic —
+see ``services.rule_evolution.sync_rule_adherence_counts``); a whole-journal
+review additionally attempts to synthesize new evolution proposals from the
+review's own qualitative feedback (the expensive, LLM-driven half). Neither
+ever fails the review itself — both are best-effort side effects. Proposals
+are NEVER auto-applied: they sit ``status='pending'`` until the user approves
+them via ``POST /coach/rules/proposals/{id}/apply``.
 
 Why there are three review endpoints
 ────────────────────────────────────
@@ -42,12 +59,17 @@ from agents import CoachAgent
 from agents.schemas.coach import CoachReport, JournalReport
 from schemas import (
     CoachReviewRequest,
+    GenerateProposalsRequest,
     JournalReviewRequest,
     PendingReviewsResponse,
     RuleActiveUpdate,
+    RuleEvolutionProposal,
+    RuleEvolutionProposalsResponse,
+    RuleHistoryResponse,
     StoredReview,
     StoredReviewsResponse,
     Trade,
+    TradeRuleMatchesResponse,
     TradingRule,
     TradingRuleCreate,
     TradingRulesResponse,
@@ -55,6 +77,7 @@ from schemas import (
 from services import journal_analysis as ja
 from services import portfolio_service as ps
 from services import review_store
+from services import rule_evolution
 from services import trading_rules as tr
 
 logger = logging.getLogger(__name__)
@@ -165,6 +188,10 @@ async def review_logged_trade(trade_id: int):
         # the current one was quietly substituted.
         data_as_of=report.data_as_of,
     )
+    try:
+        rule_evolution.sync_rule_adherence_counts()
+    except Exception as e:  # noqa: BLE001 — a stats side effect must not fail the review
+        logger.warning(f"Rule adherence sync failed after trade {trade_id} review: {e}")
     return report
 
 
@@ -194,6 +221,16 @@ async def review_journal(req: JournalReviewRequest):
         ticker=req.ticker,
         scope=report.scope_description,
     )
+    # Both are best-effort side effects — the review the user asked for has
+    # already succeeded and must be returned regardless of what happens here.
+    try:
+        rule_evolution.sync_rule_adherence_counts()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Rule adherence sync failed after journal review: {e}")
+    try:
+        await rule_evolution.generate_evolution_proposals(ticker=req.ticker)
+    except Exception as e:  # noqa: BLE001 — LLM synthesis is a bonus, not a requirement
+        logger.warning(f"Evolution proposal synthesis failed after journal review: {e}")
     return report
 
 
@@ -293,6 +330,10 @@ async def create_rule(body: TradingRuleCreate):
             body.rule_type, body.title, body.conditions, body.description,
             win_rate=body.win_rate, payoff_ratio=body.payoff_ratio,
             expectancy=body.expectancy,
+            # A win_rate/expectancy pair only ever accompanies an ADOPTED
+            # candidate (a hand-written custom rule has neither) — label the
+            # Evolution Timeline's first entry accordingly.
+            trigger_source="edge_synthesis" if body.win_rate is not None else "manual",
         )
     except tr.RuleError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -317,3 +358,89 @@ async def delete_rule(rule_id: int):
     except tr.RuleError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return None
+
+
+# =============================================================================
+# Rule Evolution — timeline, proposals, apply/dismiss
+# =============================================================================
+
+@router.get("/rules/{rule_id}/history", response_model=RuleHistoryResponse)
+async def get_rule_history(rule_id: int):
+    """
+    A rule's Evolution Timeline: every version change, newest first — e.g.
+    "v1: created from 5 round trips" -> "v2: stop-loss tightened after
+    Review #12". 404s if the rule itself doesn't exist (an empty timeline for
+    a real rule is a normal state — every rule has at least a 'created' entry).
+    """
+    if tr.get_rule(rule_id) is None:
+        raise HTTPException(status_code=404, detail=f"No rule with id {rule_id}.")
+    rows = tr.get_rule_history(rule_id)
+    return RuleHistoryResponse(history=rows, count=len(rows))
+
+
+@router.get("/rules/proposals", response_model=RuleEvolutionProposalsResponse)
+async def list_rule_proposals(
+    status: str | None = Query(None, description="'pending', 'applied', or 'dismissed'"),
+):
+    """AI Coach evolution proposals, newest first. Defaults to every status."""
+    try:
+        rows = tr.list_proposals(status=status)
+    except tr.RuleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return RuleEvolutionProposalsResponse(proposals=rows, count=len(rows))
+
+
+@router.post("/rules/proposals/generate", response_model=RuleEvolutionProposalsResponse)
+async def generate_rule_proposals(body: GenerateProposalsRequest):
+    """
+    On-demand: analyze recent reviews + the active rules + the empirically-
+    synthesized candidates, and synthesize new evolution proposals right now
+    — the same synthesis a whole-journal review triggers automatically, run
+    without waiting for one.
+    """
+    _require_key()
+    try:
+        rows = await rule_evolution.generate_evolution_proposals(
+            ticker=body.ticker, review_limit=body.review_limit,
+        )
+    except Exception as e:  # noqa: BLE001 — a synthesis failure is not a 500
+        logger.error(f"Evolution proposal generation failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Proposal generation failed: {e}")
+    return RuleEvolutionProposalsResponse(proposals=rows, count=len(rows))
+
+
+@router.post("/rules/proposals/{proposal_id}/apply", response_model=TradingRule)
+async def apply_rule_proposal(proposal_id: int):
+    """
+    Approve and apply one pending proposal: promotes the target rule to its
+    next version (or creates a brand-new one) and logs the change in its
+    Evolution Timeline. The one-click `[Apply Evolution]` action — proposals
+    are never applied automatically.
+    """
+    try:
+        row = rule_evolution.apply_proposal(proposal_id)
+    except tr.RuleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return TradingRule(**row)
+
+
+@router.post("/rules/proposals/{proposal_id}/dismiss", response_model=RuleEvolutionProposal)
+async def dismiss_rule_proposal(proposal_id: int):
+    """Reject a pending proposal — it stays in the record as 'dismissed'."""
+    try:
+        row = tr.dismiss_proposal(proposal_id)
+    except tr.RuleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return row
+
+
+@router.get("/rules/trade-matches", response_model=TradeRuleMatchesResponse)
+async def get_trade_rule_matches():
+    """
+    Every trade's active-rule matches in one round trip, keyed by trade id —
+    what the journal's per-row rule-match badges (e.g. "Golden #1", "Toxic
+    #2") render from, without a request per row.
+    """
+    trades = ps.list_trades()
+    matches = rule_evolution.match_trades_bulk(trades)
+    return TradeRuleMatchesResponse(matches=matches)

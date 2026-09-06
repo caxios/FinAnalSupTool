@@ -69,6 +69,14 @@ from .api_schemas import (
     TradingRule,
     TradingRulesResponse,
     RuleActiveUpdate,
+    RuleEvolutionHistoryItem,
+    RuleEvolutionProposal,
+    RuleEvolutionProposalsResponse,
+    RuleHistoryResponse,
+    GenerateProposalsRequest,
+    TradeRuleMatch,
+    TradeRuleMatches,
+    TradeRuleMatchesResponse,
 )
 
 __all__ = [
@@ -127,4 +135,12 @@ __all__ = [
     "TradingRule",
     "TradingRulesResponse",
     "RuleActiveUpdate",
+    "RuleEvolutionHistoryItem",
+    "RuleEvolutionProposal",
+    "RuleEvolutionProposalsResponse",
+    "RuleHistoryResponse",
+    "GenerateProposalsRequest",
+    "TradeRuleMatch",
+    "TradeRuleMatches",
+    "TradeRuleMatchesResponse",
 ]

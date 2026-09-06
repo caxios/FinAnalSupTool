@@ -55,6 +55,7 @@ import PerformancePanel from "../components/portfolio/PerformancePanel";
 import PortfolioRiskPanel from "../components/portfolio/PortfolioRiskPanel";
 import PersonalEdgeDashboard from "../components/portfolio/PersonalEdgeDashboard";
 import WhatIfSimulator from "../components/portfolio/WhatIfSimulator";
+import TradingRulesDrawer from "../components/portfolio/TradingRulesDrawer";
 
 /** Map a signed number to the app's existing tone classes. */
 function tone(n: number | null | undefined): "positive" | "negative" | "neutral" {
@@ -168,6 +169,10 @@ export default function Portfolio() {
   const [filterTicker, setFilterTicker] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
 
+  // Top-level sub-tabs — lets Investment Rules open full-screen without
+  // scrolling, and keeps the Journal separate from the Holdings dashboard.
+  const [pageTab, setPageTab] = useState<"holdings" | "rules" | "journal">("holdings");
+
   const [ledgerTab, setLedgerTab] = useState<"journal" | "cash">("journal");
   const [perfWindow, setPerfWindow] = useState<PerformanceWindow>("all");
   const { view: currencyView, setView: setCurrencyView } = useCurrencyViewState();
@@ -266,6 +271,30 @@ export default function Portfolio() {
 
       {portfolio.data && <NetWorthHeader data={portfolio.data} />}
 
+      {/* ── Top-level sub-tabs ──────────────────────────────── */}
+      <div className="portfolio-page-tabs">
+        <button
+          className={`portfolio-page-tab ${pageTab === "holdings" ? "is-active" : ""}`}
+          onClick={() => setPageTab("holdings")}
+        >
+          💼 Portfolio &amp; Holdings
+        </button>
+        <button
+          className={`portfolio-page-tab ${pageTab === "rules" ? "is-active" : ""}`}
+          onClick={() => setPageTab("rules")}
+        >
+          🎯 Investment Rules
+        </button>
+        <button
+          className={`portfolio-page-tab ${pageTab === "journal" ? "is-active" : ""}`}
+          onClick={() => setPageTab("journal")}
+        >
+          🧾 Journal &amp; Ledger
+        </button>
+      </div>
+
+      {pageTab === "holdings" && (
+      <>
       {/* ── Cash ───────────────────────────────────────────── */}
       <section className="view-section">
         <h2 className="section-title">💵 Cash</h2>
@@ -555,7 +584,11 @@ export default function Portfolio() {
           onWindowChange={setPerfWindow}
         />
       </section>
+      </>
+      )}
 
+      {pageTab === "journal" && (
+      <>
       {/* ── Log a trade ────────────────────────────────────── */}
       <section className="view-section" id="log-a-trade">
         <h2 className="section-title">✍️ Log a Trade</h2>
@@ -629,12 +662,26 @@ export default function Portfolio() {
           />
         )}
       </section>
+      </>
+      )}
 
+      {pageTab === "rules" && (
+      <>
       {/* ── Personal Trading Edge ──────────────────────────────── */}
       <section className="view-section">
         <h2 className="section-title">🎯 Personal Trading Edge</h2>
         <PersonalEdgeDashboard />
       </section>
+
+      {/* ── Investment Rules command center ───────────────────── */}
+      <section className="view-section">
+        <TradingRulesDrawer
+          mode="embedded"
+          onChanged={() => setRulesVersion((v) => v + 1)}
+        />
+      </section>
+      </>
+      )}
     </div>
     </CurrencyViewProvider>
   );

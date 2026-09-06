@@ -176,8 +176,70 @@ CREATE TABLE IF NOT EXISTS trading_rules (
     payoff_ratio    REAL,
     expectancy      REAL,
     is_active       INTEGER NOT NULL DEFAULT 1,
+    version           INTEGER NOT NULL DEFAULT 1,
+    adherence_count   INTEGER NOT NULL DEFAULT 0,
+    violation_count   INTEGER NOT NULL DEFAULT 0,
+    last_evaluated_at TEXT,
+    notes             TEXT,
     created_at      TEXT NOT NULL
 )
+"""
+
+# Chronological audit trail of every change a rule has gone through — the
+# "발전 이력" the Evolution Timeline UI renders. Never mutated: a row is
+# written once, at the moment the change happens, and stands as the permanent
+# record of what the rule looked like and why it changed, even if later rows
+# supersede it.
+_SCHEMA_RULE_EVOLUTION_HISTORY = """
+CREATE TABLE IF NOT EXISTS rule_evolution_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id         INTEGER NOT NULL,
+    version         INTEGER NOT NULL,
+    change_type     TEXT NOT NULL CHECK (change_type IN
+                      ('created', 'condition_refined', 'stats_updated',
+                       'risk_tightened', 'user_edited', 'deprecated')),
+    trigger_source  TEXT NOT NULL CHECK (trigger_source IN
+                      ('trade_review', 'journal_review', 'manual', 'edge_synthesis')),
+    trigger_id      INTEGER,
+    summary         TEXT NOT NULL,
+    details_json    TEXT,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (rule_id) REFERENCES trading_rules (id) ON DELETE CASCADE
+)
+"""
+
+_SCHEMA_RULE_EVOLUTION_HISTORY_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_rule_evolution_history_rule
+    ON rule_evolution_history (rule_id, created_at)
+"""
+
+# AI Coach-generated evolution proposals awaiting the user's approval — never
+# auto-applied (see the plan's "Proposal Approval vs. Automatic Mutation"
+# decision). `rule_id` is null for a brand-new emergent rule the review
+# surfaced that has no existing rule to refine.
+_SCHEMA_RULE_EVOLUTION_PROPOSALS = """
+CREATE TABLE IF NOT EXISTS rule_evolution_proposals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id         INTEGER,
+    proposal_type   TEXT NOT NULL CHECK (proposal_type IN
+                      ('refine_existing', 'new_rule', 'tighten_risk', 'deprecate')),
+    rule_type       TEXT NOT NULL CHECK (rule_type IN ('golden', 'toxic', 'custom')),
+    title           TEXT NOT NULL,
+    conditions_json TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    rationale       TEXT NOT NULL,
+    evidence_review_id INTEGER,
+    evidence_trade_ids TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'applied', 'dismissed')),
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (rule_id) REFERENCES trading_rules (id) ON DELETE CASCADE
+)
+"""
+
+_SCHEMA_RULE_EVOLUTION_PROPOSALS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_rule_evolution_proposals_status
+    ON rule_evolution_proposals (status, created_at)
 """
 
 # The cash ledger. Every movement of money is one row here, and a balance is a
@@ -239,6 +301,10 @@ _SCHEMA_STATEMENTS = (
     _SCHEMA_CASH_FLOWS,
     _SCHEMA_CASH_FLOWS_INDEX,
     _SCHEMA_TRADING_RULES,
+    _SCHEMA_RULE_EVOLUTION_HISTORY,
+    _SCHEMA_RULE_EVOLUTION_HISTORY_INDEX,
+    _SCHEMA_RULE_EVOLUTION_PROPOSALS,
+    _SCHEMA_RULE_EVOLUTION_PROPOSALS_INDEX,
 )
 
 
@@ -357,6 +423,17 @@ _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("market_rate", "REAL"),
         # On the `fx_in` leg of a conversion back to base currency.
         ("realized_fx_pnl_krw", "REAL"),
+    ),
+    "trading_rules": (
+        # Rule Evolution Engine (portfolio UI update plan): every rule starts
+        # at v1; `apply_proposal` bumps this and writes a matching
+        # `rule_evolution_history` row so the version and the audit trail
+        # never drift apart.
+        ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("adherence_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("violation_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_evaluated_at", "TEXT"),
+        ("notes", "TEXT"),
     ),
 }
 

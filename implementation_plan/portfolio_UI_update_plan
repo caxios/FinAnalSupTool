@@ -1,0 +1,218 @@
+# Evolutionary Custom Investment Rules & Persistent Rules UI Plan
+
+## 1. Overview & Background
+
+The current system synthesizes candidate rules (Golden Setups and Toxic Patterns) based purely on historical realized P/L of closed round trips in [journal_analysis.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/journal_analysis.py#L939-L979) and allows users to adopt them or write manual rules in [PersonalEdgeDashboard.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/PersonalEdgeDashboard.tsx).
+
+However, two critical gaps remain:
+1. **Lack of Rule Evolution via Journal Reviews (복기 기반 규칙 발전의 부재)**:
+   - When a user logs a trade review ([review_logged_trade](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/coach.py#L123-L169)) or triggers a whole journal review ([review_journal](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/coach.py#L171-L198)), **existing active investment rules remain completely static and never evolve**.
+   - Qualitative insights from journal entries (e.g., "FOMO dip-buying failed because 200 EMA support was not confirmed", or "Trades adhering to disciplined valuation had a 75% win rate") are not fed back into refining rule conditions, tightening risk parameters, or discovering emergent rules.
+   - There is no versioning (v1, v2, v3...) or evolution history tracking how a rule changes and adapts over time.
+2. **Lack of Persistent & Readily Accessible Rules UI (투자규칙 상시 조회 환경의 부재)**:
+   - Users currently have to scroll all the way to the bottom of the Portfolio page to see the rules playbook under "Personal Trading Edge".
+   - Users cannot easily view their established rules side-by-side while examining SEC filings, reviewing charts, or entering new trades, without constantly running or re-running full journal reviews.
+
+This plan addresses both needs: **(1) a continuous Rule Evolution Engine** that evaluates adherence, refines conditions, and generates actionable rule evolution proposals whenever reviews are conducted, and **(2) a flexible, persistent UI** featuring an instant-access Modal, a dockable Side Drawer, and a dedicated Portfolio Screen Tab.
+
+---
+
+## 2. User Review & Key Decisions
+
+> [!IMPORTANT]
+> **Rule Evolution: Proposal Approval vs. Automatic Mutation**
+> - **Recommended (Proposal & 1-Click Apply)**: When reviews indicate necessary rule adjustments (e.g., adding a stop-loss threshold or refining an entry condition), the AI Coach generates a **"Rule Evolution Proposal"**. The user reviews the before/after comparison and clicks `[Apply Evolution]` to promote the rule to the next version (`v1` → `v2`). This preserves user agency over their trading principles.
+> - **Auto-Sync Option**: We also provide an optional toggle for statistical figures (win rate, expectancy, adherence count) to auto-update quietly in the background.
+
+> [!TIP]
+> **Hybrid Access: Modal Dialog ↔ Docked Side Drawer ↔ Dedicated Portfolio Tab**
+> - **Anywhere in App**: A top header button `[📜 Rules (N)]` opens a centered **Modal Dialog** immediately. Clicking `[📌 Dock to Right]` pins it as a **450px Side Drawer** (similar to the AI ChatPanel), allowing continuous side-by-side monitoring while browsing financial data or entering orders.
+> - **Within Portfolio**: A top-level sub-tab switcher `[ 💼 Portfolio & Holdings | 🎯 Investment Rules | 🧾 Journal & Ledger ]` allows opening the rules center full-screen without scrolling.
+
+---
+
+## 3. Technical Architecture & Design
+
+### A. Backend: Rule Evolution Engine
+
+```mermaid
+flowchart TD
+    subgraph Trigger["Review Triggers"]
+        T1["Trade Retrospective Review<br/>(POST /coach/review/trade/{id})"]
+        T2["Whole Journal Review<br/>(POST /coach/review/journal)"]
+        T3["On-Demand Evolution Audit<br/>(POST /coach/rules/evolve)"]
+    end
+
+    subgraph Engine["Rule Evolution Engine (rule_evolution.py)"]
+        E1["Rule Adherence & Violation Detection<br/>(Compare trade vs active rules)"]
+        E2["Empirical Metric Re-calculation<br/>(Win Rate, Expectancy, Adherence %)"]
+        E3["LLM Qualitative Synthesis<br/>(Condition refinement & Emergent rules)"]
+    end
+
+    subgraph Storage["Database (db.py)"]
+        DB1["trading_rules (version, adherence counts)"]
+        DB2["rule_evolution_history (audit timeline)"]
+        DB3["rule_evolution_proposals (pending recommendations)"]
+    end
+
+    subgraph FrontendUI["User Interaction (Frontend)"]
+        U1["Header Button / Modal / Docked Drawer"]
+        U2["Evolution Proposal Card with Diff View"]
+        U3["1-Click [Apply Evolution] (v1 -> v2)"]
+    end
+
+    Trigger --> Engine
+    Engine --> Storage
+    Storage --> FrontendUI
+    FrontendUI -- "Approve / Edit" --> DB1
+```
+
+#### 1. Database Schema Extension ([services/db.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/db.py))
+- **`trading_rules` column additions**:
+  - `version`: `INTEGER NOT NULL DEFAULT 1` (tracks rule iteration)
+  - `adherence_count`: `INTEGER NOT NULL DEFAULT 0` (trades that complied with this rule)
+  - `violation_count`: `INTEGER NOT NULL DEFAULT 0` (trades that breached this rule)
+  - `last_evaluated_at`: `TEXT` (ISO timestamp of latest review evaluation)
+  - `notes`: `TEXT` (qualitative notes or evolutionary rationale)
+- **New table `rule_evolution_history`**:
+  ```sql
+  CREATE TABLE IF NOT EXISTS rule_evolution_history (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id         INTEGER NOT NULL,
+      version         INTEGER NOT NULL,
+      change_type     TEXT NOT NULL, -- 'created', 'condition_refined', 'stats_updated', 'risk_tightened', 'user_edited'
+      trigger_source  TEXT NOT NULL, -- 'trade_review', 'journal_review', 'manual', 'edge_synthesis'
+      trigger_id      INTEGER,      -- trade_id or review_id
+      summary         TEXT NOT NULL, -- e.g. "Refined entry conditions after Trade #14 FOMO review"
+      details_json    TEXT,         -- Before/after diff and evidence metrics
+      created_at      TEXT NOT NULL,
+      FOREIGN KEY (rule_id) REFERENCES trading_rules (id) ON DELETE CASCADE
+  );
+  ```
+- **New table `rule_evolution_proposals`**:
+  ```sql
+  CREATE TABLE IF NOT EXISTS rule_evolution_proposals (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id         INTEGER,       -- null if proposing a brand new emergent rule
+      proposal_type   TEXT NOT NULL, -- 'refine_existing', 'new_rule', 'tighten_risk', 'deprecate'
+      rule_type       TEXT NOT NULL, -- 'golden', 'toxic', 'custom'
+      title           TEXT NOT NULL,
+      conditions_json TEXT NOT NULL,
+      description     TEXT NOT NULL,
+      rationale       TEXT NOT NULL, -- why this evolution is suggested based on the review
+      evidence_review_id INTEGER,
+      evidence_trade_ids TEXT,       -- JSON array of cited trade IDs
+      status          TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'applied', 'dismissed'
+      created_at      TEXT NOT NULL
+  );
+  ```
+
+#### 2. Evolution Service Implementation ([services/rule_evolution.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/rule_evolution.py))
+- **`evaluate_trade_against_rules(trade, review, rules)`**:
+  - Compares the trade's `rationale_type`, `strategy_type`, and `emotion_tag` with active rules.
+  - Computes whether the trade adhered to a Golden Rule or triggered a Toxic Pattern, updating `adherence_count` / `violation_count`.
+- **`generate_evolution_proposals(reviews, trades, current_rules)`**:
+  - Combines quantitative round-trip performance with LLM reflection analysis.
+  - Proposes condition additions (e.g. "Only execute breakout if volume > 150%"), parameter tightening, or new emergent rules.
+- **`apply_proposal(proposal_id)`**:
+  - Applies proposed condition/description changes, increments rule version (`v1` → `v2`), logs the transition in `rule_evolution_history`, and marks proposal as `applied`.
+- **`get_rule_history(rule_id)`**:
+  - Retrieves chronological evolution audit trail for a rule.
+
+#### 3. Agent Integration ([agents/coach_agent.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/coach_agent.py))
+- Inject active rules into `analyze_retrospective` and `analyze_journal` prompts.
+- Ensure the Coach agent outputs rule adherence evaluations and evolutionary feedback.
+- Automatically invoke `rule_evolution.record_review_feedback()` upon review completion.
+
+#### 4. Coach Router Extensions ([routers/coach.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/coach.py))
+- `GET /coach/rules/{id}/history`: Fetch version timeline for a rule.
+- `GET /coach/rules/proposals`: List pending evolution proposals.
+- `POST /coach/rules/proposals/generate`: On-demand trigger to analyze recent reviews and synthesize evolution proposals.
+- `POST /coach/rules/proposals/{id}/apply`: Approve and apply a proposal.
+- `POST /coach/rules/proposals/{id}/dismiss`: Dismiss a proposal.
+
+---
+
+### B. Frontend: Persistent Rules UI & Navigation
+
+#### 1. Instant Modal & Dockable Side Drawer ([components/portfolio/TradingRulesDrawer.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/TradingRulesDrawer.tsx))
+- **Global Header Access**:
+  - In [Header.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/Header.tsx), add a `[📜 Investment Rules (N)]` button with a badge indicating active rules and pending proposals (e.g., `🟡 1 proposal`).
+  - Accessible with 1 click from ANY route (Dashboard, Media, Analysis, Macro, Portfolio).
+- **Dual Presentation Modes**:
+  - **Centered Modal**: Opens cleanly over the current view with a backdrop; dismissible via `Esc` or clicking outside.
+  - **Docked Side Drawer**: Clicking `[📌 Dock]` transitions the view into a persistent 450px side panel (matching [ChatPanel.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/ChatPanel.tsx)), allowing continuous reference while working on other views.
+- **Drawer Tabs & Capabilities**:
+  - **Tab 1: Playbook (Established Rules)**:
+    - Cards for Golden Setups, Toxic Patterns, and Custom Rules.
+    - Status toggle (Active/Inactive), Version badge (`v2`), adherence metrics, win rate, expectancy.
+    - Collapsible **Evolution Timeline (발전 이력)**: shows chronological changelog (`v1: created from 5 round trips` → `v2: stop-loss tightened after Review #12`).
+  - **Tab 2: Evolution Proposals (발전 제안)**:
+    - Lists AI Coach proposals derived from recent reviews.
+    - Side-by-side diff of proposed changes with cited review quotes.
+    - `[Apply Evolution]` one-click button to adopt the improvement.
+  - **Tab 3: Add Custom Rule**:
+    - Intuitive form to write and customize user-defined rules anytime.
+
+#### 2. Dedicated Portfolio Sub-Tab ([views/Portfolio.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/Portfolio.tsx))
+- Elevate Portfolio layout with top-level sub-tabs:
+  ```
+  [ 💼 Portfolio & Holdings | 🎯 Investment Rules (Playbook) | 🧾 Journal & Ledger ]
+  ```
+- Switching to `🎯 Investment Rules` presents the complete, full-screen command center for rules, statistics, and evolution proposals without needing to scroll down.
+- Add a **Quick Rules Ribbon** at the top of the Holdings and Trade Journal views: clicking any rule chip directly launches the Rule Detail view.
+
+#### 3. Trade History Rule Badging ([components/portfolio/TradeHistory.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/TradeHistory.tsx))
+- Each trade row shows badges for matching active rules (e.g., `[🛡️ Golden #1]`, `[⚡ Toxic #2]`).
+- Clicking a badge instantly pops open the rule detail modal for quick inspection.
+
+---
+
+## 4. Proposed File Changes
+
+### Backend
+
+| Action | Target File | Summary of Changes |
+|---|---|---|
+| **[MODIFY]** | [backend/services/db.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/db.py) | Add `version`, `adherence_count`, `violation_count` to `trading_rules`; create `rule_evolution_history` & `rule_evolution_proposals` tables |
+| **[NEW]** | [backend/services/rule_evolution.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/rule_evolution.py) | Service implementing rule adherence checks, proposal generation, and version promotion |
+| **[MODIFY]** | [backend/services/trading_rules.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/trading_rules.py) | Support versioning, rule updates, history logging, and joined proposal queries |
+| **[MODIFY]** | [backend/schemas/api_schemas.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/schemas/api_schemas.py) | Pydantic schemas for `RuleEvolutionHistory`, `RuleEvolutionProposal`, and updated `TradingRule` |
+| **[MODIFY]** | [backend/agents/coach_agent.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/coach_agent.py) | Inject active rules into review prompts and trigger evolution synthesis upon review completion |
+| **[MODIFY]** | [backend/routers/coach.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/coach.py) | Add endpoints for rule history, evolution proposals (list, generate, apply, dismiss) |
+
+### Frontend
+
+| Action | Target File | Summary of Changes |
+|---|---|---|
+| **[MODIFY]** | [frontend/src/types.ts](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/types.ts) | Extend `TradingRule` with version and adherence fields; add `RuleEvolutionHistory` and `RuleEvolutionProposal` |
+| **[MODIFY]** | [frontend/src/api.ts](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/api.ts) | Add API client functions for proposals, rule history, and manual evolution trigger |
+| **[NEW]** | [frontend/src/components/portfolio/TradingRulesDrawer.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/TradingRulesDrawer.tsx) | Modal & dockable side drawer component with Playbook, Evolution Proposals, and Timeline |
+| **[MODIFY]** | [frontend/src/components/Header.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/Header.tsx) | Add global `[📜 Rules (N)]` button with proposal indicator; wire up drawer toggle |
+| **[MODIFY]** | [frontend/src/views/Portfolio.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/Portfolio.tsx) | Add top-level sub-tabs (Holdings / Rules / Journal) and quick-access rule chips |
+| **[MODIFY]** | [frontend/src/components/portfolio/TradeHistory.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/portfolio/TradeHistory.tsx) | Display rule match chips in trade rows with click-to-inspect trigger |
+| **[MODIFY]** | [frontend/src/index.css](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/index.css) | Dark mode, glassmorphic styling, and animations for drawer, timeline, and diff cards |
+
+---
+
+## 5. Verification Plan
+
+### Backend Verification
+1. **DB Schema & Migration Check**:
+   - Run verification script to confirm new columns on `trading_rules` and existence of `rule_evolution_history` and `rule_evolution_proposals`.
+2. **Rule Evolution Pipeline Testing**:
+   - Execute an automated script simulating trade reviews with emotional/rationale tags.
+   - Verify that `rule_evolution.generate_evolution_proposals()` generates valid proposals and `apply_proposal()` successfully increments the version (`v1` → `v2`) with audit history.
+3. **API Endpoint Verification**:
+   - Verify HTTP responses for `GET /coach/rules/proposals`, `POST /coach/rules/proposals/{id}/apply`, and `GET /coach/rules/{id}/history`.
+
+### Frontend UI/UX Verification
+1. **Modal & Docked Drawer Interaction**:
+   - Click `[📜 Rules]` in the Header to verify instant modal opening from any page.
+   - Click `[📌 Dock]` to test pinning to the right side while scrolling and interacting with the main view.
+2. **Portfolio Sub-Tab Navigation**:
+   - Switch between `Portfolio & Holdings`, `Investment Rules`, and `Journal & Ledger` without page reloading or scrolling issues.
+3. **End-to-End Review-to-Evolution Flow**:
+   - Trigger a review on a trade or journal.
+   - Confirm that a new evolution proposal appears in the rules drawer with highlighted diffs.
+   - Click `[Apply Evolution]` and verify that the rule's version updates to `v2` and appears in the evolution timeline.

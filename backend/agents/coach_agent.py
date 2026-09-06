@@ -864,6 +864,11 @@ WHAT TO DO:
   because it is aggressive — judge whether it was well-executed FOR that style
   (confirmation used, risk sized, a plan for being wrong), not against a more
   conservative style the user was never attempting.
+- YOUR OWN PLAYBOOK (when present) lists the user's own active Golden Setup /
+  Toxic Pattern rules and whether THIS trade matched one. A toxic match is
+  significant evidence for a LOW `process_quality` — name the matched rule by
+  title and cite its `violation_count`/`expectancy`. A golden match is
+  evidence FOR a high one. Never invent a match that is not in the data.
 
 Output ONLY a single JSON object:
 {
@@ -909,6 +914,10 @@ _RETRO_PROCESS_TEMPLATE = """\
 === POSITION & SIZING AT THAT TIME (computed, in KRW) ===
 {sizing}
 === END SIZING ===
+
+=== YOUR OWN PLAYBOOK (computed — this trade checked against YOUR active rules) ===
+{playbook}
+=== END PLAYBOOK ===
 
 Judge the reasoning. You do not know what happened next.
 """
@@ -1004,6 +1013,13 @@ STYLE — the single most important directive in this prompt:
 - When FUNDAMENTAL MANAGER SYNTHESIS is present (a single-ticker scope), ground
   at least one observation in it — the Manager's verdict, the peer valuation,
   or the forensic QoE read — not only in the user's own trading behaviour.
+- YOUR ACTIVE RULES below shows each rule's CURRENT `adherence_count` /
+  `violation_count` (recomputed from the closed trips that exist right now —
+  not an event log). A Golden rule with a falling adherence share, or a Toxic
+  rule still being violated repeatedly, is priority material: say so plainly,
+  citing the actual counts. Do not propose new rule TEXT yourself — that is a
+  separate, evidence-verified step — just flag which existing rule the record
+  says is or isn't working.
 
 ABSOLUTE RULES:
 - NEVER invent a trade or a diary entry. Every date in `occurrences` MUST appear
@@ -1072,6 +1088,10 @@ _JOURNAL_TEMPLATE = """\
 === FUNDAMENTAL MANAGER SYNTHESIS (tool-retrieved on demand — only present when scoped to one ticker) ===
 {fundamental_synthesis}
 === END SYNTHESIS ===
+
+=== YOUR ACTIVE RULES (computed — current adherence/violation counts, not an event log) ===
+{active_rules}
+=== END ACTIVE RULES ===
 
 === BEHAVIOURAL SUMMARY (computed, not estimated) ===
 {patterns}
@@ -1320,6 +1340,14 @@ class CoachAgent(BaseAgent):
             ticker, trade.get("side"), trade.get("quantity"),
             price=trade.get("execution_price"),
         )
+
+        # This trade's own matches against the user's active rules, computed
+        # in Python (never asserted by the LLM) — the retrospective's own
+        # PLAYBOOK, mirroring the pre-trade review's.
+        from services import rule_evolution
+
+        playbook = rule_evolution.evaluate_trade_against_rules(trade)
+
         pass1_prompt = _RETRO_PROCESS_TEMPLATE.format(
             subject=subject,
             sizing=(
@@ -1335,6 +1363,12 @@ class CoachAgent(BaseAgent):
                 if prior else
                 "(No trades had been logged before this one. You must not cite "
                 "any past trade.)"
+            ),
+            playbook=(
+                json.dumps(playbook, ensure_ascii=False, indent=2, default=str)
+                if (playbook.get("golden_matches") or playbook.get("toxic_matches")
+                    or playbook.get("custom_matches"))
+                else "(No active rule matched this trade's rationale/strategy/emotion.)"
             ),
         )
         if capture is not None:
@@ -1389,6 +1423,10 @@ class CoachAgent(BaseAgent):
         report.ticker = ticker
         report.proposed_action = subject
         report.data_as_of = data_as_of
+        # Guaranteed regardless of whether the model chose to mention it —
+        # same enforcement as the pre-trade review's PLAYBOOK stamp.
+        report.golden_setup_matches = playbook.get("golden_matches", [])
+        report.toxic_pattern_matches = playbook.get("toxic_matches", [])
 
         # Sufficiency is measured over the history that existed AT THE TIME, not
         # over the journal as it stands now — otherwise an old trade inherits
@@ -1446,6 +1484,15 @@ class CoachAgent(BaseAgent):
 
         patterns = await journal_analysis.pattern_summary(ticker=ticker)
         archetype = journal_analysis.archetype_for(ticker=ticker)
+
+        # The user's own active rules, with their CURRENT (recomputed, not
+        # incremented) adherence/violation counts — the Rule Evolution
+        # Engine's read-side; a review's write side is the
+        # `sync_rule_adherence_counts()`/`generate_evolution_proposals()`
+        # calls the router makes after this method returns.
+        from services import trading_rules
+
+        active_rules = trading_rules.list_rules(active_only=True)
 
         # Tool-augmented fundamental grounding — only when this review is
         # scoped to one company; a portfolio-wide review has no single ticker
@@ -1505,6 +1552,10 @@ class CoachAgent(BaseAgent):
             archetype=json.dumps(archetype, ensure_ascii=False, indent=2, default=str),
             fundamental_synthesis=json.dumps(
                 fundamental_digest, ensure_ascii=False, indent=2, default=str
+            ),
+            active_rules=(
+                json.dumps(active_rules, ensure_ascii=False, indent=2, default=str)
+                if active_rules else "(No active rules yet.)"
             ),
             patterns=json.dumps(patterns, ensure_ascii=False, indent=2, default=str),
             prior_reviews=(

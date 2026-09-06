@@ -976,6 +976,23 @@ class TradingRule(BaseModel):
     payoff_ratio: float | None = None
     expectancy: float | None = None
     is_active: bool
+    version: int = Field(1, description="Bumped each time an evolution proposal is applied")
+    adherence_count: int = Field(
+        0, description="Closed round trips currently matching this rule as "
+                       "adherence (a Golden/Custom match) — recomputed, not "
+                       "an event counter"
+    )
+    violation_count: int = Field(
+        0, description="Closed round trips currently matching this rule as "
+                       "a violation (a Toxic match)"
+    )
+    last_evaluated_at: str | None = Field(
+        None, description="When adherence/violation were last recomputed"
+    )
+    notes: str | None = Field(
+        None, description="Qualitative evolutionary rationale from the most "
+                          "recent applied proposal, if any"
+    )
     created_at: str
 
 
@@ -987,6 +1004,86 @@ class TradingRulesResponse(BaseModel):
 class RuleActiveUpdate(BaseModel):
     """Request body for PATCH /coach/rules/{id} — the playbook's toggle switch."""
     is_active: bool
+
+
+# ─────────────────────────────────────────────────────────────
+# Rule Evolution Engine (GET/POST /coach/rules/proposals, /{id}/history)
+# ─────────────────────────────────────────────────────────────
+
+class RuleEvolutionHistoryItem(BaseModel):
+    """One immutable entry in a rule's Evolution Timeline."""
+
+    id: int
+    rule_id: int
+    version: int
+    change_type: str = Field(
+        description="'created', 'condition_refined', 'stats_updated', "
+                    "'risk_tightened', 'user_edited', or 'deprecated'"
+    )
+    trigger_source: str = Field(
+        description="'trade_review', 'journal_review', 'manual', or 'edge_synthesis'"
+    )
+    trigger_id: int | None = Field(None, description="The trade_id or proposal_id that caused this change")
+    summary: str
+    details: dict | None = None
+    created_at: str
+
+
+class RuleEvolutionProposal(BaseModel):
+    """One AI Coach-generated evolution proposal awaiting approval."""
+
+    id: int
+    rule_id: int | None = Field(None, description="Null when proposing a brand-new emergent rule")
+    proposal_type: str = Field(
+        description="'refine_existing', 'new_rule', 'tighten_risk', or 'deprecate'"
+    )
+    rule_type: str
+    title: str
+    conditions: dict[str, str]
+    description: str
+    rationale: str
+    evidence_review_id: int | None = None
+    evidence_trade_ids: list[int] = Field(default_factory=list)
+    status: str = Field(description="'pending', 'applied', or 'dismissed'")
+    created_at: str
+
+
+class RuleEvolutionProposalsResponse(BaseModel):
+    proposals: list[RuleEvolutionProposal] = []
+    count: int = 0
+
+
+class RuleHistoryResponse(BaseModel):
+    history: list[RuleEvolutionHistoryItem] = []
+    count: int = 0
+
+
+class GenerateProposalsRequest(BaseModel):
+    """Request body for POST /coach/rules/proposals/generate."""
+
+    ticker: str | None = Field(None, description="Scope the synthesis to one ticker; omit for the whole journal")
+    review_limit: int = Field(20, ge=1, le=100, description="How many recent reviews to consider")
+
+
+class TradeRuleMatch(BaseModel):
+    """One active rule a trade matches — the compact shape a journal-row badge needs."""
+
+    id: int
+    rule_type: str
+    title: str
+    version: int = 1
+
+
+class TradeRuleMatches(BaseModel):
+    golden: list[TradeRuleMatch] = []
+    toxic: list[TradeRuleMatch] = []
+    custom: list[TradeRuleMatch] = []
+
+
+class TradeRuleMatchesResponse(BaseModel):
+    """Rule matches for every trade in the journal, keyed by trade id (as a string — JSON object keys)."""
+
+    matches: dict[str, TradeRuleMatches] = {}
 
 
 class FxInfo(BaseModel):

@@ -29,11 +29,14 @@ import { DashboardContext } from "./context/DashboardContext";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
+import TradingRulesDrawer from "./components/portfolio/TradingRulesDrawer";
 import FilingDashboard from "./views/FilingDashboard";
 import CompanyMedia from "./views/CompanyMedia";
 import MacroSentiment from "./views/MacroSentiment";
 import DeepAnalysis from "./views/DeepAnalysis";
 import Portfolio from "./views/Portfolio";
+
+type RulesPanelState = "closed" | "modal" | "docked";
 
 export default function App() {
   const [activeTicker, setActiveTicker] = useState<string | null>(null);
@@ -47,6 +50,11 @@ export default function App() {
   const [company, setCompany] = useState<CompanyInfo | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
+  const [rulesPanel, setRulesPanel] = useState<RulesPanelState>("closed");
+  // Bumped after any rule/proposal mutation so the header's [📜 Rules (N)]
+  // badge count stays in sync without polling.
+  const [rulesRefreshKey, setRulesRefreshKey] = useState(0);
+  const bumpRulesRefresh = useCallback(() => setRulesRefreshKey((k) => k + 1), []);
 
   // ── Which companies do we have data for? ───────────────────
   // Merges three sources so the app survives a backend restart: the volatile
@@ -184,7 +192,12 @@ export default function App() {
   return (
     <DashboardContext.Provider value={contextValue}>
       <div className="app">
-        <Header periods={periods} onUploadComplete={handleUploadComplete} />
+        <Header
+          periods={periods}
+          onUploadComplete={handleUploadComplete}
+          onOpenRules={() => setRulesPanel("modal")}
+          rulesRefreshKey={rulesRefreshKey}
+        />
 
         <div className="app-body">
           <Sidebar />
@@ -199,8 +212,25 @@ export default function App() {
             </Routes>
           </main>
 
+          {rulesPanel === "docked" && (
+            <TradingRulesDrawer
+              mode="docked"
+              onClose={() => setRulesPanel("closed")}
+              onChanged={bumpRulesRefresh}
+            />
+          )}
+
           <ChatPanel isOpen={chatOpen} onClose={() => setChatOpen(false)} />
         </div>
+
+        {rulesPanel === "modal" && (
+          <TradingRulesDrawer
+            mode="modal"
+            onClose={() => setRulesPanel("closed")}
+            onDock={() => setRulesPanel("docked")}
+            onChanged={bumpRulesRefresh}
+          />
+        )}
 
         {!chatOpen && (
           <button

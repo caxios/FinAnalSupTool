@@ -3966,3 +3966,193 @@ body {
 }
 .edge-toggle input:checked + .edge-toggle-slider { background: var(--color-success); }
 .edge-toggle input:checked + .edge-toggle-slider::before { transform: translateX(14px); }
+
+
+/* ═══════════════════════════════════════════════════════════════
+   16. Investment Rules — Persistent Drawer & Portfolio Sub-Tabs
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Portfolio page sub-tabs ─────────────────────────────────── */
+.portfolio-page-tabs {
+  display: flex; gap: 4px; margin-bottom: 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.portfolio-page-tab {
+  border: 1px solid transparent; border-bottom: none; background: transparent;
+  color: var(--text-secondary); font-family: inherit; font-size: 13px;
+  font-weight: 600; padding: 10px 16px; border-radius: 8px 8px 0 0; cursor: pointer;
+  transition: all 150ms; transform: translateY(1px);
+}
+.portfolio-page-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
+.portfolio-page-tab.is-active {
+  color: var(--text-primary); background: var(--glass-bg);
+  border-color: var(--border-subtle); border-bottom-color: var(--bg-secondary);
+}
+
+/* ── Header launcher button ──────────────────────────────────── */
+.btn-rules {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  background: var(--glass-bg); border: 1px solid var(--border-subtle);
+  color: var(--text-primary); border-radius: 8px; padding: 7px 14px;
+  font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-rules:hover { border-color: var(--border-active); background: var(--bg-hover); }
+.btn-rules-badge {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 11px; font-weight: 700; color: var(--color-warning);
+  background: rgba(234, 179, 8, 0.12); border-radius: 10px; padding: 1px 7px;
+}
+
+/* ── Drawer chrome: modal / docked / embedded ────────────────── */
+.rules-drawer {
+  display: flex; flex-direction: column; background: var(--bg-secondary);
+}
+.rules-drawer-modal {
+  width: 640px; max-width: 92vw; max-height: 86vh;
+  border-radius: 12px; border: 1px solid var(--border-subtle);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.3); overflow: hidden;
+}
+.rules-drawer-docked {
+  width: 450px; max-width: 90vw; flex-shrink: 0;
+  border-left: 1px solid var(--border-subtle); overflow: hidden;
+}
+.rules-drawer-embedded {
+  background: transparent;
+}
+
+.rules-drawer-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.rules-drawer-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0; }
+.rules-drawer-header-actions { display: flex; align-items: center; gap: 8px; }
+
+.rules-drawer-body {
+  display: flex; flex-direction: column; gap: 14px; overflow-y: auto;
+  padding: 16px 18px; flex: 1;
+}
+.rules-drawer-embedded .rules-drawer-body { padding: 0; }
+
+.rules-drawer-tabs { display: flex; gap: 4px; flex-shrink: 0; }
+.rules-tab {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-secondary); font-family: inherit; font-size: 13px;
+  font-weight: 600; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+  transition: all 150ms;
+}
+.rules-tab:hover { color: var(--text-primary); }
+.rules-tab.is-active {
+  color: var(--text-primary); background: var(--glass-bg);
+  border-color: var(--border-subtle);
+}
+.rules-tab-badge {
+  font-size: 10px; font-weight: 700; color: var(--color-warning);
+  background: rgba(234, 179, 8, 0.15); border-radius: 10px; padding: 1px 6px;
+}
+
+.rules-drawer-content { display: flex; flex-direction: column; gap: 18px; }
+.rules-section { display: flex; flex-direction: column; gap: 10px; }
+
+/* ── Rule cards ───────────────────────────────────────────────── */
+.rule-card {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--border-subtle); border-radius: 10px; padding: 12px 14px;
+  background: var(--glass-bg); transition: opacity 150ms;
+}
+.rule-card.is-inactive { opacity: 0.5; }
+.rule-card-golden { border-left: 3px solid var(--color-success); }
+.rule-card-toxic { border-left: 3px solid var(--color-error); }
+.rule-card-custom { border-left: 3px solid var(--accent-blue); }
+
+.rule-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rule-card-type {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
+.rule-card-version {
+  font-size: 10px; font-weight: 700; color: var(--accent-teal);
+  background: rgba(6, 182, 212, 0.12); border-radius: 4px; padding: 1px 6px;
+}
+.rule-card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); flex: 1; }
+.rule-card-desc { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.rule-card-conditions {
+  font-size: 11px; color: var(--text-secondary); font-family: inherit;
+  background: rgba(148, 163, 184, 0.08); border-radius: 6px; padding: 4px 8px;
+  width: fit-content;
+}
+.rule-card-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.rule-card-stat { font-size: 11px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.rule-card-stat-muted { color: var(--text-muted); }
+.rule-card-notes {
+  margin: 0; font-size: 11px; font-style: italic; color: var(--text-secondary);
+}
+
+.rule-history-toggle { align-self: flex-start; }
+.rule-history-list {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 4px;
+  padding-top: 8px; border-top: 1px dashed var(--border-subtle);
+}
+.rule-history-item {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 11px;
+}
+.rule-history-version { font-weight: 700; color: var(--accent-teal); }
+.rule-history-change {
+  font-weight: 600; color: var(--text-primary); text-transform: capitalize;
+}
+.rule-history-summary { flex: 1 1 200px; color: var(--text-secondary); }
+.rule-history-when { color: var(--text-muted); white-space: nowrap; }
+
+/* ── Evolution proposals ──────────────────────────────────────── */
+.rules-proposals-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 4px;
+}
+.proposal-card {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--border-subtle); border-radius: 10px; padding: 12px 14px;
+  background: var(--glass-bg); margin-bottom: 10px;
+}
+.proposal-card-golden { border-left: 3px solid var(--color-success); }
+.proposal-card-toxic { border-left: 3px solid var(--color-error); }
+.proposal-card-custom { border-left: 3px solid var(--accent-blue); }
+.proposal-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.proposal-card-type {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--accent-teal); background: rgba(6, 182, 212, 0.1);
+  border-radius: 4px; padding: 1px 6px;
+}
+.proposal-card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.proposal-card-desc { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.proposal-card-rationale {
+  margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); font-style: italic;
+}
+.proposal-card-evidence { margin: 0; font-size: 11px; color: var(--text-muted); }
+.proposal-card-actions { display: flex; gap: 10px; margin-top: 4px; }
+
+/* Small non-full-width variant of .btn-primary, for side-by-side action rows */
+.btn-sm { display: inline-block; width: auto; margin-top: 0; padding: 6px 16px; font-size: 12px; }
+
+/* ── Journal-row rule-match badges (TradeHistory) ────────────────── */
+.journal-rule-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0; }
+.journal-rule-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--border-subtle); border-radius: 20px;
+  background: var(--bg-secondary); color: var(--text-secondary);
+  font-size: 11px; font-weight: 600; font-family: inherit;
+  padding: 3px 10px; cursor: pointer; transition: all 150ms;
+}
+.journal-rule-badge:hover { border-color: var(--border-active); color: var(--text-primary); }
+.journal-rule-badge-golden { border-color: rgba(34,197,94,0.4); color: var(--color-success); }
+.journal-rule-badge-toxic { border-color: rgba(239,68,68,0.4); color: var(--color-error); }
+.journal-rule-badge-custom { border-color: rgba(59,130,246,0.4); color: var(--accent-blue); }
+
+/* ── Add Rule form ────────────────────────────────────────────── */
+.add-rule-form { display: flex; flex-direction: column; gap: 14px; }
+/* .trade-field's `flex: 1 1 180px` sets flex-basis on the CROSS axis's
+   opposite here — this form is a column flex container, so a bare
+   180px flex-basis would stretch each field to 180px tall. Reset it
+   for fields used directly (not inside a nested .trade-form-row). */
+.add-rule-form > .trade-field { flex: 1 1 auto; }

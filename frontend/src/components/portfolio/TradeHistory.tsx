@@ -19,11 +19,13 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import type { StoredReview, Trade, CoachReport } from "../../types";
+import type { StoredReview, Trade, CoachReport, TradeRuleMatches, TradingRule } from "../../types";
 import { usePagination } from "../../hooks/usePagination";
 import Pagination from "../media/Pagination";
 import CoachReview from "./CoachReview";
-import { getReviews, getPendingReviews, reviewLoggedTrade } from "../../api";
+import {
+  getReviews, getPendingReviews, reviewLoggedTrade, getTradeRuleMatches, getRules,
+} from "../../api";
 
 /** Marker the backend writes for a position seeded at portfolio setup. */
 const OPENING_RATIONALE = "Opening position recorded at portfolio setup.";
@@ -34,6 +36,42 @@ const EMOTION_EMOJI: Record<string, string> = {
 };
 
 const EXECUTION_SIDES = ["buy", "sell"];
+
+const RULE_BADGE_META: Record<string, { emoji: string; label: string }> = {
+  golden: { emoji: "🛡️", label: "Golden" },
+  toxic: { emoji: "⚡", label: "Toxic" },
+  custom: { emoji: "✏️", label: "Custom" },
+};
+
+/** Quick-inspect popup for a rule matched on a journal row — view-only. */
+function RuleDetailModal({ rule, onClose }: { rule: TradingRule; onClose: () => void }) {
+  const meta = RULE_BADGE_META[rule.rule_type] ?? { emoji: "📜", label: rule.rule_type };
+  const conditionsText =
+    Object.entries(rule.conditions)
+      .filter(([, v]) => v && v !== "none" && v !== "untagged")
+      .map(([k, v]) => `${k.replace("_type", "").replace("_tag", "")}=${v}`)
+      .join(", ") || "(no conditions specified)";
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>{meta.emoji} {meta.label} #{rule.id} · v{rule.version}</h2>
+          <button className="btn-close" onClick={onClose} title="Close">✕</button>
+        </div>
+        <h3 className="rule-card-title">{rule.title}</h3>
+        <p className="rule-card-desc">{rule.description}</p>
+        <div className="rule-card-conditions">{conditionsText}</div>
+        <div className="rule-card-stats" style={{ marginTop: 10 }}>
+          <span className="rule-card-stat">
+            {rule.adherence_count} adherence · {rule.violation_count} violation
+          </span>
+          {!rule.is_active && <span className="rule-card-stat rule-card-stat-muted">inactive</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Badge shown for a non-executed reflection, keyed by `side`. */
 const REFLECTION_BADGE: Record<string, { emoji: string; label: string; title: string }> = {
@@ -96,6 +134,29 @@ export default function TradeHistory({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [reviewing, setReviewing] = useState<number | null>(null);
   const [rowError, setRowError] = useState<{ id: number; msg: string } | null>(null);
+
+  // Rule-match badges — which of the user's own active rules each trade
+  // matches, and the rules themselves (for the quick-inspect popup).
+  const [ruleMatches, setRuleMatches] = useState<Record<string, TradeRuleMatches>>({});
+  const [rulesById, setRulesById] = useState<Record<number, TradingRule>>({});
+  const [inspectRuleId, setInspectRuleId] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [matchesRes, rulesRes] = await Promise.all([getTradeRuleMatches(), getRules()]);
+        if (cancelled) return;
+        setRuleMatches(matchesRes.matches);
+        setRulesById(Object.fromEntries(rulesRes.rules.map((r) => [r.id, r])));
+      } catch {
+        // Badges are an enhancement; the journal itself must still render.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [trades.length]);
 
   const loadReviews = useCallback(async () => {
     try {
@@ -210,6 +271,10 @@ export default function TradeHistory({
               const canReview = !isOpening && !!t.entry_rationale;
               const isOpen = expanded === t.id;
               const reflectionBadge = !isExecution && t.side ? REFLECTION_BADGE[t.side] : undefined;
+              const rowMatches = ruleMatches[String(t.id)];
+              const allRowMatches = rowMatches
+                ? [...rowMatches.golden, ...rowMatches.toxic, ...rowMatches.custom]
+                : [];
 
               return (
                 <article key={t.id} className="journal-entry">
@@ -251,6 +316,24 @@ export default function TradeHistory({
                       </span>
                     )}
                   </div>
+
+                  {allRowMatches.length > 0 && (
+                    <div className="journal-rule-badges">
+                      {allRowMatches.map((m) => {
+                        const meta = RULE_BADGE_META[m.rule_type] ?? { emoji: "📜", label: m.rule_type };
+                        return (
+                          <button
+                            key={`${m.rule_type}-${m.id}`}
+                            className={`journal-rule-badge journal-rule-badge-${m.rule_type}`}
+                            onClick={() => setInspectRuleId(m.id)}
+                            title={m.title}
+                          >
+                            {meta.emoji} {meta.label} #{m.id}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
 
                   {t.entry_rationale ? (
                     <p
@@ -362,6 +445,13 @@ export default function TradeHistory({
             total={pager.total}
           />
         </>
+      )}
+
+      {inspectRuleId !== null && rulesById[inspectRuleId] && (
+        <RuleDetailModal
+          rule={rulesById[inspectRuleId]}
+          onClose={() => setInspectRuleId(null)}
+        />
       )}
     </>
   );

@@ -49,6 +49,12 @@ import type {
   TradingRule,
   TradingRuleCreate,
   TradingRulesResponse,
+  RuleHistoryResponse,
+  RuleEvolutionProposal,
+  RuleEvolutionProposalsResponse,
+  GenerateProposalsRequest,
+  TradeRuleMatchesResponse,
+  ProposalStatus,
   CashPosition,
   CashFlow,
   CashFlowCreate,
@@ -790,6 +796,51 @@ export async function deleteRule(id: number): Promise<void> {
   if (!res.ok && res.status !== 204) {
     throw new Error(`Failed to delete rule ${id} (${res.status})`);
   }
+}
+
+// ── Rule Evolution Engine ──────────────────────────────────
+
+/** A rule's Evolution Timeline: every version change, newest first. */
+export async function getRuleHistory(ruleId: number): Promise<RuleHistoryResponse> {
+  return fetchJson<RuleHistoryResponse>(`${API_BASE}/coach/rules/${ruleId}/history`);
+}
+
+/** AI Coach evolution proposals, newest first. Omit `status` for every status. */
+export async function getRuleProposals(
+  status?: ProposalStatus
+): Promise<RuleEvolutionProposalsResponse> {
+  const qs = status ? `?status=${status}` : "";
+  return fetchJson<RuleEvolutionProposalsResponse>(`${API_BASE}/coach/rules/proposals${qs}`);
+}
+
+/** On-demand: synthesize new evolution proposals from recent reviews right now. */
+export async function generateRuleProposals(
+  body: GenerateProposalsRequest = {}
+): Promise<RuleEvolutionProposalsResponse> {
+  return fetchJson<RuleEvolutionProposalsResponse>(`${API_BASE}/coach/rules/proposals/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Approve and apply one pending proposal (v1 -> v2, or creates a new rule). */
+export async function applyRuleProposal(proposalId: number): Promise<TradingRule> {
+  return fetchJson<TradingRule>(`${API_BASE}/coach/rules/proposals/${proposalId}/apply`, {
+    method: "POST",
+  });
+}
+
+/** Reject a pending proposal. */
+export async function dismissRuleProposal(proposalId: number): Promise<RuleEvolutionProposal> {
+  return fetchJson<RuleEvolutionProposal>(`${API_BASE}/coach/rules/proposals/${proposalId}/dismiss`, {
+    method: "POST",
+  });
+}
+
+/** Every trade's active-rule matches in one round trip, for journal-row badges. */
+export async function getTradeRuleMatches(): Promise<TradeRuleMatchesResponse> {
+  return fetchJson<TradeRuleMatchesResponse>(`${API_BASE}/coach/rules/trade-matches`);
 }
 
 // =============================================================================

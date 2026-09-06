@@ -810,12 +810,12 @@ def trader_archetype(trips: list[dict]) -> dict:
     }
 
 
-def archetype_for(ticker: str | None = None) -> dict:
+def closed_round_trips(ticker: str | None = None) -> list[dict]:
     """
-    :func:`trader_archetype`, self-contained: fetches and filters the journal
-    and matches round trips, for a caller (the Coach agent) that does not
-    already have ``trips`` on hand. Pure Python, no network calls — cheap
-    enough for the hot pre-trade-review path.
+    :func:`_closed_round_trips`, self-contained: fetches and filters the
+    journal for a caller (the Coach agent, the Rule Evolution Engine) that
+    does not already have the raw trade rows on hand. Pure Python, no network
+    calls — cheap enough to call on every review.
     """
     trades = portfolio_service.list_trades(ticker=ticker)
     real = [
@@ -823,7 +823,17 @@ def archetype_for(ticker: str | None = None) -> dict:
         if not portfolio_service.is_opening_entry(t)
         and portfolio_service.is_trade_entry(t)
     ]
-    return trader_archetype(_closed_round_trips(real))
+    return _closed_round_trips(real)
+
+
+def archetype_for(ticker: str | None = None) -> dict:
+    """
+    :func:`trader_archetype`, self-contained: fetches and filters the journal
+    and matches round trips, for a caller (the Coach agent) that does not
+    already have ``trips`` on hand. Pure Python, no network calls — cheap
+    enough for the hot pre-trade-review path.
+    """
+    return trader_archetype(closed_round_trips(ticker))
 
 
 def disposition_effect(trips: list[dict]) -> dict:
