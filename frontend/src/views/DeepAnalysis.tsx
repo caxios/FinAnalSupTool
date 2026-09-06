@@ -29,9 +29,10 @@ import {
 import AnalysisReport from "../components/AnalysisReport";
 import ResearchPaperView from "../components/analysis/ResearchPaperView";
 import ResearchCopilot from "../components/analysis/ResearchCopilot";
+import RawDataView from "../components/analysis/RawDataView";
 import { AGENT_ORDER, AGENT_NAMES, AGENT_ICONS } from "../components/agentMeta";
 
-type ViewMode = "agents" | "paper";
+type ViewMode = "agents" | "paper" | "raw_data";
 
 type AgentStatus = "pending" | "ok" | "error" | "skipped";
 type Phase = "idle" | "analyzing" | "debating" | "synthesis" | "done";
@@ -260,9 +261,10 @@ export default function DeepAnalysis() {
 
   // What to render in the report area: a loaded past run takes precedence.
   const shown:
-    | { scores: ThreeAxisScores; manager: AnalysisRecord["manager"]; reports: AnalysisRecord["reports"]; debate: AnalysisRecord["debate"]; period: string; company: string | null }
+    | { runId: string; scores: ThreeAxisScores; manager: AnalysisRecord["manager"]; reports: AnalysisRecord["reports"]; debate: AnalysisRecord["debate"]; period: string; company: string | null }
     | null = viewingPast
     ? {
+        runId: viewingPast.run_id,
         scores: viewingPast.three_axis_scores,
         manager: viewingPast.manager,
         reports: viewingPast.reports,
@@ -272,6 +274,7 @@ export default function DeepAnalysis() {
       }
     : result
     ? {
+        runId: result.run_id,
         scores: result.three_axis_scores,
         manager: result.manager,
         reports: result.reports,
@@ -420,6 +423,12 @@ export default function DeepAnalysis() {
                 >
                   📄 Research Paper
                 </button>
+                <button
+                  className={`ledger-tab ${viewMode === "raw_data" ? "is-active" : ""}`}
+                  onClick={() => setViewMode("raw_data")}
+                >
+                  🗂️ Raw Source Data
+                </button>
               </div>
               {viewMode === "paper" ? (
                 <ResearchPaperView
@@ -429,6 +438,8 @@ export default function DeepAnalysis() {
                   company={shown.company}
                   ticker={ticker}
                 />
+              ) : viewMode === "raw_data" ? (
+                <RawDataView runId={shown.runId} reports={shown.reports} />
               ) : (
                 <AnalysisReport
                   scores={shown.scores}

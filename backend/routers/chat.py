@@ -257,39 +257,6 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
     )
 
 
-def _rehydrate_raw_data(
-    agent_id: str, ticker: str, debate_store: DebateStore, store: DocumentStore
-) -> str:
-    """
-    Best-effort recovery of a field agent's raw source data when this run's
-    ``agent_contexts`` doesn't have it — either the run predates
-    ``agent_contexts`` being persisted, or its capture came back empty.
-
-    Only ``earnings_call`` and ``sec_filings`` have a real disk-backed source
-    to rehydrate from (a transcript cache and a filing-text cache,
-    respectively); every other field agent falls back to a plain note. A
-    thinner grounding than the original run is still far better than a 409
-    that pretends the agent never reported anything.
-    """
-    if agent_id == "earnings_call":
-        return research_copilot.earnings_text(debate_store, ticker)
-
-    if agent_id == "sec_filings":
-        if not store.has_company(ticker):
-            filing_cache.rehydrate_company_store(ticker, store)
-        if store.has_company(ticker):
-            company = store.get_company_store(ticker)
-            if company.text_store or company.merged_tables:
-                return build_context(company.merged_tables, company.text_store, company.filing_meta)
-
-    return (
-        "(The original raw source data for this agent was not persisted "
-        "with this analysis run and could not be recovered. Answer is "
-        "grounded in the structured findings above and the debate "
-        "transcript only.)"
-    )
-
-
 def _agent_chat_persona(
     agent_id: str, debate_store: DebateStore, ticker: str, store: DocumentStore
 ) -> str:
@@ -370,7 +337,7 @@ def _agent_chat_persona(
                            f"last analysis (it may have been skipped or failed), so "
                            f"there is nothing to discuss with it.",
                 )
-            ctx = {"report": report, "raw_data": _rehydrate_raw_data(agent_id, ticker, debate_store, store)}
+            ctx = {"report": report, "raw_data": research_copilot.rehydrate_raw_data(agent_id, ticker, debate_store, store)}
         raw = (ctx.get("raw_data") or "")[:_CHAT_RAW_CAP] or "(no raw data captured)"
         return _FIELD_CHAT_TEMPLATE.format(
             name=display_name(agent_id),

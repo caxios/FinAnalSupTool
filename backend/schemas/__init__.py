@@ -77,6 +77,7 @@ from .api_schemas import (
     TradeRuleMatch,
     TradeRuleMatches,
     TradeRuleMatchesResponse,
+    AgentRawDataResponse,
 )
 
 __all__ = [
@@ -143,4 +144,5 @@ __all__ = [
     "TradeRuleMatch",
     "TradeRuleMatches",
     "TradeRuleMatchesResponse",
+    "AgentRawDataResponse",
 ]

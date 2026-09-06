@@ -470,6 +470,25 @@ class QueryDataRequest(BaseModel):
     )
 
 
+class AgentRawDataResponse(BaseModel):
+    """
+    Response for GET /analysis/{run_id}/raw/{agent_id} — one agent's raw
+    source data from a specific archived run, fetched on-demand so the main
+    /analyze and /analysis/{run_id} payloads stay light. Powers the Raw
+    Source Data tab in the Deep Analysis view.
+    """
+
+    run_id: str
+    agent_id: str
+    ticker: str | None
+    raw_data: str
+    source: str = Field(
+        description="'captured' (this run's own agent_contexts), 'rehydrated' "
+                    "(recovered from a disk cache for a run predating "
+                    "agent_contexts), or 'unavailable' (no source to recover from)"
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Portfolio & Trading Journal Models (GET/POST /portfolio*)
 # ─────────────────────────────────────────────────────────────

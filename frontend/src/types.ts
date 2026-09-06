@@ -534,6 +534,15 @@ export interface AnalysisHistoryResponse {
   history: AnalysisHistoryItem[];
 }
 
+/** One agent's raw source data from a specific archived run — see GET /analysis/{run_id}/raw/{agent_id}. */
+export interface AgentRawDataResponse {
+  run_id: string;
+  agent_id: string;
+  ticker: string | null;
+  raw_data: string;
+  source: "captured" | "rehydrated" | "unavailable";
+}
+
 /** One entry of GET /analysis/tickers — every ticker with a persisted run. */
 export interface AnalysisTickerInfo {
   ticker: string;

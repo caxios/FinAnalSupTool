@@ -4166,6 +4166,26 @@ body {
 .journal-rule-badge-toxic { border-color: rgba(239,68,68,0.4); color: var(--color-error); }
 .journal-rule-badge-custom { border-color: rgba(59,130,246,0.4); color: var(--accent-blue); }
 
+/* ── Deep Analysis: Raw Source Data tab ──────────────────────────── */
+.raw-data-view { display: flex; flex-direction: column; gap: 12px; }
+.raw-data-agent-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.raw-data-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.raw-data-search { flex: 1 1 260px; }
+.raw-data-match-count { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.raw-data-source {
+  font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 10px;
+  white-space: nowrap; background: rgba(148, 163, 184, 0.12); color: var(--text-secondary);
+}
+.raw-data-source-captured { background: rgba(34, 197, 94, 0.12); color: var(--color-success); }
+.raw-data-source-rehydrated { background: rgba(234, 179, 8, 0.12); color: var(--color-warning); }
+.raw-data-source-unavailable { background: rgba(239, 68, 68, 0.12); color: var(--color-error); }
+.raw-data-text {
+  margin: 0; padding: 14px; border-radius: 8px; background: #0b0d13;
+  border: 1px solid var(--border-subtle); color: var(--text-secondary);
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  max-height: 70vh; overflow-y: auto;
+}
+
 /* ── Add Rule form ────────────────────────────────────────────── */
 .add-rule-form { display: flex; flex-direction: column; gap: 14px; }
 /* .trade-field's `flex: 1 1 180px` sets flex-basis on the CROSS axis's

@@ -8,6 +8,7 @@ The Multi-Agent System endpoints and the persisted analysis history:
   GET  /analysis/history — Past-run summaries (optionally scoped to a ticker)
   GET  /analysis/tickers — Distinct tickers with stored runs
   GET  /analysis/{run_id}— Full stored record for one run
+  GET  /analysis/{run_id}/raw/{agent_id} — One agent's raw source data, on demand
 
 The orchestration itself lives in ``services.pipeline``; these endpoints only
 wire up dependencies and adapt the event stream to the HTTP response shape.
@@ -21,7 +22,7 @@ import logging
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 
-from schemas import AnalyzeRequest, QueryDataRequest
+from schemas import AgentRawDataResponse, AnalyzeRequest, QueryDataRequest
 from rag import history_store
 from services import filing_cache, research_copilot
 from services.storage import (
@@ -177,3 +178,52 @@ async def get_analysis(run_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail=f"No analysis run '{run_id}' found.")
     return record
+
+
+@router.get("/analysis/{run_id}/raw/{agent_id}", response_model=AgentRawDataResponse)
+async def get_agent_raw_data(
+    run_id: str,
+    agent_id: str,
+    store: DocumentStore = Depends(get_document_store),
+    debate_store: DebateStore = Depends(get_debate_store),
+):
+    """
+    One agent's full, unsummarized raw source data from a specific run — the
+    earnings-call transcript, filing text/tables, technical/macro indicators,
+    news articles, or YouTube scripts it actually reasoned over, not just its
+    structured findings. Deliberately its own endpoint rather than a field on
+    the main run payload: every agent's raw_data together can run into the
+    hundreds of KB, which /analyze and /analysis/{run_id} must not pay for on
+    every load when most views only need the structured reports.
+
+    A run predating ``agent_contexts`` being persisted (or a capture that came
+    back empty) is not a 404 — ``research_copilot.rehydrate_raw_data`` recovers
+    what it can from a disk-backed cache (earnings transcripts, filing text)
+    and returns an honest "unavailable" note otherwise; `source` in the
+    response says which happened.
+    """
+    record = history_store.get_analysis(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No analysis run '{run_id}' found.")
+
+    reports = record.get("reports") or {}
+    if agent_id not in reports:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agent_id}' has no report in run '{run_id}' — it may "
+                   f"have been skipped or failed, so there is no raw data for it.",
+        )
+
+    ticker = (record.get("ticker") or "").strip().upper()
+    ctx = (record.get("agent_contexts") or {}).get(agent_id) or {}
+    raw = ctx.get("raw_data")
+    if raw:
+        source = "captured"
+    else:
+        raw = research_copilot.rehydrate_raw_data(agent_id, ticker, debate_store, store)
+        source = "unavailable" if raw.startswith("(") else "rehydrated"
+
+    return AgentRawDataResponse(
+        run_id=run_id, agent_id=agent_id, ticker=record.get("ticker"),
+        raw_data=raw or "(no raw data captured)", source=source,
+    )

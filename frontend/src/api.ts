@@ -33,6 +33,7 @@ import type {
   AnalysisHistoryResponse,
   AnalysisTickersResponse,
   AnalysisRecord,
+  AgentRawDataResponse,
   PortfolioResponse,
   TradesResponse,
   TradeCreate,
@@ -561,6 +562,19 @@ export async function getAnalysisTickers(): Promise<AnalysisTickersResponse> {
 export async function getAnalysisRun(runId: string): Promise<AnalysisRecord> {
   return fetchJson<AnalysisRecord>(
     `${API_BASE}/analysis/${encodeURIComponent(runId)}`
+  );
+}
+
+/**
+ * One agent's raw source data from a specific run, fetched on-demand — kept
+ * out of `getAnalysisRun` because every agent's raw_data together can run
+ * into the hundreds of KB, which the main report view never needs.
+ */
+export async function getAgentRawData(
+  runId: string, agentId: string
+): Promise<AgentRawDataResponse> {
+  return fetchJson<AgentRawDataResponse>(
+    `${API_BASE}/analysis/${encodeURIComponent(runId)}/raw/${encodeURIComponent(agentId)}`
   );
 }
 

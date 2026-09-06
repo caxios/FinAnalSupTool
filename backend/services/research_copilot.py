@@ -194,6 +194,49 @@ def earnings_text(debate_store: DebateStore, ticker: str) -> str:
     )
 
 
+def rehydrate_raw_data(agent_id: str, ticker: str, debate_store: DebateStore, store) -> str:
+    """
+    Best-effort recovery of ONE field agent's raw source data when a specific
+    run's ``agent_contexts`` doesn't have it — either the run predates
+    ``agent_contexts`` being persisted, or its capture came back empty.
+
+    Only ``earnings_call`` and ``sec_filings`` have a real disk-backed source
+    to rehydrate from (a transcript cache and a filing-text cache,
+    respectively); every other field agent's raw_data is the assembled prompt
+    for that specific run's own price/news/macro snapshot and cannot be
+    reconstructed independently, so it falls back to a plain note. A thinner
+    grounding than the original run is still far better than pretending the
+    agent never reported anything.
+
+    ``store`` is a ``services.storage.DocumentStore`` — typed loosely here to
+    avoid a circular import (``services.storage`` does not depend on this
+    module, but importing it just for the annotation is needless coupling).
+
+    Shared by the isolated agent-chat persona (``routers.chat``) and the Raw
+    Source Data endpoint (``routers.analysis``) — both hit exactly this gap,
+    just from different entry points (a ticker's current run vs. an
+    arbitrary archived ``run_id``).
+    """
+    if agent_id == "earnings_call":
+        return earnings_text(debate_store, ticker)
+
+    if agent_id == "sec_filings":
+        from services import filing_cache
+
+        if not store.has_company(ticker):
+            filing_cache.rehydrate_company_store(ticker, store)
+        if store.has_company(ticker):
+            company = store.get_company_store(ticker)
+            if company.text_store or company.merged_tables:
+                return build_context(company.merged_tables, company.text_store, company.filing_meta)
+
+    return (
+        "(The original raw source data for this agent was not persisted "
+        "with this run and could not be independently recovered — it was "
+        "specific to that run's own price/news/macro snapshot at the time.)"
+    )
+
+
 async def _peers_text(ticker: str) -> str:
     """Live peer discovery + metrics — the same module the Peer Comparison agent uses."""
     import json
