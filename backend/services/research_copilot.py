@@ -131,7 +131,7 @@ def _sec_text_text(store: CompanyStore) -> str:
     return build_context({}, store.text_store, store.filing_meta)
 
 
-def _earnings_text(debate_store: DebateStore, ticker: str) -> str:
+def earnings_text(debate_store: DebateStore, ticker: str) -> str:
     """
     The last /analyze run's captured earnings-call raw data — not a new fetch.
     A copilot question is ad-hoc and can arrive many times per session; a live
@@ -147,6 +147,9 @@ def _earnings_text(debate_store: DebateStore, ticker: str) -> str:
       3. ``services.transcript_cache`` — standalone cached transcripts for
          this ticker, fetched by a PAST analysis run's earnings-call agent,
          independent of any single run's debate record.
+
+    Public (not module-private) because ``routers.chat`` reuses it too, for
+    the same "raw_data missing from this run's agent_contexts" fallback.
     """
     import json
 
@@ -234,7 +237,7 @@ async def query_data(
     if scope in ("sec_text", "all"):
         blocks.append(f"--- FILING TEXT (MD&A / FOOTNOTES / RISK FACTORS) ---\n{_sec_text_text(company_store)}")
     if scope in ("earnings", "all"):
-        blocks.append(f"--- EARNINGS CALL MATERIAL ---\n{_earnings_text(debate_store, ticker)}")
+        blocks.append(f"--- EARNINGS CALL MATERIAL ---\n{earnings_text(debate_store, ticker)}")
     if scope in ("peers", "all"):
         blocks.append(f"--- PEER METRICS ---\n{await _peers_text(ticker)}")
 

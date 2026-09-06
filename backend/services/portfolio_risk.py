@@ -119,7 +119,16 @@ async def build_snapshot(
     """
     global _cache, _ctx, _cache_key, _cache_time
 
-    holdings = ps.list_holdings()
+    # `ps.list_holdings()` returns raw rows with no market_value_krw, so
+    # `risk_metrics.compute_portfolio_risk` fell back to `quantity * avg_price`
+    # in the asset's NATIVE currency and added it directly to `cash` (already
+    # base-currency) as if it were the same denomination — a $18,077 USD
+    # holding was weighted as ₩18,077, collapsing its true ~60% equity weight
+    # to a fraction of a percent and inflating cash's share past 100%.
+    # `value_holdings()` attaches `market_value_krw` (see `_attach_dual_
+    # currency`), which `compute_portfolio_risk` prefers, so weighting is
+    # base-currency-consistent with cash.
+    holdings, _ = await ps.value_holdings()
     cash = await _cash_in_base()
 
     today = date.today()
@@ -341,15 +350,11 @@ async def simulate_any_trade(
     resolvable problem (bad ticker, no context yet, no price data) comes back
     as ``{"ticker": ..., "error": "..."}`` rather than an exception.
 
-    Net worth (for the ``dollar_amount`` path) comes from
-    ``portfolio_service.value_holdings`` — the same LIVE, base-currency-
-    converted figure ``coach_agent.position_context`` uses — never from this
-    snapshot's own position values. Those are keyed to whatever
-    ``holdings.market_value_krw``/``market_value`` supplies, which the raw
-    ``holdings`` table does not carry; ``build_snapshot`` falls back to
-    ``quantity * avg_price`` in the asset's NATIVE currency for weighting, and
-    reusing that as a base-currency net worth would silently mix units for a
-    dollar_amount request.
+    Net worth (for the ``dollar_amount`` path) is fetched fresh from
+    ``portfolio_service.value_holdings`` — the same LIVE figure
+    ``coach_agent.position_context`` uses — rather than summed from this
+    snapshot's own ``metrics["positions"]`` weights, so a stale cached
+    snapshot can never silently under/overstate a dollar_amount conversion.
     """
     await build_snapshot()
     if _ctx is None:

@@ -97,7 +97,10 @@ function renderMarkdown(text: string): React.ReactNode[] {
 
 export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const { activeTicker } = useDashboard();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // One conversation per persona, so switching agents and switching back
+  // restores exactly where that conversation left off — each agent is
+  // grounded in isolated data, but the user's own thread with it persists.
+  const [messagesByAgent, setMessagesByAgent] = useState<Record<string, ChatMessage[]>>({});
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,22 +109,34 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   // the debate transcript (requires an /analyze run to have populated them).
   const [selectedAgent, setSelectedAgent] = useState<string>("general");
 
+  const messages = messagesByAgent[selectedAgent] ?? [];
+
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Switching persona starts a fresh conversation — different agents have
-  // isolated contexts, so their histories must not bleed into each other.
+  // Switching persona swaps which conversation is shown, but keeps every
+  // agent's history intact — only the active view changes.
   function handleAgentChange(agent: string) {
     if (agent === selectedAgent) return;
     setSelectedAgent(agent);
-    setMessages([]);
     setError(null);
   }
 
-  // Switching companies swaps the grounding data, so start a fresh
-  // conversation — otherwise earlier answers about the previous company would
-  // read as if they were about this one.
+  // Clear only the CURRENT persona's thread, so the user can start fresh with
+  // one agent without losing conversations with the others.
+  function handleClearThread() {
+    setMessagesByAgent((prev) => {
+      const next = { ...prev };
+      delete next[selectedAgent];
+      return next;
+    });
+    setError(null);
+  }
+
+  // Switching companies swaps the grounding data for every persona, so start
+  // fresh across the board — otherwise earlier answers about the previous
+  // company would read as if they were about this one.
   useEffect(() => {
-    setMessages([]);
+    setMessagesByAgent({});
     setError(null);
   }, [activeTicker]);
 
@@ -134,6 +149,7 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     const q = question.trim();
     if (!q || loading) return;
 
+    const agent = selectedAgent;
     setError(null);
     // Snapshot history BEFORE adding the new user turn.
     const history = messages;
@@ -141,7 +157,7 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       ...messages,
       { role: "user", content: q },
     ];
-    setMessages(nextMessages);
+    setMessagesByAgent((prev) => ({ ...prev, [agent]: nextMessages }));
     setInput("");
     setLoading(true);
 
@@ -149,10 +165,13 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       const res = await askChat(
         q,
         history,
-        selectedAgent === "general" ? undefined : selectedAgent,
+        agent === "general" ? undefined : agent,
         activeTicker
       );
-      setMessages([...nextMessages, { role: "assistant", content: res.answer }]);
+      setMessagesByAgent((prev) => ({
+        ...prev,
+        [agent]: [...(prev[agent] ?? nextMessages), { role: "assistant", content: res.answer }],
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
       // Roll back the optimistic user turn's assistant slot — keep the question
@@ -218,22 +237,34 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
             ✕
           </button>
         </div>
-        <select
-          className="chat-agent-select"
-          value={selectedAgent}
-          onChange={(e) => handleAgentChange(e.target.value)}
-          disabled={loading}
-          title="Choose who to chat with"
-          aria-label="Chat persona"
-        >
-          <option value="general">General Assistant (All Data)</option>
-          <option value="manager">Manager Agent</option>
-          {AGENT_ORDER.map((id) => (
-            <option key={id} value={id}>
-              {AGENT_NAMES[id]} Agent
-            </option>
-          ))}
-        </select>
+        <div className="chat-agent-row">
+          <select
+            className="chat-agent-select"
+            value={selectedAgent}
+            onChange={(e) => handleAgentChange(e.target.value)}
+            disabled={loading}
+            title="Choose who to chat with"
+            aria-label="Chat persona"
+          >
+            <option value="general">General Assistant (All Data)</option>
+            <option value="manager">Manager Agent</option>
+            {AGENT_ORDER.map((id) => (
+              <option key={id} value={id}>
+                {AGENT_NAMES[id]} Agent
+              </option>
+            ))}
+          </select>
+          {messages.length > 0 && (
+            <button
+              className="chat-clear-btn"
+              onClick={handleClearThread}
+              disabled={loading}
+              title={`Clear the conversation with ${isGeneral ? "the General Assistant" : personaName}`}
+            >
+              🗑️
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="chat-messages" ref={scrollRef}>

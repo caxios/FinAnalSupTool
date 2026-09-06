@@ -55,7 +55,7 @@ from services.storage import (
     get_media_cache,
     get_debate_store,
 )
-from services import filing_cache, media_service, journal_analysis, review_store
+from services import filing_cache, media_service, journal_analysis, review_store, research_copilot
 
 router = APIRouter(tags=["chat"])
 
@@ -257,8 +257,41 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
     )
 
 
+def _rehydrate_raw_data(
+    agent_id: str, ticker: str, debate_store: DebateStore, store: DocumentStore
+) -> str:
+    """
+    Best-effort recovery of a field agent's raw source data when this run's
+    ``agent_contexts`` doesn't have it — either the run predates
+    ``agent_contexts`` being persisted, or its capture came back empty.
+
+    Only ``earnings_call`` and ``sec_filings`` have a real disk-backed source
+    to rehydrate from (a transcript cache and a filing-text cache,
+    respectively); every other field agent falls back to a plain note. A
+    thinner grounding than the original run is still far better than a 409
+    that pretends the agent never reported anything.
+    """
+    if agent_id == "earnings_call":
+        return research_copilot.earnings_text(debate_store, ticker)
+
+    if agent_id == "sec_filings":
+        if not store.has_company(ticker):
+            filing_cache.rehydrate_company_store(ticker, store)
+        if store.has_company(ticker):
+            company = store.get_company_store(ticker)
+            if company.text_store or company.merged_tables:
+                return build_context(company.merged_tables, company.text_store, company.filing_meta)
+
+    return (
+        "(The original raw source data for this agent was not persisted "
+        "with this analysis run and could not be recovered. Answer is "
+        "grounded in the structured findings above and the debate "
+        "transcript only.)"
+    )
+
+
 def _agent_chat_persona(
-    agent_id: str, debate_store: DebateStore, ticker: str
+    agent_id: str, debate_store: DebateStore, ticker: str, store: DocumentStore
 ) -> str:
     """
     Build the ISOLATED system prompt for a single-agent chat from that COMPANY's
@@ -267,16 +300,16 @@ def _agent_chat_persona(
     reports + the transcript but no raw data.
 
     Raises HTTPException with a helpful message when the persona can't be served
-    (no analysis yet for this company, agent didn't report, or unknown id).
+    (no analysis yet for this company, or an unknown id) — but NOT merely
+    because raw_data is missing: a report is enough to talk to an agent, with
+    raw_data rehydrated on a best-effort basis (see ``_rehydrate_raw_data``).
 
     A COLD ticker (server restart, or opening an archived Deep Analysis run
     without re-fetching) falls back to the persisted record on disk
     (``rag.history_store``) before giving up — the same "disk survives a
     restart, RAM doesn't" principle as the general assistant's fallback chain
     above. The reconstructed record is cached back into ``debate_store`` so a
-    second question this session is served from memory. Runs saved before
-    ``agent_contexts`` was persisted have no raw_data to offer a field agent
-    (only the Manager persona, which needs reports only, is unaffected).
+    second question this session is served from memory.
     """
     debate = debate_store.get(ticker)
     if not debate:
@@ -324,12 +357,20 @@ def _agent_chat_persona(
     if agent_id in FIELD_AGENT_IDS or agent_id == "macro_history":
         ctx = (debate.get("agent_contexts") or {}).get(agent_id)
         if not ctx:
-            raise HTTPException(
-                status_code=409,
-                detail=f"The '{agent_id}' agent did not produce a report in the "
-                       f"last analysis (it may have been skipped or failed), so "
-                       f"there is nothing to discuss with it.",
-            )
+            # This run's agent_contexts has nothing for this agent — either it
+            # predates agent_contexts being persisted, or the capture came
+            # back empty. The REPORT (not raw_data) is what actually gates
+            # whether there's anything to discuss; a report with no raw_data
+            # still grounds a real conversation, just a thinner one.
+            report = (debate.get("reports") or {}).get(agent_id)
+            if not report:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"The '{agent_id}' agent did not produce a report in the "
+                           f"last analysis (it may have been skipped or failed), so "
+                           f"there is nothing to discuss with it.",
+                )
+            ctx = {"report": report, "raw_data": _rehydrate_raw_data(agent_id, ticker, debate_store, store)}
         raw = (ctx.get("raw_data") or "")[:_CHAT_RAW_CAP] or "(no raw data captured)"
         return _FIELD_CHAT_TEMPLATE.format(
             name=display_name(agent_id),
@@ -346,20 +387,31 @@ def _agent_chat_persona(
     )
 
 
-def _archived_findings_block(record: dict) -> str:
+#  Kept well under `_CHAT_RAW_CAP`: this excerpt is only ONE of several
+#  sections in an already-condensed last-resort brief, not the whole context.
+_ARCHIVED_EARNINGS_CAP = 20_000
+
+
+def _archived_findings_block(record: dict, debate_store: DebateStore, ticker: str) -> str:
     """
     Condense a stored analysis record's own computed findings into a labelled
     Markdown block — the general assistant's LAST-resort grounding when no
     live filing text and no RAG excerpt are available for this ticker (see the
     module docstring's fallback chain).
 
-    Deliberately narrow: only the SEC Filings agent's structured findings (the
-    closest thing this app has to "what the filing said") plus the Manager's
-    executive summary, never the full report set — this is meant to read as a
-    condensed brief, not a data dump the assistant might over-interpret.
+    Primarily the SEC Filings agent's structured findings (the closest thing
+    this app has to "what the filing said") plus the Manager's executive
+    summary — never the full report set, so this still reads as a condensed
+    brief rather than a data dump the assistant might over-interpret. The
+    earnings-call transcript excerpt is the one exception admitted in full
+    (capped): a user asking "what did the CEO actually say" needs the primary
+    quote, not a paraphrase of it, and `research_copilot.earnings_text` already
+    has its own cache-backed fallback chain for recovering it cold.
     """
     reports = record.get("reports") or {}
     sec = reports.get("sec_filings") or {}
+    technical = reports.get("technical_analysis") or {}
+    macro = reports.get("macro_market") or {}
     manager = record.get("manager") or {}
 
     parts = [
@@ -385,9 +437,20 @@ def _archived_findings_block(record: dict) -> str:
     if sec.get("risk_assessment"):
         parts += ["## Risk Assessment",
                    json.dumps(sec["risk_assessment"], ensure_ascii=False, indent=2), ""]
+    if technical:
+        parts += ["## Technical Analysis (from the same run)",
+                   json.dumps(technical, ensure_ascii=False, indent=2), ""]
+    if macro:
+        parts += ["## Macro Market Context (from the same run)",
+                   json.dumps(macro, ensure_ascii=False, indent=2), ""]
     if manager.get("executive_summary"):
         parts += ["## Manager's Executive Summary (from the same run)",
                    manager["executive_summary"], ""]
+
+    earnings_excerpt = research_copilot.earnings_text(debate_store, ticker)
+    if earnings_excerpt and not earnings_excerpt.startswith("(No earnings-call data"):
+        parts += ["## Earnings Call Transcript Excerpt",
+                   earnings_excerpt[:_ARCHIVED_EARNINGS_CAP], ""]
 
     return "\n".join(parts)
 
@@ -443,7 +506,7 @@ async def chat(
                            "it selects which company's analysis run to talk about.",
                 )
             # raises if unavailable
-            system_prompt = _agent_chat_persona(agent_id, debate_store, ticker)
+            system_prompt = _agent_chat_persona(agent_id, debate_store, ticker, store)
         history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
             answer = await ask_persona(question, history, system_prompt)
@@ -506,7 +569,7 @@ async def chat(
         if not filing_text_override:
             record = history_store.get_latest_analysis(ticker)
             if record:
-                archived_findings = _archived_findings_block(record)
+                archived_findings = _archived_findings_block(record, debate_store, ticker)
 
     context = build_context(
         merged_tables, text_store, filing_meta,

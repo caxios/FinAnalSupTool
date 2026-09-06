@@ -1223,9 +1223,12 @@ body {
   justify-content: space-between;
 }
 
+.chat-agent-row { display: flex; align-items: center; gap: 6px; }
+
 /* Persona selector — matches the dark, glassy panel aesthetic. */
 .chat-agent-select {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   background: var(--bg-primary);
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
@@ -1242,6 +1245,20 @@ body {
   border-color: var(--border-active);
 }
 .chat-agent-select:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Per-agent "start fresh" action — clears only the active persona's thread. */
+.chat-clear-btn {
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.chat-clear-btn:hover:not(:disabled) { border-color: var(--color-error); background: var(--bg-hover); }
+.chat-clear-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .chat-title {
   display: flex;
