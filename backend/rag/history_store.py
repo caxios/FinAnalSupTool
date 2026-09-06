@@ -60,10 +60,20 @@ def save_analysis(
     manager: dict | None = None,
     reports: dict | None = None,
     debate: dict | None = None,
+    agent_contexts: dict | None = None,
 ) -> str:
     """
     Persist a completed analysis. Returns the run_id. Never raises — a storage
     failure must not fail the analysis that just succeeded.
+
+    ``agent_contexts`` is each agent's ``{"raw_data": ..., "report": ...}`` —
+    the same shape ``services.storage.DebateStore`` holds in memory for the
+    role-based chat. Persisting it here means a field-agent persona
+    (``routers.chat._agent_chat_persona``) and the Research Copilot's
+    earnings-call scope can still ground answers in the ORIGINAL raw evidence
+    (an earnings-call transcript, filing text excerpts, ...) after a server
+    restart or when reopening an archived run — not just the structured
+    report, which is a lossy summary of that evidence.
     """
     try:
         _HISTORY_DIR.mkdir(exist_ok=True)
@@ -80,6 +90,7 @@ def save_analysis(
             "manager": manager,
             "reports": reports or {},
             "debate": debate,
+            "agent_contexts": agent_contexts or {},
         }
         path = _HISTORY_DIR / f"{_safe(ticker)}_{run_id}.json"
         path.write_text(json.dumps(record, indent=2), encoding="utf-8")

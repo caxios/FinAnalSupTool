@@ -137,16 +137,57 @@ def _earnings_text(debate_store: DebateStore, ticker: str) -> str:
     A copilot question is ad-hoc and can arrive many times per session; a live
     Tavily call per question would be both slow and needlessly repeat a fetch
     the last analysis run already paid for.
+
+    Falls back, in order, for a COLD ticker (server restart, or an archived
+    run opened without re-fetching):
+      1. In-memory ``DebateStore`` (fastest, the common case — unchanged above).
+      2. ``rag.history_store``'s persisted record — its own captured raw_data
+         if the run predates/postdates a restart, else the (thinner, but still
+         grounded) structured ``earnings_call`` report.
+      3. ``services.transcript_cache`` — standalone cached transcripts for
+         this ticker, fetched by a PAST analysis run's earnings-call agent,
+         independent of any single run's debate record.
     """
+    import json
+
+    from rag import history_store
+    from services import transcript_cache
+
     record = debate_store.get(ticker) or {}
     ctx = (record.get("agent_contexts") or {}).get("earnings_call")
     raw = (ctx or {}).get("raw_data")
     if raw:
         return raw
+
+    archived = history_store.get_latest_analysis(ticker)
+    if archived:
+        archived_ctx = (archived.get("agent_contexts") or {}).get("earnings_call")
+        archived_raw = (archived_ctx or {}).get("raw_data")
+        if archived_raw:
+            return archived_raw
+        # A record saved before `agent_contexts` was persisted has no raw_data
+        # — its structured findings are still a real, if thinner, grounding.
+        report = (archived.get("reports") or {}).get("earnings_call")
+        if report:
+            return json.dumps(report, ensure_ascii=False, indent=2, default=str)
+
+    quarters = transcript_cache.list_cached_quarters(ticker)
+    parts: list[str] = []
+    for q in quarters:
+        year_str, _, quarter_str = q.partition("Q")
+        if not (year_str.isdigit() and quarter_str.isdigit()):
+            continue
+        doc = transcript_cache.get_transcript(ticker, int(year_str), int(quarter_str))
+        if doc and doc.found and doc.text:
+            parts.append(f"=== {ticker} {q} Earnings Call ({doc.source}) ===\n{doc.text}")
+    if parts:
+        return "\n\n".join(parts)
+
     return (
-        "(No earnings-call data available. This scope reuses the transcripts "
-        "captured by the last Deep Analysis run for this ticker rather than "
-        "fetching new ones — run a Deep Analysis first to populate it.)"
+        "(No earnings-call data available. This scope reuses transcripts "
+        "captured by a Deep Analysis run or a standalone search for this "
+        "ticker rather than fetching new ones — run a Deep Analysis first "
+        "to populate it.)"
     )
 
 

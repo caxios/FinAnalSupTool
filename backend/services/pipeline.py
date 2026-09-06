@@ -324,6 +324,11 @@ async def analyze_pipeline(
     })
 
     # Persist to history: disk (authoritative) + best-effort vector store.
+    # `agent_contexts` carries each agent's raw_data (earnings-call transcript
+    # excerpts, filing text, etc.) alongside its report — the same payload
+    # already handed to `debate_store.replace()` above — so an archived run
+    # opened after a restart, or a field-agent chat persona, can still ground
+    # answers in the original evidence rather than only the report summary.
     run_id = history_store.save_analysis(
         company=company_name, ticker=ticker,
         analysis_period=f"{start_date}..{end_date}",
@@ -331,6 +336,7 @@ async def analyze_pipeline(
         manager=manager_payload if isinstance(manager_payload, dict) else None,
         reports=slots,
         debate=transcript.model_dump() if transcript else None,
+        agent_contexts=agent_contexts,
     )
 
     result = {

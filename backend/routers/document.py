@@ -49,17 +49,26 @@ def _company_or_404(store: DocumentStore, ticker: str) -> CompanyStore:
     """
     Resolve a ticker to its :class:`CompanyStore`, or 404 with what IS available.
 
-    Deliberately does not auto-create: a typo'd symbol must not register an empty
-    store and then look like a company with no data.
+    Before giving up, tries :func:`filing_cache.rehydrate_company_store` — a
+    server restart, or opening this ticker for the first time this session
+    after it was ingested in an earlier one, must not require re-uploading
+    filings already sitting on disk. The 404 check itself still looks at
+    ACTUAL data (``filing_meta``), not registry membership: rehydration always
+    registers a store for the ticker (even when its cache file doesn't exist),
+    so a typo'd symbol correctly still 404s rather than looking like a company
+    with no data.
     """
     if not store.has_company(ticker):
+        filing_cache.rehydrate_company_store(ticker, store)
+    company = store.get_company_store(ticker)
+    if not company.filing_meta:
         available = store.list_tickers()
         raise HTTPException(
             status_code=404,
             detail=f"No data for ticker '{ticker}'. "
                    f"Available: {available or '(none — upload filings first)'}.",
         )
-    return store.get_company_store(ticker)
+    return company
 
 
 # =============================================================================
@@ -278,10 +287,15 @@ async def list_periods(
     """
     # An unknown ticker here is an empty list rather than a 404: the frontend
     # polls this while switching companies, before any filing has been ingested.
+    # Try disk-cache rehydration first — this is exactly the "before any filing
+    # has been ingested THIS SESSION" case for a ticker that was actually
+    # ingested in an earlier one.
     if not store.has_company(ticker):
-        return {"ticker": ticker, "periods": []}
+        filing_cache.rehydrate_company_store(ticker, store)
 
     company = store.get_company_store(ticker)
+    if not company.filing_meta:
+        return {"ticker": ticker, "periods": []}
     return {
         "ticker": ticker,
         "periods": [

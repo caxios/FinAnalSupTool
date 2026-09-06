@@ -106,6 +106,21 @@ def has_cache(ticker: str) -> bool:
     return _path(ticker).exists()
 
 
+def list_cached_tickers() -> list[str]:
+    """
+    Every ticker with a filing cache on disk, sorted.
+
+    Lets a cold-started process (or one that never ingested a ticker THIS
+    session) discover what data actually exists, so ``GET /companies`` can
+    list a company whose filings were fetched before the last restart —
+    without this, a company only ever appears once something in the current
+    session happens to call :func:`rehydrate_company_store` for it first.
+    """
+    if not _CACHE_DIR.exists():
+        return []
+    return sorted(f.stem for f in _CACHE_DIR.glob("*.json"))
+
+
 def rehydrate_company_store(ticker: str, store: DocumentStore) -> bool:
     """
     Restore ``ticker``'s cached filing text/tables into ``store``, IF that

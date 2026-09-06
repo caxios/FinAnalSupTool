@@ -46,7 +46,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from schemas import ChatRequest, ChatResponse
 from gemini_chat import build_context, ask_gemini, ask_persona, gemini_api_key
 from rag import history_store, sec_rag
-from agents import render_transcript, display_name, FIELD_AGENT_IDS
+from agents import render_transcript, display_name, DebateTranscript, FIELD_AGENT_IDS
 from services.storage import (
     DocumentStore,
     MediaCache,
@@ -213,6 +213,14 @@ async def _coach_chat_persona(debate_store: DebateStore, ticker: str | None) -> 
     sec_report = technical_report = None
     if ticker:
         record = debate_store.get(ticker) or {}
+        if not record:
+            # COLD ticker: no live debate this session — fall back to the
+            # persisted analysis record rather than leaving the coach with
+            # no fundamental/technical pillar for a company that HAS been
+            # analyzed, just not in this process's lifetime.
+            archived = history_store.get_latest_analysis(ticker)
+            if archived:
+                record = {"reports": archived.get("reports") or {}}
         reports = record.get("reports") or {}
         sec_report = reports.get("sec_filings")
         technical_report = reports.get("technical_analysis")
@@ -260,8 +268,36 @@ def _agent_chat_persona(
 
     Raises HTTPException with a helpful message when the persona can't be served
     (no analysis yet for this company, agent didn't report, or unknown id).
+
+    A COLD ticker (server restart, or opening an archived Deep Analysis run
+    without re-fetching) falls back to the persisted record on disk
+    (``rag.history_store``) before giving up — the same "disk survives a
+    restart, RAM doesn't" principle as the general assistant's fallback chain
+    above. The reconstructed record is cached back into ``debate_store`` so a
+    second question this session is served from memory. Runs saved before
+    ``agent_contexts`` was persisted have no raw_data to offer a field agent
+    (only the Manager persona, which needs reports only, is unaffected).
     """
     debate = debate_store.get(ticker)
+    if not debate:
+        record = history_store.get_latest_analysis(ticker)
+        if record:
+            # The persisted `debate` field is a plain dict (JSON round-trip),
+            # while `render_transcript` below requires the actual
+            # `DebateTranscript` Pydantic model (it reads `.history`, not
+            # `["history"]`) — the live `DebateStore` only ever holds the
+            # real object because `pipeline.py` writes it there directly.
+            raw_transcript = record.get("debate")
+            transcript = DebateTranscript(**raw_transcript) if raw_transcript else None
+            debate = {
+                "reports": record.get("reports") or {},
+                "agent_contexts": record.get("agent_contexts") or {},
+                "transcript": transcript,
+                "manager": record.get("manager"),
+                "period": record.get("analysis_period"),
+                "company": record.get("company"),
+            }
+            debate_store.replace(ticker, debate)
     if not debate:
         raise HTTPException(
             status_code=409,

@@ -60,7 +60,21 @@ def list_companies(store: DocumentStore) -> CompanyResponse:
     switcher. A store whose filings carry no CIK (an unidentified upload) still
     appears, keyed by the ticker its store is registered under, so the user can
     always reach their data.
+
+    First auto-discovers tickers cached on disk (``filing_cache``) that this
+    process has not yet seen this session — a fresh restart with an empty
+    in-memory ``DocumentStore`` would otherwise report NO companies at all,
+    even though their filings are sitting on disk from a prior run. Each
+    discovered ticker is rehydrated into ``store`` before it is listed, so the
+    same request that reveals a company also leaves it ready to serve
+    ``/company``, ``/financials``, etc. without a second round trip.
     """
+    from services import filing_cache
+
+    for tk in filing_cache.list_cached_tickers():
+        if not store.has_company(tk):
+            filing_cache.rehydrate_company_store(tk, store)
+
     companies: list[CompanyInfo] = []
     for tk in store.list_tickers():
         cs = store.get_company_store(tk)

@@ -342,7 +342,24 @@ async def search_earnings_transcript(
     """
     Find a quarter's earnings-call transcript, trying each source in priority
     order (investing.com → Motley Fool). Returns the first full transcript found.
+
+    Cache-first (``services.transcript_cache``): a transcript for a given
+    (ticker, year, quarter) never changes once found, and a NEGATIVE result is
+    cached too so a quarter with nothing posted yet doesn't trigger the same
+    two fruitless searches on every question. Skipped entirely when there is
+    no ``ticker`` to key the cache on.
     """
+    from services import transcript_cache
+
+    if ticker:
+        cached = transcript_cache.get_transcript(ticker, year, quarter)
+        if cached is not None:
+            logger.info(
+                f"[news] transcript cache hit for {ticker} {year}Q{quarter} "
+                f"(found={cached.found})"
+            )
+            return cached
+
     if not tavily_api_key():
         return TranscriptDoc(
             configured=False,
@@ -354,23 +371,30 @@ async def search_earnings_transcript(
     ticker_hint = f" {ticker}" if ticker else ""
     query = f"{label}{ticker_hint} Q{quarter} {year} earnings call transcript"
 
+    result: TranscriptDoc | None = None
     last_msg: str | None = None
     for domain, hint in EARNINGS_SOURCES:
         doc = await _tavily_transcript(
             query, domain, hint, company, ticker, year, quarter
         )
         if doc.found:
-            return doc
+            result = doc
+            break
         if doc.message:
             last_msg = doc.message
 
-    return TranscriptDoc(
-        configured=True,
-        found=False,
-        message=last_msg
-        or f"No earnings-call transcript found for {label} Q{quarter} {year} "
-           f"on investing.com or Motley Fool.",
-    )
+    if result is None:
+        result = TranscriptDoc(
+            configured=True,
+            found=False,
+            message=last_msg
+            or f"No earnings-call transcript found for {label} Q{quarter} {year} "
+               f"on investing.com or Motley Fool.",
+        )
+
+    if ticker:
+        transcript_cache.save_transcript(ticker, year, quarter, result)
+    return result
 
 
 async def search_macro_news(

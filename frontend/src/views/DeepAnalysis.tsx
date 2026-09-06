@@ -244,6 +244,20 @@ export default function DeepAnalysis() {
     [ticker, setActiveTicker]
   );
 
+  // Auto-load the most recent analysis on entry / ticker change, instead of
+  // resetting to a blank form the user has to hunt the sidebar to escape.
+  // Fires once `history` actually resolves (after the ticker-change-reset
+  // effect above has already cleared `viewingPast`/`result` for the new
+  // ticker), and only when nothing is already showing or in flight — a fresh
+  // run the user just kicked off, or a past run they already opened, must
+  // never be silently replaced by this.
+  useEffect(() => {
+    if (!viewingPast && !result && !running && history.length > 0) {
+      openPastRun(history[0].run_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history]);
+
   // What to render in the report area: a loaded past run takes precedence.
   const shown:
     | { scores: ThreeAxisScores; manager: AnalysisRecord["manager"]; reports: AnalysisRecord["reports"]; debate: AnalysisRecord["debate"]; period: string; company: string | null }

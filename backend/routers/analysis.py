@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 
 from schemas import AnalyzeRequest, QueryDataRequest
 from rag import history_store
-from services import research_copilot
+from services import filing_cache, research_copilot
 from services.storage import (
     DocumentStore,
     DebateStore,
@@ -146,12 +146,20 @@ async def query_data(
     extraction call scoped to `data_scope`, meant for drafting a research note
     without leaving the Deep Analysis workspace.
     """
-    company_store = store.get_company_store(body.ticker.strip().upper())
+    ticker = body.ticker.strip().upper()
+    # COLD ticker (server restart, or an archived run opened without
+    # re-fetching): rehydrate from the on-disk filing cache BEFORE the copilot
+    # reads it, so `financials`/`sec_text` scopes are not silently answered
+    # from an empty store. Mutates the same CompanyStore object `store` will
+    # hand back below — no need to re-resolve it afterward.
+    if not store.has_company(ticker):
+        filing_cache.rehydrate_company_store(ticker, store)
+    company_store = store.get_company_store(ticker)
     try:
         return await research_copilot.query_data(
             company_store=company_store,
             debate_store=debate_store,
-            ticker=body.ticker,
+            ticker=ticker,
             query=body.query,
             data_scope=body.data_scope,
         )

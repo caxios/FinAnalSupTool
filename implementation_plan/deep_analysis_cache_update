@@ -1,0 +1,156 @@
+# Phase 1: Unified Persistent Storage, Auto-Rehydration & Non-Volatile Ask AI Access
+
+## Overview
+Currently, the system suffers from a critical architectural disconnect between **volatile in-memory stores (RAM)** and **on-disk caches**:
+1. When Deep Analysis or SEC ingestion finishes, files are written to disk (`backend/analysis_history/`, `backend/filing_cache/`).
+2. However, runtime endpoints (`_company_or_404`, `list_companies`, `_agent_chat_persona`, `_earnings_text`) look **only at in-memory dictionaries** (`DocumentStore`, `DebateStore`).
+3. Whenever the server restarts or a browser session resets, memory is wiped. As a result:
+   - `GET /company?ticker=AVGO` throws a 404 (`"No data for ticker 'AVGO'. (upload filings first)"`).
+   - Chatting with an agent throws a 409 (`"No analysis has been run for 'AVGO' yet. Run POST /analyze for it first..."`).
+   - Data Copilot claims: `"No earnings-call data available... run a Deep Analysis first"`.
+   - Deep Analysis UI resets to an empty input form on refresh instead of auto-displaying the latest stored report.
+   - Raw earnings call transcripts are never cached on disk, triggering repetitive web search calls.
+
+This plan solves this completely by establishing a **Cache-First Unified Storage Architecture**:
+- **Fetch once → Store permanently on disk → Agents, Chat, Copilot, and UI all read seamlessly from disk.**
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Zero Re-Fetch Guarantee**:
+> With these changes:
+> - Once SEC filings are downloaded for a company, they are never re-fetched unless explicitly requested via "Fetch Fresh SEC".
+> - Once an earnings call transcript is fetched for a quarter (e.g. `AVGO_2026Q1`), it is saved to disk (`backend/transcript_cache/`) and reloaded in 0ms without consuming search API credits.
+> - Once a Deep Analysis is executed, its full artifact (agent reports, debate transcript, and raw transcripts) is preserved on disk and auto-loaded on page refresh.
+
+> [!IMPORTANT]
+> **Auto-Load on Page Refresh**:
+> When entering Deep Analysis or refreshing the browser, if past analysis runs exist for the active ticker, the UI will **automatically display the most recent analysis run** (with a clear header: *"Viewing archived analysis from [Date] · [Run Fresh Analysis]"*). The user will no longer see a blank form or need to manually hunt for past runs in the sidebar.
+
+---
+
+## Open Questions
+
+> [!NOTE]
+> 1. **Data Copilot Fallback Priority**: When Data Copilot or Ask AI receives an earnings-call question, we propose reading from:
+>    - (1) In-memory `debate_store` (fastest if hot),
+>    - (2) On-disk `analysis_history/{TICKER}_{run_id}.json` (full report & transcripts),
+>    - (3) On-disk `transcript_cache/{TICKER}_*.json` (raw transcripts).
+>    This ensures answers are always provided if data has ever been fetched.
+
+---
+
+## Proposed Changes
+
+### Backend: Persistent Caches & Auto-Rehydration
+
+#### [NEW] [transcript_cache.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/transcript_cache.py)
+- Disk cache for full earnings call transcripts under `backend/transcript_cache/{TICKER}_{year}Q{quarter}.json`.
+- Functions:
+  - `get_transcript(ticker: str, year: int, quarter: int) -> dict | None`
+  - `save_transcript(ticker: str, year: int, quarter: int, doc: TranscriptDoc) -> None`
+  - `list_cached_quarters(ticker: str) -> list[str]`
+
+#### [MODIFY] [news_provider.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/providers/news_provider.py)
+- In `search_earnings_transcript()`:
+  - Check `transcript_cache.get_transcript(ticker, year, quarter)` first.
+  - If found, return instantly without calling Tavily.
+  - If not found, run Tavily search; upon success, save to `transcript_cache`.
+
+#### [MODIFY] [filing_cache.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/filing_cache.py)
+- Add `list_cached_tickers() -> list[str]` to discover all companies with saved filings on disk.
+- Ensure `rehydrate_company_store()` robustly restores `text_store`, `table_store`, `filing_meta`, and `metrics_store` and calls `rebuild_merged_tables()`.
+
+#### [MODIFY] [company_service.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/company_service.py)
+- In `list_companies(store: DocumentStore)`:
+  - Auto-discover tickers from `filing_cache.list_cached_tickers()`.
+  - If any cached ticker is not yet in `store`, automatically call `filing_cache.rehydrate_company_store(tk, store)` so `store` is repopulated immediately on startup.
+
+#### [MODIFY] [document.py (router)](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/document.py)
+- In `_company_or_404(store, ticker)`:
+  - If `not store.has_company(ticker)`: attempt `filing_cache.rehydrate_company_store(ticker, store)` before raising 404.
+- In `list_periods(ticker, store)`:
+  - If `not store.has_company(ticker)`: attempt `filing_cache.rehydrate_company_store(ticker, store)`.
+
+#### [MODIFY] [history_store.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/rag/history_store.py)
+- In `save_analysis()`:
+  - Add `agent_contexts: dict | None = None` parameter.
+  - Persist `agent_contexts` into the JSON record on disk so raw transcripts and evidence are preserved alongside reports.
+- In `get_latest_analysis(ticker: str) -> dict | None`:
+  - Ensure fast retrieval of the newest record for any ticker.
+
+#### [MODIFY] [pipeline.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/pipeline.py)
+- When saving analysis at the end of the pipeline:
+  - Pass `agent_contexts=agent_contexts` to `history_store.save_analysis()`.
+
+#### [MODIFY] [chat.py (router)](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/chat.py)
+- In `_agent_chat_persona(agent_id, debate_store, ticker)`:
+  - If `debate_store.get(ticker)` is None:
+    - Load latest analysis via `history_store.get_latest_analysis(ticker)`.
+    - If found, populate `debate` context and cache back to `debate_store.replace(ticker, ...)`.
+  - **Eliminates the 409 `"No analysis has been run for '{ticker}' yet"` error** when historical analysis exists on disk!
+- In `_coach_chat_persona()`:
+  - If `debate_store.get(ticker)` is None, load SEC/technical reports from `history_store.get_latest_analysis(ticker)`.
+
+#### [MODIFY] [research_copilot.py](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/research_copilot.py)
+- In `_earnings_text(debate_store, ticker)`:
+  - Check in-memory `debate_store`.
+  - Fallback to `history_store.get_latest_analysis(ticker)` (reads `agent_contexts.earnings_call.raw_data` or `reports.earnings_call`).
+  - Fallback to `transcript_cache`.
+  - Returns grounded earnings-call text even after server restarts.
+- In `_financials_text()` and `_sec_text()`:
+  - If `store` is empty, auto-rehydrate via `filing_cache.rehydrate_company_store(ticker, store)`.
+
+---
+
+### Frontend: Auto-Loading & Seamless Persistence
+
+#### [MODIFY] [DeepAnalysis.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/DeepAnalysis.tsx)
+- On load / ticker change:
+  - After fetching history summaries via `getAnalysisHistory(ticker)`:
+  - If `viewingPast` is `null`, `result` is `null`, and `history.length > 0`:
+    - Automatically call `openPastRun(history[0].run_id)`!
+- Display an informative top banner when viewing an archived report:
+  - *"Viewing latest analysis from [Date] for [Ticker] · [Run Fresh Analysis]"*.
+- User can immediately inspect reports, 3-axis scores, agent details, and debate without clicking sidebar cards or re-running.
+
+#### [MODIFY] [App.tsx](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/App.tsx)
+- In `refreshCompanies()`:
+  - Aggregates tickers from `getCompanies()` (now auto-rehydrating from disk) and `getAnalysisHistory()`.
+  - Ensures that on browser refresh, `activeTicker` defaults to the most recently analyzed ticker and loads its periods/financials without 404s.
+
+---
+
+## Verification Plan
+
+### Automated Verification
+1. **Server Restart Resilience Test**:
+   - Save analysis for `AVGO` and verify files in `backend/analysis_history/` and `backend/filing_cache/`.
+   - Kill and restart the `uvicorn` backend server process completely (simulating fresh start).
+   - Call `GET http://localhost:8000/companies`:
+     - Must return `AVGO` in company list.
+   - Call `GET http://localhost:8000/company?ticker=AVGO`:
+     - Must return 200 OK (derived from disk cache, NOT 404).
+   - Call `GET http://localhost:8000/periods?ticker=AVGO`:
+     - Must return 200 OK with all filing periods.
+   - Call `POST http://localhost:8000/chat` with `agent_id="earnings_call"` and `ticker="AVGO"`:
+     - Must return 200 OK with answers grounded in AVGO's earnings calls (NO 409 error).
+   - Call `POST http://localhost:8000/analysis/query-data` with `scope="earnings"`:
+     - Must return grounded earnings text without asking to run `POST /analyze`.
+2. **Transcript Cache Test**:
+   - Run `search_earnings_transcript()` for AVGO Q2 2026.
+   - Verify file is written to `backend/transcript_cache/AVGO_2026Q2.json`.
+   - Call again; verify response is returned in <5ms without external HTTP calls.
+
+### Manual Verification
+1. **Browser Refresh Test in Deep Analysis**:
+   - Navigate to `http://localhost:5173`.
+   - Go to Deep Analysis tab.
+   - Refresh browser (F5).
+   - Verify: The latest AVGO analysis report renders immediately on the screen without clicking the sidebar and without running a new analysis.
+2. **Ask AI Chat Verification**:
+   - Open Ask AI drawer while on AVGO.
+   - Ask: "최근 어닝콜 Q&A에서 경영진이 제시한 핵심 가이던스와 애널리스트들의 질문 내용은 무엇인가요?"
+   - Verify: AI answers with specific details from the stored earnings calls without asking to run Deep Analysis.
