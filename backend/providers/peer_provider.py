@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # tier-2 discovery.
 _CLUSTERS: dict[str, dict] = {
     "semiconductors": {
-        "members": ["NVDA", "AMD", "INTC", "TSM", "AVGO", "QCOM"],
+        "members": ["NVDA", "AMD", "INTC", "TSM", "AVGO", "QCOM", "MRVL"],
         "sector_keywords": ["semiconductor"],
     },
     "big_tech": {

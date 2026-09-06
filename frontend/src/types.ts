@@ -599,14 +599,16 @@ export interface Holding {
   roi_usd: number | null;
 }
 
-/** 'trade' is a real execution; the rest are non-executed diary reflections. */
-export type JournalEntryType = "trade" | "note" | "pass" | "review";
+/**
+ * The single control every journal entry is logged with — one dropdown, one
+ * field, matching the one `trades.side` column it is stored in. 'buy'/'sell'
+ * is a real execution (updates holdings/cash); 'observe'/'contemplating'/
+ * 'note' is a non-executed reflection (no quantity, nothing about the
+ * portfolio changes).
+ */
+export type TradeSide = "buy" | "sell" | "observe" | "contemplating" | "note";
 
-/** What KIND of reflection a non-trade entry is (stored in `side`). */
-export type DecisionType =
-  | "pass" | "contemplating" | "note" | "hold" | "observe";
-
-/** One journal entry — a real trade, or a non-trade diary reflection. */
+/** One journal entry — a real trade, or a non-executed reflection. */
 export interface Trade {
   /** On a sell, net of fees, in the asset's own currency. */
   realized_pnl?: number | null;
@@ -618,14 +620,13 @@ export interface Trade {
   id: number;
   /** Null for a general market note with no specific stock. */
   ticker: string | null;
-  /** 'trade' (default) or a diary entry_type ('note' / 'pass' / 'review'). */
-  entry_type: JournalEntryType;
-  /** 'buy'/'sell' for a trade; a `DecisionType` for a diary entry. */
-  side: "buy" | "sell" | DecisionType | null;
-  /** Always 0 for a diary entry — there was no execution to size. */
+  /** 'trade' for buy/sell, or 'note' for a reflection — server-derived from `side`. */
+  entry_type: string;
+  side: TradeSide | null;
+  /** Always 0 for a reflection — there was no execution to size. */
   quantity: number;
   executed_at: string;
-  /** The fill for a trade; a benchmark price snapshot for a diary entry. */
+  /** The fill for a trade; a benchmark price snapshot for a reflection. */
   execution_price: number | null;
   total_value: number | null;
   fx_rate: number | null;
@@ -774,18 +775,14 @@ export type EmotionTag =
   | "calm" | "fomo" | "revenge" | "boredom" | "overconfidence" | "fear";
 
 export interface TradeCreate {
-  /** Required for a trade; optional for a diary entry (may be a general note). */
+  /** Required for 'buy'/'sell'; optional otherwise (may be a general note). */
   ticker?: string | null;
-  /** Defaults to 'trade' server-side when omitted. */
-  entry_type?: JournalEntryType;
-  /** For entry_type != 'trade' only — what kind of reflection this is. */
-  decision_type?: DecisionType | null;
-  /** Required ('buy'/'sell') when entry_type == 'trade'; omit otherwise. */
-  side?: "buy" | "sell" | null;
-  /** Required (>0) when entry_type == 'trade'; omit or 0 for a diary entry. */
+  /** The single control: 'buy'/'sell' is a trade; the rest is a reflection. */
+  side: TradeSide;
+  /** Required (>0) for 'buy'/'sell'; omit or 0 for a reflection. */
   quantity?: number;
   executed_at: string;
-  /** Required for a diary entry — it is the whole content of the reflection. */
+  /** Required for a reflection — it is the whole content of the entry. */
   entry_rationale?: string | null;
   /** Manual override; omit so the backend derives the fill from market data. */
   execution_price?: number | null;
@@ -1068,10 +1065,11 @@ export interface TradingRulesResponse {
 
 export interface CoachReviewRequest {
   ticker?: string | null;
-  proposed_side?: "buy" | "sell" | null;
+  /** 'buy'/'sell' for a trade being considered, or 'observe'/'contemplating'/
+   * 'note' for a non-executed reflection — the same single control as
+   * `TradeCreate.side`. `proposed_quantity` is ignored for a reflection. */
+  proposed_side?: TradeSide | null;
   proposed_quantity?: number | null;
-  /** For a non-trade reflection with no proposed_side/proposed_quantity. */
-  decision_type?: DecisionType | null;
   entry_rationale: string;
   emotion_tag?: EmotionTag | null;
 }

@@ -103,7 +103,6 @@ async def review_trade(req: CoachReviewRequest):
             "entry_rationale": req.entry_rationale,
             "proposed_side": req.proposed_side,
             "proposed_quantity": req.proposed_quantity,
-            "decision_type": req.decision_type,
             "emotion_tag": req.emotion_tag,
         })
     except Exception as e:  # noqa: BLE001 — surface a clean message, not a 500

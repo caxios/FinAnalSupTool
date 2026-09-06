@@ -2788,20 +2788,6 @@ body {
   background: var(--glass-bg); border: 1px solid var(--border-subtle);
   border-radius: 12px;
 }
-.trade-mode-toggle { display: flex; gap: 6px; margin-bottom: 4px; }
-.trade-mode-btn {
-  flex: 1 1 auto; background: var(--bg-secondary); border: 1px solid var(--border-subtle);
-  color: var(--text-secondary); border-radius: 8px; padding: 8px 12px;
-  font-size: 12px; font-weight: 600; font-family: inherit; cursor: pointer;
-  transition: all 150ms; text-align: center;
-}
-.trade-mode-btn:hover:not(:disabled) { border-color: var(--border-active); color: var(--text-primary); }
-.trade-mode-btn.is-active {
-  border-color: var(--accent-blue); color: var(--text-primary);
-  background: rgba(59, 130, 246, 0.12);
-}
-.trade-mode-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
 .trade-form-row { display: flex; flex-wrap: wrap; gap: 12px; }
 .trade-form-hint { font-size: 12px; color: var(--text-muted); margin: -4px 0 0; }
 
@@ -2911,8 +2897,14 @@ body {
 }
 .journal-side-buy  { color: var(--color-success); background: rgba(34, 197, 94, 0.12); }
 .journal-side-sell { color: var(--color-error);   background: rgba(239, 68, 68, 0.12); }
-.journal-side-diary {
+.journal-side-observe {
+  color: #d97706; background: rgba(217, 119, 6, 0.14);
+}
+.journal-side-contemplating {
   color: var(--accent-purple, #a78bfa); background: rgba(167, 139, 250, 0.14);
+}
+.journal-side-note {
+  color: var(--accent-blue, #3b82f6); background: rgba(59, 130, 246, 0.12);
 }
 .journal-benchmark-tag { font-size: 11px; color: var(--text-muted); }
 

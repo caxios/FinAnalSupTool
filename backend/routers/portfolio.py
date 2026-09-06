@@ -172,27 +172,28 @@ async def get_trades(
 @router.post("/trades", response_model=TradeResponse, status_code=201)
 async def create_trade(body: TradeCreate):
     """
-    Log a trade — or a non-trade diary entry — in one call.
+    Log a trade — or a non-executed decision/reflection — in one call.
 
-    ``entry_type == 'trade'`` (the default): the user supplies the transaction
-    time, quantity, and their **entry rationale**. The fill price is looked up
-    from intraday market data at that timestamp, the total value follows from
-    it, and the position's new average price is computed server-side.
-    ``execution_price`` in the body is a manual override for a fill the lookup
-    gets wrong; when it is absent (the normal case) the automation runs.
+    ``side`` decides everything. ``'buy'``/``'sell'``: the user supplies the
+    transaction time, quantity, and their **entry rationale**. The fill price
+    is looked up from intraday market data at that timestamp, the total value
+    follows from it, and the position's new average price is computed
+    server-side. ``execution_price`` in the body is a manual override for a
+    fill the lookup gets wrong; when it is absent (the normal case) the
+    automation runs.
 
-    ``entry_type in ('note', 'pass', 'review')``: an "Investment Diary" entry —
-    a dilemma, a decision to pass, or a retrospective musing, with no quantity
-    and no effect on holdings or cash. A benchmark price at ``executed_at`` is
-    still looked up best-effort (never blocking the save) so the entry can
-    later be checked against what the stock actually did.
+    ``'observe'``/``'contemplating'``/``'note'``: a decision to pass, a
+    dilemma, or a retrospective musing, with no quantity and no effect on
+    holdings or cash. A benchmark price at ``executed_at`` is still looked up
+    best-effort (never blocking the save) so the entry can later be checked
+    against what the stock actually did.
     """
-    if body.entry_type != "trade":
+    if body.side not in ("buy", "sell"):
         try:
             entry = await ps.record_journal_entry_auto(
-                body.ticker, body.entry_type, body.executed_at,
+                body.ticker, "note", body.executed_at,
                 entry_rationale=body.entry_rationale or "",
-                decision_type=body.decision_type,
+                decision_type=body.side,
                 execution_price=body.execution_price,
                 emotion_tag=body.emotion_tag,
             )

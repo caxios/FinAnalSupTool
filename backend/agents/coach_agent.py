@@ -1046,12 +1046,12 @@ class CoachAgent(BaseAgent):
         """
         Args:
             context: ``ticker``, ``entry_rationale``, optional ``proposed_side`` /
-                     ``proposed_quantity`` / ``decision_type`` / ``emotion_tag``.
+                     ``proposed_quantity`` / ``emotion_tag``.
 
-                     ``decision_type`` ('pass', 'contemplating', 'note', 'hold',
-                     'observe') describes a non-trade reflection — a dilemma or
-                     a decision to pass — when there is no ``proposed_side`` /
-                     ``proposed_quantity`` to execute.
+                     ``proposed_side`` is the single control: 'buy'/'sell' is a
+                     trade being considered; 'observe'/'contemplating'/'note'
+                     is a non-executed reflection — a dilemma or a decision to
+                     pass — and ``proposed_quantity`` is then ignored.
 
                      The fundamental/peer/technical digest is retrieved by this
                      method itself, via :func:`fetch_fundamental_analysis` — a
@@ -1062,21 +1062,18 @@ class CoachAgent(BaseAgent):
         rationale = (context.get("entry_rationale") or "").strip()
         side = context.get("proposed_side")
         qty = context.get("proposed_quantity")
-        decision_type = context.get("decision_type")
         emotion_tag = context.get("emotion_tag")
 
         if side in ("buy", "sell") and qty:
             proposed = " ".join(
                 str(x) for x in [side, qty, ticker] if x not in (None, "")
             )
-        elif decision_type:
+        elif side in ("observe", "contemplating", "note"):
             label = {
-                "pass": "Observing/passing on",
+                "observe": "Observing/passing on",
                 "contemplating": "Contemplating a position in",
-                "hold": "Holding without acting on",
-                "observe": "Watching",
                 "note": "A market note about",
-            }.get(decision_type, "Reflecting on")
+            }.get(side, "Reflecting on")
             proposed = f"{label} {ticker}" if ticker else f"{label} the market"
         else:
             proposed = "(no specific trade — general review)"

@@ -540,53 +540,42 @@ class Holding(BaseModel):
     )
 
 
+#: The single control `TradeCreate.side` (and the `trades.side` column) is
+#: authoritative over: 'buy'/'sell' is a real execution; the other three are
+#: a non-executed reflection (a decision to pass, a dilemma, or a market
+#: note/retrospective musing). One dropdown, one field — there is no separate
+#: "entry type" or "diary mode" for the client to manage.
+TRADE_SIDES: tuple[str, ...] = ("buy", "sell", "observe", "contemplating", "note")
+_EXECUTION_SIDES = ("buy", "sell")
+
+
 class TradeCreate(BaseModel):
     """
-    Request body for POST /portfolio/trades.
+    Request body for POST /portfolio/trades — one unified journal entry.
 
-    Deliberately minimal: blueprint §1 says the user inputs **only** the
-    transaction time and quantity (plus which stock and which direction). The
-    execution price, total value, and resulting average are *server-derived* —
-    accepting them from the client would defeat the automation and let the
-    journal disagree with the market.
-
-    ``execution_price`` is the one escape hatch, for correcting a fill the
-    market-data lookup gets wrong. Leave it unset in normal use.
+    ``side`` decides everything: 'buy'/'sell' is a real execution — quantity
+    is required, and it updates holdings and cash exactly as before.
+    'observe'/'contemplating'/'note' is a non-executed reflection — quantity
+    is not required (and is stored as 0), and nothing about the portfolio
+    changes. ``execution_price`` is the fill for a trade, or a benchmark price
+    snapshot for a reflection (so a later query can ask what the stock did
+    afterwards) — server-derived from market data in both cases unless the
+    client overrides it.
     """
 
     ticker: str | None = Field(
         None,
-        description="Stock ticker, e.g. 'AAPL'. Required for a real trade; "
-                    "optional for a diary entry_type ('note'/'pass'/'review'), "
-                    "which may be a general market thought with no ticker.",
+        description="Stock ticker, e.g. 'AAPL'. Required for 'buy'/'sell'; "
+                    "optional for a reflection, which may be a general "
+                    "market thought with no specific stock.",
     )
-    entry_type: str = Field(
-        "trade",
-        description=(
-            "'trade' (default) — an actual buy/sell execution: quantity and "
-            "side are required, and it updates holdings/cash. 'note'/'pass'/"
-            "'review' — a non-executed reflection (a dilemma, a decision to "
-            "pass, a retrospective musing): no quantity, no holdings/cash "
-            "change, and `decision_type` describes what kind of reflection it "
-            "is instead of `side`."
-        ),
-    )
-    decision_type: str | None = Field(
-        None,
-        description=(
-            "For entry_type != 'trade' only: 'pass', 'contemplating', 'note', "
-            "'hold', or 'observe' — what kind of decision this reflection is. "
-            "Ignored (and should be omitted) for entry_type == 'trade', which "
-            "uses `side` instead."
-        ),
-    )
-    side: str | None = Field(
-        None, description="'buy' or 'sell' — required when entry_type == 'trade'"
+    side: str = Field(
+        description="'buy', 'sell', 'observe', 'contemplating', or 'note'"
     )
     quantity: float | None = Field(
         None, ge=0,
-        description="Shares transacted — required (>0) when entry_type == "
-                    "'trade'; omitted or 0 for a diary entry.",
+        description="Shares transacted — required (>0) for 'buy'/'sell'; "
+                    "omitted or 0 for a reflection.",
     )
     executed_at: str = Field(
         description="When the trade happened, ISO-8601 (e.g. '2026-08-29T14:30:00Z')"
@@ -594,17 +583,18 @@ class TradeCreate(BaseModel):
     entry_rationale: str | None = Field(
         None,
         description=(
-            "Why the user made this trade, in their own words — including the "
-            "psychological state (e.g. 'bought on FOMO after the keynote'). The "
-            "Coach agent evaluates exactly this text against objective data. "
-            "Required for a diary entry (entry_type != 'trade') — it is the "
-            "whole content of the reflection."
+            "Why the user made this decision, in their own words — including "
+            "the psychological state (e.g. 'bought on FOMO after the "
+            "keynote', or 'passing, feels like chasing'). The Coach agent "
+            "evaluates exactly this text against objective data. Required "
+            "for a reflection ('observe'/'contemplating'/'note') — it is the "
+            "whole content of the entry."
         ),
     )
     execution_price: float | None = Field(
         None, gt=0,
-        description="Manual override; normally derived from market data. For a "
-                    "diary entry this is a benchmark price snapshot, not a fill.",
+        description="Manual override; normally derived from market data. For "
+                    "a reflection this is a benchmark price snapshot, not a fill.",
     )
     fx_rate: float | None = Field(None, gt=0, description="Exchange rate at execution")
     fee: float = Field(
@@ -630,43 +620,27 @@ class TradeCreate(BaseModel):
     def _ticker_upper(cls, v: str | None) -> str | None:
         return (v or "").strip().upper() or None
 
-    @field_validator("entry_type")
-    @classmethod
-    def _entry_type_valid(cls, v: str) -> str:
-        v = (v or "trade").strip().lower()
-        if v not in ("trade", "note", "pass", "review"):
-            raise ValueError("entry_type must be 'trade', 'note', 'pass', or 'review'")
-        return v
-
-    @field_validator("decision_type")
-    @classmethod
-    def _decision_type_valid(cls, v: str | None) -> str | None:
-        v = (v or "").strip().lower() or None
-        valid = ("pass", "contemplating", "note", "hold", "observe")
-        if v is not None and v not in valid:
-            raise ValueError(f"decision_type must be one of {valid}")
-        return v
-
     @field_validator("side")
     @classmethod
-    def _side_valid(cls, v: str | None) -> str | None:
-        v = (v or "").strip().lower() or None
-        if v is not None and v not in ("buy", "sell"):
-            raise ValueError("side must be 'buy' or 'sell'")
+    def _side_valid(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in TRADE_SIDES:
+            raise ValueError(f"side must be one of {TRADE_SIDES}")
         return v
 
     @model_validator(mode="after")
-    def _entry_type_requirements(self) -> "TradeCreate":
-        if self.entry_type == "trade":
+    def _side_requirements(self) -> "TradeCreate":
+        if self.side in _EXECUTION_SIDES:
             if not self.ticker:
                 raise ValueError("ticker is required for a trade")
-            if self.side is None:
-                raise ValueError("side is required for a trade ('buy' or 'sell')")
             if not self.quantity or self.quantity <= 0:
                 raise ValueError("quantity must be greater than zero for a trade")
         else:
             if not (self.entry_rationale or "").strip():
-                raise ValueError("entry_rationale is required for a diary entry")
+                raise ValueError(
+                    "entry_rationale is required for an observe/contemplating/"
+                    "note entry"
+                )
         return self
 
     @field_validator("emotion_tag")
@@ -704,19 +678,21 @@ class Trade(BaseModel):
     ticker: str | None = None
     entry_type: str = Field(
         "trade",
-        description="'trade' (a real execution) or 'note'/'pass'/'review' "
-                    "(a non-executed diary reflection)",
+        description="'trade' (a real buy/sell execution) or 'note' (a "
+                    "non-executed observe/contemplating/note reflection) — "
+                    "server-derived from `side`",
     )
     side: str | None = Field(
         None,
-        description="'buy'/'sell' for a trade; the decision_type ('pass', "
-                    "'contemplating', 'note', 'hold', 'observe') for a diary entry",
+        description="'buy'/'sell' for a trade, or 'observe'/'contemplating'/"
+                    "'note' for a non-executed reflection — the single "
+                    "control this entry was logged with",
     )
     quantity: float = 0.0
     executed_at: str
     execution_price: float | None = Field(
         None, description="The fill for a trade; a benchmark price snapshot for "
-                          "a diary entry"
+                          "a reflection"
     )
     total_value: float | None = None
     fx_rate: float | None = None
@@ -868,18 +844,18 @@ class CoachReviewRequest(BaseModel):
     ticker: str | None = Field(
         None, description="Company under consideration, e.g. 'AAPL'"
     )
-    proposed_side: str | None = Field(None, description="'buy' or 'sell'")
-    proposed_quantity: float | None = Field(
-        None, gt=0, description="Shares the user is considering"
-    )
-    decision_type: str | None = Field(
+    proposed_side: str | None = Field(
         None,
         description=(
-            "For a non-trade reflection with no proposed_side/proposed_quantity: "
-            "'pass', 'contemplating', 'note', 'hold', or 'observe' — what kind "
-            "of decision this is. The coach reads this to give meta-cognitive "
-            "feedback on a dilemma without assuming an execution took place."
+            "'buy'/'sell' for a trade being considered, or 'observe'/"
+            "'contemplating'/'note' for a non-executed reflection — the same "
+            "single control as `TradeCreate.side`. When it's a reflection, "
+            "the coach gives meta-cognitive feedback without assuming an "
+            "execution took place, and `proposed_quantity` is ignored."
         ),
+    )
+    proposed_quantity: float | None = Field(
+        None, gt=0, description="Shares the user is considering"
     )
     entry_rationale: str = Field(
         ...,
@@ -895,20 +871,9 @@ class CoachReviewRequest(BaseModel):
     @field_validator("proposed_side")
     @classmethod
     def _side_valid(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip().lower()
-        if v not in ("buy", "sell"):
-            raise ValueError("proposed_side must be 'buy' or 'sell'")
-        return v
-
-    @field_validator("decision_type")
-    @classmethod
-    def _decision_type_valid(cls, v: str | None) -> str | None:
         v = (v or "").strip().lower() or None
-        valid = ("pass", "contemplating", "note", "hold", "observe")
-        if v is not None and v not in valid:
-            raise ValueError(f"decision_type must be one of {valid}")
+        if v is not None and v not in TRADE_SIDES:
+            raise ValueError(f"proposed_side must be one of {TRADE_SIDES}")
         return v
 
     @field_validator("ticker")
