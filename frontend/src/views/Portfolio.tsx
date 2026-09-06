@@ -20,6 +20,7 @@ import type {
   JournalReport,
   PerformanceWindow,
   TradeResponse,
+  TradeSide,
 } from "../types";
 import { useDashboard } from "../context/DashboardContext";
 import { useAsync } from "../hooks/useAsync";
@@ -53,6 +54,7 @@ import AttributionPanel from "../components/portfolio/AttributionPanel";
 import PerformancePanel from "../components/portfolio/PerformancePanel";
 import PortfolioRiskPanel from "../components/portfolio/PortfolioRiskPanel";
 import PersonalEdgeDashboard from "../components/portfolio/PersonalEdgeDashboard";
+import WhatIfSimulator from "../components/portfolio/WhatIfSimulator";
 
 /** Map a signed number to the app's existing tone classes. */
 function tone(n: number | null | undefined): "positive" | "negative" | "neutral" {
@@ -224,6 +226,17 @@ export default function Portfolio() {
     },
     [refresh, setActiveTicker]
   );
+
+  // The What-If Simulator's quick actions pre-fill the Trade Form below with
+  // the ticker it just tested. `nonce` forces a remount (via `key`) so the
+  // form actually picks up a NEW prefill even if the ticker/side repeat.
+  const [formPrefill, setFormPrefill] = useState<{
+    ticker: string; side: TradeSide; nonce: number;
+  } | null>(null);
+  const handleQuickAction = useCallback((ticker: string, side: TradeSide) => {
+    setFormPrefill({ ticker, side, nonce: Date.now() });
+    document.getElementById("log-a-trade")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   async function handleRemove(ticker: string) {
     try {
@@ -509,6 +522,11 @@ export default function Portfolio() {
             error={risk.error}
             onRefresh={refresh}
           />
+
+          <h3 className="risk-section-title whatif-section-heading">
+            🧪 What-If Position Simulator
+          </h3>
+          <WhatIfSimulator knownTickers={tickers} onQuickAction={handleQuickAction} />
         </section>
       )}
 
@@ -539,11 +557,13 @@ export default function Portfolio() {
       </section>
 
       {/* ── Log a trade ────────────────────────────────────── */}
-      <section className="view-section">
+      <section className="view-section" id="log-a-trade">
         <h2 className="section-title">✍️ Log a Trade</h2>
         <TradeForm
+          key={formPrefill?.nonce}
           knownTickers={tickers}
           defaultTicker={activeTicker}
+          prefill={formPrefill}
           onLogged={handleLogged}
         />
       </section>

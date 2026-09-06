@@ -10,6 +10,7 @@ The trading portfolio and journal — blueprint §1.
   POST   /portfolio/trades             — log a trade
   GET    /portfolio/baseline/{ticker}  — poll the 8-quarter baseline fetch
   GET    /portfolio/risk               — VaR/CVaR/volatility/correlation/FX risk
+  POST   /portfolio/simulate           — What-If: Before/After KPIs for adding ANY ticker
 
   GET    /portfolio/cash               — balances per currency + the rate used
   POST   /portfolio/cash/initialize    — record the opening anchor
@@ -46,6 +47,7 @@ from schemas import (
     HoldingCreate,
     HoldingCreatedResponse,
     PortfolioResponse,
+    PortfolioSimulationRequest,
     Trade,
     TradeCreate,
     TradeResponse,
@@ -287,6 +289,37 @@ async def get_portfolio_risk(
     except Exception as e:  # noqa: BLE001 — a risk-snapshot failure is not a 500
         logger.error(f"Portfolio risk snapshot failed: {e}")
         raise HTTPException(status_code=502, detail=f"Portfolio risk snapshot failed: {e}")
+
+
+@router.post("/simulate")
+async def simulate_portfolio_addition(body: PortfolioSimulationRequest):
+    """
+    Pre-Trade "What-If" Position Simulator: Before vs. After Sharpe ratio,
+    annualized volatility, max drawdown, and 95% VaR for taking ``ticker`` to
+    a target size — HELD or completely BRAND NEW to the portfolio.
+
+    Unlike the top-risk-contributor scenarios baked into ``GET /portfolio/risk``,
+    this fetches price history for an unheld ticker on the fly, so a user can
+    test "what if I bought AVGO at 10% of net worth" before ever logging the
+    trade. Weight-sensitive by construction: the comparison is between two
+    real simulated portfolio return series, so a 1% allocation and a 35%
+    allocation of the same ticker produce correspondingly different deltas.
+
+    A resolvable problem (bad ticker, no price history, portfolio not yet
+    valuable) comes back as 200 with an ``error`` field rather than a 4xx/5xx
+    — this is a sandbox the user is actively exploring, and a stack of
+    unrecognized tickers while typing should not read as a broken feature.
+    """
+    from services import portfolio_risk
+
+    try:
+        return await portfolio_risk.simulate_any_trade(
+            body.ticker, target_weight=body.target_weight,
+            dollar_amount=body.dollar_amount,
+        )
+    except Exception as e:  # noqa: BLE001 — a simulation failure is not a 500
+        logger.error(f"Portfolio simulation failed for {body.ticker}: {e}")
+        raise HTTPException(status_code=502, detail=f"Simulation failed: {e}")
 
 
 # =============================================================================

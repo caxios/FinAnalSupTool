@@ -151,6 +151,55 @@ def volatility(returns: pd.Series, annualize: bool = True) -> float | None:
     return round(sd, 6)
 
 
+def sharpe_ratio(returns: pd.Series, risk_free_annual: float = 0.035) -> float | None:
+    """
+    Annualized Sharpe ratio from daily returns: (mean excess return / std of
+    excess return) * sqrt(252).
+
+    ``risk_free_annual`` is converted to a DAILY rate via compounding
+    (``(1+rf)^(1/252) - 1``), not divided by 252, so the annualized Sharpe this
+    produces is internally consistent with a rate actually compounded over a
+    year — dividing would understate the daily hurdle by a small but avoidable
+    amount. Defaults to ~3.5%, matching the 10-year Treasury's typical level;
+    override with the actual yield when the caller has one.
+    """
+    if returns is None or returns.empty:
+        return None
+    r = returns.dropna()
+    if len(r) < 2:
+        return None
+    rf_daily = (1.0 + risk_free_annual) ** (1.0 / TRADING_DAYS) - 1.0
+    excess = r - rf_daily
+    std = float(excess.std(ddof=1))
+    if std <= 1e-12:
+        return None
+    return round(float(excess.mean() / std) * np.sqrt(TRADING_DAYS), 6)
+
+
+def beta(returns: pd.Series, benchmark_returns: pd.Series) -> float | None:
+    """
+    Portfolio beta vs. a market benchmark: Cov(portfolio, benchmark) /
+    Var(benchmark), over the dates both series share.
+
+    A beta of 1.3 means the portfolio has historically moved 1.3x the
+    benchmark's swings — the standard systematic-risk figure, independent of
+    the portfolio's OWN volatility (which can be high with a low beta, if that
+    volatility is uncorrelated with the market).
+    """
+    if returns is None or returns.empty or benchmark_returns is None or benchmark_returns.empty:
+        return None
+    joined = pd.concat(
+        [returns.rename("p"), benchmark_returns.rename("b")], axis=1
+    ).dropna(how="any")
+    if len(joined) < 2:
+        return None
+    var_b = float(joined["b"].var(ddof=1))
+    if var_b <= 1e-12:
+        return None
+    cov_pb = float(joined["p"].cov(joined["b"]))
+    return round(cov_pb / var_b, 6)
+
+
 def max_drawdown(cumulative: pd.Series) -> float | None:
     """
     Largest peak-to-trough decline, as a positive fraction (0.24 = -24%).
@@ -365,6 +414,200 @@ def simulate_position_change(
     }
 
 
+def simulate_new_position_impact(
+    returns: pd.DataFrame,
+    weights: np.ndarray,
+    ticker: str,
+    target_weight: float,
+    new_ticker_returns: pd.Series | None = None,
+    asset_currency: str | None = None,
+    base_currency: str = "KRW",
+    risk_free_annual: float = 0.035,
+    confidence: float = 0.95,
+) -> dict:
+    """
+    Full Before/After portfolio-KPI comparison for taking ``ticker`` to
+    ``target_weight`` (an ABSOLUTE fraction of net worth, e.g. 0.10 for 10% —
+    not a delta) — Sharpe ratio, annualized volatility, max drawdown, 95% VaR,
+    and this ticker's correlation to the rest of the book.
+
+    Unlike :func:`simulate_position_change` (volatility-only, held tickers
+    only, used for the coach's quick risk-warning check and the dashboard's
+    top-risk-contributor scenarios), this is the engine behind the What-If
+    Simulator and supports a BRAND-NEW, currently-unheld ticker: pass its own
+    daily-return series as ``new_ticker_returns`` (already in ``base_currency``
+    — the caller, ``portfolio_risk.simulate_any_trade``, fetches it via
+    ``price_provider.fetch_price_history_base`` and aligns it on the dates
+    the existing book actually traded). When ``ticker`` IS already a column of
+    ``returns``, ``new_ticker_returns`` is ignored and the existing series is
+    reused, so a held-ticker resize is judged against the exact same history
+    the rest of the book's covariance already uses.
+
+    Funding order matches :func:`simulate_position_change`: cash in the
+    asset's own currency first, then other cash, then pro-rata from the
+    remaining equity positions — the order the money would actually move.
+    This is WEIGHT-SENSITIVE by construction: the whole comparison is between
+    two REAL return series built from two REAL weight vectors, so a 2%
+    allocation and a 25% allocation of the same volatile ticker produce
+    correspondingly different Before/After deltas — there is no separate
+    "size adjustment" step to get wrong.
+    """
+    empty = {
+        "ticker": ticker, "target_weight": target_weight,
+        "weight_before": None, "weight_after": None,
+        "before": None, "after": None, "delta": None,
+        "correlation_to_book": None, "funded_from": None, "note": None,
+    }
+    if returns is None or returns.empty:
+        return {**empty, "note": "No return data available."}
+
+    t = (ticker or "").strip().upper()
+    if not t:
+        return {**empty, "note": "A ticker is required."}
+    if target_weight is None or target_weight < 0 or target_weight > 1.0 + 1e-9:
+        return {**empty, "note": "target_weight must be between 0 and 1."}
+
+    w = np.asarray(weights, dtype=float)
+    total = w.sum()
+    if total <= 0:
+        return {**empty, "note": "Portfolio has no positive weights."}
+    if abs(total - 1.0) > 1e-6:
+        w = w / total
+
+    cols = list(returns.columns)
+    if t in cols:
+        rets = returns
+    else:
+        if new_ticker_returns is None or new_ticker_returns.empty:
+            return {**empty, "note": f"No price history available for {t}."}
+        joined = pd.concat(
+            [returns, new_ticker_returns.rename(t)], axis=1
+        ).dropna(how="any")
+        if len(joined) < MIN_OBSERVATIONS:
+            return {**empty, "note": (
+                f"Only {len(joined)} trading day(s) of {t}'s price history "
+                f"align with the existing portfolio's — too few (need "
+                f"{MIN_OBSERVATIONS}+) for a reliable comparison."
+            )}
+        rets = joined
+        cols = list(rets.columns)
+        w = np.append(w, 0.0)   # a brand-new position starts at 0% weight
+
+    i = cols.index(t)
+    before_w = w.copy()
+
+    # This ticker's correlation to the REST of the book, blended at its own
+    # relative weights — the single number that tells the diversifying/
+    # concentrating story independent of position size.
+    correlation_to_book = None
+    rest_idx = [j for j in range(len(cols)) if j != i]
+    rest_weight = float(before_w[rest_idx].sum()) if rest_idx else 0.0
+    if rest_idx and rest_weight > 1e-9:
+        rest_w = before_w[rest_idx] / rest_weight
+        rest_port = (rets.iloc[:, rest_idx] * rest_w).sum(axis=1)
+        if rest_port.std(ddof=1) > 1e-12 and rets.iloc[:, i].std(ddof=1) > 1e-12:
+            correlation_to_book = round(float(rest_port.corr(rets.iloc[:, i])), 4)
+
+    need = target_weight - float(before_w[i])   # + must be funded; - releases weight
+    after_w = before_w.copy()
+    after_w[i] = target_weight
+    sources: list[str] = []
+
+    if need > 1e-12:
+        own = f"{CASH_PREFIX}{(asset_currency or '').strip().upper()}"
+        other_cash = [
+            j for j, c in enumerate(cols)
+            if c.startswith(CASH_PREFIX) and c != own and j != i
+        ]
+        pockets: list[tuple[str, list[int]]] = []
+        if own in cols and cols.index(own) != i:
+            pockets.append((f"{asset_currency} cash", [cols.index(own)]))
+        if other_cash:
+            pockets.append(("other cash", other_cash))
+
+        for label, indices in pockets:
+            if need <= 1e-12:
+                break
+            available = float(after_w[indices].sum())
+            drawn = min(available, need)
+            if drawn <= 1e-12:
+                continue
+            for j in indices:
+                share = float(after_w[j]) / available if available > 0 else 0.0
+                after_w[j] -= drawn * share
+            need -= drawn
+            sources.append(label)
+
+        if need > 1e-12:
+            equity_idx = [
+                j for j in range(len(cols))
+                if j != i and not cols[j].startswith(CASH_PREFIX)
+            ]
+            pool = float(after_w[equity_idx].sum()) if equity_idx else 0.0
+            if pool <= 1e-12:
+                return {
+                    **empty, "weight_before": round(float(before_w[i]), 6),
+                    "correlation_to_book": correlation_to_book,
+                    "funded_from": ", ".join(sources) or None,
+                    "note": "Not enough cash or other positions to fund this weight.",
+                }
+            for j in equity_idx:
+                after_w[j] *= (pool - need) / pool
+            sources.append("other positions, pro-rata")
+    elif need < -1e-12:
+        # A reduction (e.g. simulating a partial sell) releases weight BACK
+        # into the rest of the book, pro-rata — the mirror image of funding.
+        release = -need
+        equity_idx = [
+            j for j in range(len(cols))
+            if j != i and not cols[j].startswith(CASH_PREFIX)
+        ]
+        pool = float(after_w[equity_idx].sum()) if equity_idx else 0.0
+        if pool > 1e-12:
+            for j in equity_idx:
+                after_w[j] *= (pool + release) / pool
+        else:
+            # Nothing to release into (an all-cash-and-this-ticker book) —
+            # put it in the asset's own cash pocket if there is one.
+            own = f"{CASH_PREFIX}{(asset_currency or '').strip().upper()}"
+            if own in cols:
+                after_w[cols.index(own)] += release
+
+    port_before = (rets[cols] * before_w).sum(axis=1)
+    port_after = (rets[cols] * after_w).sum(axis=1)
+
+    def _kpis(series: pd.Series) -> dict:
+        return {
+            "sharpe_ratio": sharpe_ratio(series, risk_free_annual),
+            "volatility": volatility(series),
+            "max_drawdown": max_drawdown(equity_curve(series)),
+            "value_at_risk": value_at_risk(series, confidence),
+        }
+
+    before_kpis = _kpis(port_before)
+    after_kpis = _kpis(port_after)
+    delta = {
+        f"{k}_delta": (
+            round(after_kpis[k] - before_kpis[k], 6)
+            if before_kpis[k] is not None and after_kpis[k] is not None else None
+        )
+        for k in before_kpis
+    }
+
+    return {
+        "ticker": t,
+        "target_weight": round(float(target_weight), 6),
+        "weight_before": round(float(before_w[i]), 6),
+        "weight_after": round(float(after_w[i]), 6),
+        "before": before_kpis,
+        "after": after_kpis,
+        "delta": delta,
+        "correlation_to_book": correlation_to_book,
+        "funded_from": " then ".join(sources) or None,
+        "note": None,
+    }
+
+
 def simulate_conversion(
     returns: pd.DataFrame,
     weights: np.ndarray,
@@ -499,6 +742,8 @@ def compute_portfolio_risk(
     fx_returns: pd.Series | None = None,
     base_currency: str = "KRW",
     local_prices: pd.DataFrame | None = None,
+    benchmark_returns: pd.Series | None = None,
+    risk_free_annual: float = 0.035,
 ) -> dict:
     """
     Every metric in blueprint §2, in one JSON-friendly dict for the agent.
@@ -523,6 +768,11 @@ def compute_portfolio_risk(
     ``local_prices`` (native-currency series) enables the hedged-volatility
     comparison in ``fx_risk``; without it that block reports what it can.
 
+    ``benchmark_returns`` (e.g. the S&P 500, base-currency daily returns)
+    enables ``beta``; without it, ``beta`` is null rather than guessed.
+    ``risk_free_annual`` feeds ``sharpe_ratio`` (default ~3.5%, the 10-year
+    Treasury's typical level — see :func:`sharpe_ratio`).
+
     Passing no ``cash`` reproduces the previous behaviour exactly.
 
     Degenerate inputs return a well-formed dict with nulls and an explanation in
@@ -536,6 +786,9 @@ def compute_portfolio_risk(
         "value_at_risk": None,
         "conditional_var": None,
         "max_drawdown": None,
+        "sharpe_ratio": None,
+        "beta": None,
+        "risk_free_annual": risk_free_annual,
         "correlation_matrix": {},
         "average_correlation": None,
         "concentration": {},
@@ -646,6 +899,8 @@ def compute_portfolio_risk(
     result["value_at_risk"] = value_at_risk(port_rets, confidence)
     result["conditional_var"] = conditional_var(port_rets, confidence)
     result["max_drawdown"] = max_drawdown(equity_curve(port_rets))
+    result["sharpe_ratio"] = sharpe_ratio(port_rets, risk_free_annual)
+    result["beta"] = beta(port_rets, benchmark_returns) if benchmark_returns is not None else None
 
     # Per-position detail, ordered by how much risk each one actually carries.
     positions = []

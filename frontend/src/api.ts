@@ -59,6 +59,7 @@ import type {
   PerformanceReport,
   PerformanceWindow,
   PortfolioRiskReport,
+  PortfolioSimulationResponse,
   QueryDataScope,
   QueryDataResponse,
 } from "./types";
@@ -894,4 +895,26 @@ export async function getPortfolioRisk(
   return fetchJson<PortfolioRiskReport>(
     `${API_BASE}/portfolio/risk${qs ? `?${qs}` : ""}`
   );
+}
+
+/**
+ * Pre-Trade "What-If" Position Simulator: Before/After Sharpe ratio,
+ * volatility, max drawdown, and 95% VaR for taking `ticker` — held or brand
+ * new — to a target size. Pass exactly one of `targetWeight` (fraction of
+ * net worth) or `dollarAmount` (base currency).
+ */
+export async function simulatePortfolioAddition(
+  ticker: string,
+  targetWeight?: number | null,
+  dollarAmount?: number | null
+): Promise<PortfolioSimulationResponse> {
+  return fetchJson<PortfolioSimulationResponse>(`${API_BASE}/portfolio/simulate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ticker,
+      target_weight: targetWeight ?? undefined,
+      dollar_amount: dollarAmount ?? undefined,
+    }),
+  });
 }

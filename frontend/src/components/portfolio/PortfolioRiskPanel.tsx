@@ -153,6 +153,16 @@ export default function PortfolioRiskPanel({
           value={pct(report.max_drawdown)}
           note={report.period ? `Over ${report.period}` : "Peak-to-trough decline"}
         />
+        <KpiCard
+          title="Sharpe Ratio"
+          value={report.sharpe_ratio !== null ? report.sharpe_ratio.toFixed(2) : "—"}
+          note={`Annualized, vs. ${pct(report.risk_free_annual)} risk-free`}
+        />
+        <KpiCard
+          title="Beta"
+          value={report.beta !== null ? report.beta.toFixed(2) : "—"}
+          note="vs. the S&P 500, in base currency"
+        />
       </div>
 
       {/* ── Risk vs Capital Allocation ─────────────────────── */}

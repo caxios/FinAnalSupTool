@@ -1239,6 +1239,11 @@ export interface PortfolioRiskReport {
   value_at_risk: number | null;
   conditional_var: number | null;
   max_drawdown: number | null;
+  /** Annualized, vs. `risk_free_annual` (~3.5% default). */
+  sharpe_ratio: number | null;
+  /** vs. the S&P 500, in base currency; null if benchmark history was unavailable. */
+  beta: number | null;
+  risk_free_annual: number;
   correlation_matrix: Record<string, Record<string, number>>;
   average_correlation: number | null;
   concentration: Partial<RiskConcentration>;
@@ -1250,4 +1255,53 @@ export interface PortfolioRiskReport {
   fx_risk: Partial<RiskFxBlock>;
   scenarios: RiskScenario[];
   excluded_tickers: string[];
+}
+
+// =============================================================================
+// Pre-Trade "What-If" Position Simulator (POST /portfolio/simulate)
+// =============================================================================
+
+export interface PortfolioSimulationRequest {
+  ticker: string;
+  /** Fraction of net worth, e.g. 0.10 for 10%. Wins over dollar_amount if both are given. */
+  target_weight?: number | null;
+  /** Amount in the portfolio's base currency; converted to a weight using current net worth. */
+  dollar_amount?: number | null;
+}
+
+export interface WhatIfKpis {
+  sharpe_ratio: number | null;
+  volatility: number | null;
+  max_drawdown: number | null;
+  value_at_risk: number | null;
+}
+
+export type WhatIfVerdict = "diversifying" | "concentrating" | "high_impact" | "neutral";
+
+/**
+ * POST /portfolio/simulate — Before/After comparison for taking `ticker`
+ * (held or brand new) to a target weight of net worth. A resolvable problem
+ * (bad ticker, no price history) comes back as `{ ticker, error }` with
+ * every other field absent, rather than an HTTP error — this is a sandbox
+ * the user is actively exploring.
+ */
+export interface PortfolioSimulationResponse {
+  ticker: string;
+  error?: string;
+  target_weight?: number;
+  weight_before?: number | null;
+  weight_after?: number | null;
+  before?: WhatIfKpis;
+  after?: WhatIfKpis;
+  delta?: {
+    sharpe_ratio_delta: number | null;
+    volatility_delta: number | null;
+    max_drawdown_delta: number | null;
+    value_at_risk_delta: number | null;
+  };
+  correlation_to_book?: number | null;
+  funded_from?: string | null;
+  net_worth_base?: number | null;
+  verdict?: WhatIfVerdict;
+  commentary?: string;
 }

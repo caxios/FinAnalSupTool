@@ -368,9 +368,17 @@ one position's size, which SIZING above already covers:
 - `correlation_to_holdings`: correlations above ~0.7 mean this ticker moves
   with what is already held — say so plainly rather than treating it as a new,
   independent bet.
-- `simulated_impact` (when present) shows the ACTUAL covariance-based effect of
-  this trade on total portfolio volatility — cite the before/after numbers
-  rather than describing the change qualitatively.
+- `simulated_impact` (when present) is the full What-If Position Simulator
+  result for taking this ticker to its weight AFTER this trade — the same
+  engine behind the dashboard's sandbox, run for this exact proposed size. Its
+  `before`/`after` dicts each carry `sharpe_ratio`, `volatility`,
+  `max_drawdown`, `value_at_risk`; `delta` carries the four `*_delta` figures;
+  `correlation_to_book` is this ticker's correlation to the rest of the book;
+  `verdict` is one of `diversifying`/`concentrating`/`high_impact`/`neutral`,
+  computed in Python — never override it with your own qualitative read. Cite
+  the ACTUAL before/after numbers (e.g. "raises your Sharpe ratio from 1.35 to
+  1.51 and cuts volatility by 2.1 points because of a 0.12 correlation to your
+  existing tech holdings") rather than describing the change qualitatively.
 - Never invent a VaR, correlation, or volatility figure. Every number you cite
   from this section must appear in it verbatim.
 
@@ -528,6 +536,20 @@ async def position_context(
         # Value the proposed trade at the position's current price when the
         # caller has no explicit one — a pre-trade review has no fill yet.
         unit = price or (current or {}).get("current_price")
+        # `current` is only populated for a ticker ALREADY HELD (it comes from
+        # `valued`, this portfolio's own positions) — a brand-new ticker has no
+        # entry there and so no `current_price` to fall back to. Fetch one
+        # directly; without it `position_weight_after` can never be computed
+        # for exactly the trades where sizing feedback matters most: the ones
+        # opening a position for the first time.
+        if not unit and ticker and quantity:
+            from providers import price_provider
+
+            try:
+                prices = await price_provider.fetch_current_prices([ticker])
+                unit = prices.get((ticker or "").strip().upper())
+            except Exception as e:  # noqa: BLE001 — sizing degrades, it does not fail
+                logger.warning(f"[coach] no live price for new ticker {ticker}: {e}")
         if not (unit and quantity and currency):
             return ctx
 
@@ -568,7 +590,7 @@ async def position_context(
 
 
 async def portfolio_risk_context(
-    ticker: str | None, side: str | None, trade_size_pct: float | None,
+    ticker: str | None, side: str | None, position_weight_after: float | None,
 ) -> dict:
     """
     The fifth pillar: how this decision interacts with **portfolio-level** risk
@@ -582,6 +604,12 @@ async def portfolio_risk_context(
     "compute in Python, interpret in the prompt" split as every other pillar —
     so a concrete concentration/correlation flag cannot be silently dropped by
     a model that decides not to mention it.
+
+    ``position_weight_after`` is the ABSOLUTE target weight of net worth after
+    the proposed trade (``position_context``'s ``position_weight_after``) — the
+    same What-If Position Simulator the dashboard's sandbox uses
+    (``services.portfolio_risk.simulate_any_trade``) runs on it, so it works
+    for a ticker the user does not yet hold, not just an existing position.
 
     Never raises: an unavailable snapshot yields an empty dict and the prompt
     simply has no portfolio-risk section to comment on.
@@ -639,21 +667,29 @@ async def portfolio_risk_context(
                 f"does not diversify the book, it concentrates it."
             )
 
-    if t and side and trade_size_pct:
-        delta = trade_size_pct if side == "buy" else -trade_size_pct
+    if t and side in ("buy", "sell") and position_weight_after is not None:
         try:
-            sim = await pr.simulate_trade(t, delta)
+            sim = await pr.simulate_any_trade(t, target_weight=position_weight_after)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[coach] risk scenario simulation failed: {e}")
             sim = None
-        if sim and sim.get("volatility_after") is not None:
+        if sim and not sim.get("error") and sim.get("before") is not None:
             ctx["simulated_impact"] = sim
-            before, after = sim["volatility_before"], sim["volatility_after"]
-            if before > 1e-9 and (after - before) / before > 0.10:
+            vol_before = sim["before"].get("volatility")
+            vol_after = sim["after"].get("volatility")
+            if vol_before is not None and vol_after is not None and vol_before > 1e-9:
+                if (vol_after - vol_before) / vol_before > 0.10:
+                    warnings.append(
+                        f"This trade would raise annualized portfolio volatility "
+                        f"from {vol_before:.1%} to {vol_after:.1%} "
+                        f"({(vol_after - vol_before) / vol_before:+.0%})."
+                    )
+            if sim.get("verdict") == "concentrating":
                 warnings.append(
-                    f"This trade would raise annualized portfolio volatility "
-                    f"from {before:.1%} to {after:.1%} "
-                    f"({(after - before) / before:+.0%})."
+                    f"The What-If simulator flags this as CONCENTRATING: "
+                    f"{t} correlates at {sim.get('correlation_to_book'):.2f} with "
+                    f"the rest of the book, so this size adds risk without an "
+                    f"independent return source."
                 )
 
     if (ctx.get("average_correlation") or 0) > 0.75:
@@ -1136,7 +1172,7 @@ class CoachAgent(BaseAgent):
 
         sizing = await position_context(ticker, side, qty)
         risk_ctx = await portfolio_risk_context(
-            ticker, side, sizing.get("trade_size_pct_of_net_worth")
+            ticker, side, sizing.get("position_weight_after")
         )
 
         # ── The user's own empirical playbook, computed in Python. ──

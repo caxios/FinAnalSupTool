@@ -26,11 +26,11 @@
  */
 
 import { useState } from "react";
-import type { CoachReport, EmotionTag, Trade, TradeCreate, TradeResponse } from "../../types";
+import type { CoachReport, EmotionTag, Trade, TradeResponse, TradeSide } from "../../types";
 import { logTrade, reviewTrade } from "../../api";
 import CoachReview from "./CoachReview";
 
-type Side = TradeCreate["side"];
+type Side = TradeSide;
 
 const EMOTION_OPTIONS: { tag: EmotionTag; emoji: string; label: string }[] = [
   { tag: "calm", emoji: "😌", label: "Calm/Systematic" },
@@ -56,6 +56,13 @@ interface TradeFormProps {
   knownTickers: string[];
   /** Pre-fill the ticker (e.g. the row the user clicked). */
   defaultTicker?: string | null;
+  /**
+   * Pre-fill BOTH the ticker and side at once (e.g. the What-If Simulator's
+   * "Log Trade as Buy" / "Log as Observe/Pass" quick actions). Only read on
+   * mount — pass a changing `key` prop from the parent to force a remount
+   * when a new prefill should take effect.
+   */
+  prefill?: { ticker: string; side: Side } | null;
   /** Called after a successful log so the parent can refetch. */
   onLogged: (result: TradeResponse) => void;
 }
@@ -182,10 +189,11 @@ function ReflectionConfirmation({
 export default function TradeForm({
   knownTickers,
   defaultTicker,
+  prefill,
   onLogged,
 }: TradeFormProps) {
-  const [side, setSide] = useState<Side>("buy");
-  const [ticker, setTicker] = useState(defaultTicker ?? "");
+  const [side, setSide] = useState<Side>(prefill?.side ?? "buy");
+  const [ticker, setTicker] = useState(prefill?.ticker ?? defaultTicker ?? "");
   const [executedAt, setExecutedAt] = useState(nowLocalInput());
   const [quantity, setQuantity] = useState("");
   const [rationale, setRationale] = useState("");

@@ -828,6 +828,45 @@ class TradesResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Pre-Trade "What-If" Position Simulator (POST /portfolio/simulate)
+# ─────────────────────────────────────────────────────────────
+
+class PortfolioSimulationRequest(BaseModel):
+    """
+    Request body for POST /portfolio/simulate.
+
+    Exactly one sizing input is expected: ``target_weight`` (a fraction of net
+    worth, e.g. 0.10 for 10%) or ``dollar_amount`` (converted to a weight
+    using the portfolio's current net worth). ``target_weight`` wins if both
+    are given. Unlike the trading journal, ``ticker`` need not already be
+    held — this is the whole point of a PRE-trade simulator.
+    """
+
+    ticker: str = Field(description="Any valid ticker, held or brand new, e.g. 'AVGO'")
+    target_weight: float | None = Field(
+        None, ge=0, le=1,
+        description="Target weight as a fraction of net worth, e.g. 0.10 for 10%",
+    )
+    dollar_amount: float | None = Field(
+        None, gt=0, description="Amount in the portfolio's base currency"
+    )
+
+    @field_validator("ticker")
+    @classmethod
+    def _ticker_upper(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if not v:
+            raise ValueError("ticker must not be empty")
+        return v
+
+    @model_validator(mode="after")
+    def _one_size_given(self) -> "PortfolioSimulationRequest":
+        if self.target_weight is None and self.dollar_amount is None:
+            raise ValueError("Either target_weight or dollar_amount is required.")
+        return self
+
+
+# ─────────────────────────────────────────────────────────────
 # Trading Coach Model (POST /coach/review)
 # ─────────────────────────────────────────────────────────────
 
