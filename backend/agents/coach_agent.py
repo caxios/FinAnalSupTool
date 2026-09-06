@@ -253,12 +253,18 @@ You are given five things:
   1. The trade the user is considering, and THEIR OWN stated reason for it. This
      may instead be a NON-TRADE REFLECTION — a dilemma, a decision to pass or
      wait, or a market note with no proposed execution at all (look for
-     "Observing/passing on", "Contemplating a position in", or similar in
-     THE TRADE UNDER REVIEW). Do NOT assume an execution took place. Give
-     meta-cognitive feedback on the psychological conflict or the reasoning
-     itself — e.g. name the FOMO or hesitation, compare it against the
-     objective data — exactly as you would for a real trade, just without
-     talking about a fill, a position size change, or a cost basis.
+     "Observing/passing on", "Contemplating opening a position in", "Watching
+     an existing position in — without selling —", "Contemplating whether to
+     sell", or similar in THE TRADE UNDER REVIEW). These labels are computed
+     from whether the user already HOLDS the ticker — a reflection on a held
+     position is about EXITING; on one they don't hold, it is about ENTERING.
+     Match your coaching to whichever it is: entry hesitation (FOMO, fear of
+     missing the move) and exit hesitation (hope-holding a loser, reluctance
+     to lock in a gain, anchoring to the purchase price) are different
+     failure modes and deserve different feedback. Do NOT assume an execution
+     took place. Give meta-cognitive feedback on the psychological conflict or
+     the reasoning itself — exactly as you would for a real trade, just
+     without talking about a fill, a position size change, or a cost basis.
   2. FUNDAMENTAL MANAGER SYNTHESIS: an institutional digest retrieved ON DEMAND
      for this ticker — the Lead Analyst's verdict/conviction, forensic Quality
      of Earnings, peer valuation, technical levels, and downside risks. It may
@@ -323,6 +329,12 @@ WHAT TO DO:
   (deploying immediately after every deposit), panic de-risking (a withdrawal or
   sell cluster after a drawdown), and currency chasing (converting to dollars in
   bulk right after a sharp won move).
+- For a reflection on a HELD position (exit hesitation), also watch for: the
+  disposition effect (hoping a loser recovers instead of cutting it, while
+  taking winners early), anchoring to the original purchase price rather than
+  the current thesis, sunk-cost reasoning ("I've already held this long, might
+  as well keep holding"), and greed-driven profit-taking reluctance (refusing
+  to trim a large unrealized gain with no new evidence for the extra upside).
 
 SIZING AND CURRENCY — use POSITION & SIZING below when it is present:
 - State concentration as a fact when it is material: "this buy takes AAPL from
@@ -936,6 +948,12 @@ exist at the level of the whole record:
   - When DIARY / REFLECTION ENTRIES are present: did PASSING or HESITATING pay
     off, or cost them? A "pass" followed by a big rally is a real, coachable
     outcome — so is a "pass" followed by a further decline that validated it.
+    Cross-reference each diary entry's ticker against THE USER'S TRADING
+    JOURNAL to tell whether it was ENTRY hesitation (ticker not held at the
+    time) or EXIT hesitation (already held — did NOT selling pay off, or did
+    hope-holding a loser cost them?). These are diary entries recorded via
+    "Observe"/"Contemplating"/"Note" on the SAME ticker they hold or don't —
+    do not assume every reflection is about buying.
 
 STYLE — the single most important directive in this prompt:
 - ARCHETYPE below describes the trading style this user's own closed trades
@@ -1064,14 +1082,31 @@ class CoachAgent(BaseAgent):
         qty = context.get("proposed_quantity")
         emotion_tag = context.get("emotion_tag")
 
+        # `observe`/`contemplating` are direction-agnostic in the DB — the
+        # same two values cover "should I buy this" and "should I sell this".
+        # Disambiguate from data, not from a separate field the client would
+        # have to manage: a reflection on a ticker the user ALREADY HOLDS is
+        # almost always about EXITING (take profit, cut a loser, hold through
+        # noise); on one they don't hold, it's about ENTERING. This is exactly
+        # the "매도 관망/매도 고민" case — recorded with the same `side` value,
+        # framed correctly because the holding already tells us which it is.
+        is_held = bool(ticker and portfolio_service.get_holding(ticker))
+
         if side in ("buy", "sell") and qty:
             proposed = " ".join(
                 str(x) for x in [side, qty, ticker] if x not in (None, "")
             )
+        elif side in ("observe", "contemplating", "note") and is_held:
+            label = {
+                "observe": "Watching an existing position in — without selling —",
+                "contemplating": "Contemplating whether to sell",
+                "note": "A market note about",
+            }.get(side, "Reflecting on")
+            proposed = f"{label} {ticker}" if ticker else f"{label} the market"
         elif side in ("observe", "contemplating", "note"):
             label = {
                 "observe": "Observing/passing on",
-                "contemplating": "Contemplating a position in",
+                "contemplating": "Contemplating opening a position in",
                 "note": "A market note about",
             }.get(side, "Reflecting on")
             proposed = f"{label} {ticker}" if ticker else f"{label} the market"
