@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS trades (
     realized_pnl_base REAL,
     fee               REAL,
     tax               REAL,
+    emotion_tag       TEXT,
     created_at      TEXT    NOT NULL
 )
 """
@@ -413,6 +414,7 @@ def _migrate_trades_for_journal_entries(conn: sqlite3.Connection) -> None:
     with _write_lock:
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
+            conn.execute("DROP TABLE IF EXISTS trades_new")
             conn.execute(
                 _SCHEMA_TRADES.replace(
                     "CREATE TABLE IF NOT EXISTS trades (", "CREATE TABLE trades_new (", 1,

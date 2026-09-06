@@ -155,12 +155,12 @@ export default function PortfolioRiskPanel({
         />
         <KpiCard
           title="Sharpe Ratio"
-          value={report.sharpe_ratio !== null ? report.sharpe_ratio.toFixed(2) : "—"}
+          value={report.sharpe_ratio != null ? report.sharpe_ratio.toFixed(2) : "—"}
           note={`Annualized, vs. ${pct(report.risk_free_annual)} risk-free`}
         />
         <KpiCard
           title="Beta"
-          value={report.beta !== null ? report.beta.toFixed(2) : "—"}
+          value={report.beta != null ? report.beta.toFixed(2) : "—"}
           note="vs. the S&P 500, in base currency"
         />
       </div>
@@ -240,7 +240,7 @@ export default function PortfolioRiskPanel({
                               : { background: corrColor(v), color: "#fff" }
                           }
                         >
-                          {v === undefined ? "—" : v.toFixed(2)}
+                          {v != null ? v.toFixed(2) : "—"}
                         </td>
                       );
                     })}
