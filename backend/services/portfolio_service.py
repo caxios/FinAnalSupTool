@@ -1321,7 +1321,9 @@ async def fetch_baseline(ticker: str, store, debate_store=None) -> dict:
     Runs both forms over the same window: the 10-Ks give the annual picture and
     the 10-Qs the quarterly cadence. Note that **an "8 quarter" request resolves
     to about 6 10-Qs plus 2 10-Ks**, not 8 10-Qs — the SEC does not file a Q4
-    10-Q, and that quarter's figures live in the annual report instead.
+    10-Q. ``sec_ingest.fetch_and_ingest_range`` derives each year's standalone
+    Q4 (FY − Q1 − Q2 − Q3) once its 10-K and all three 10-Qs are in, so the
+    quarterly cadence still ends up with all 4 quarters, not just 3.
 
     Never raises: this runs detached in the background, so a failure is recorded
     in the status map rather than surfacing as an unhandled task exception.
@@ -1363,8 +1365,8 @@ async def fetch_baseline(ticker: str, store, debate_store=None) -> dict:
         state = "partial" if failures else "complete"
         message = (
             f"Ingested {total_ingested} filing(s) for {t} covering "
-            f"{start_year}–{end_year} (~8 quarters: 10-Qs cover Q1–Q3, "
-            f"Q4 figures come from each 10-K)."
+            f"{start_year}–{end_year} (~8 quarters; each year's Q4 is derived "
+            f"from its 10-K minus Q1–Q3)."
         )
         if failures:
             message += " Some forms failed: " + "; ".join(failures)

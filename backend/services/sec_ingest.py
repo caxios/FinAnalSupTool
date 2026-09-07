@@ -21,16 +21,20 @@ non-HTTP caller isn't forced to catch web-layer errors; the router maps them.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from starlette.concurrency import run_in_threadpool
 
+from providers import edgar_xbrl
 from schemas import FilingMeta, ResolvedFiling
 from services import filing_cache, sec_fetch
 from services.ingestion import ingest_pdf, staging_path
-from services.storage import DocumentStore
+from services.storage import CompanyStore, DocumentStore
 
 logger = logging.getLogger(__name__)
+
+_FY_KEY_RE = re.compile(r"^FY(\d{4})$")
 
 
 @dataclass
@@ -79,6 +83,34 @@ async def fetch_and_ingest_range(
         start_quarter,
         end_quarter,
     )
+
+    # SEC never files a Q4 10-Q — that quarter's figures live only in the
+    # annual 10-K. Auto-include the 10-K for every fiscal year in this range
+    # that isn't already in the store, so Q4 can be derived afterward
+    # (FY minus the 9-month YTD through Q3, see Step 3) instead of being
+    # permanently missing. A year whose 10-K is already ingested is skipped
+    # to avoid re-rendering it.
+    if form_type == "10-Q":
+        norm_ticker = ticker.strip().upper()
+        existing_fy: set[str] = set()
+        if store.has_company(norm_ticker):
+            existing_fy = set(store.get_company_store(norm_ticker).table_store.keys())
+        missing_fy = [
+            y for y in range(start_year, end_year + 1)
+            if f"FY{y}" not in existing_fy
+        ]
+        if missing_fy:
+            try:
+                extra = await run_in_threadpool(
+                    sec_fetch.plan_filings,
+                    ticker, "10-K", min(missing_fy), max(missing_fy),
+                )
+                planned = planned + [p for p in extra if p.fiscal_year in missing_fy]
+            except sec_fetch.SecFetchError as e:
+                logger.warning(
+                    f"[sec] could not plan Q4-source 10-K(s) for {ticker} "
+                    f"FY{min(missing_fy)}-{max(missing_fy)}: {e}"
+                )
 
     result = IngestRangeResult()
     logger.info(f"[sec] {ticker} {form_type}: {len(planned)} filing(s) planned")
@@ -149,11 +181,15 @@ async def fetch_and_ingest_range(
             document_url=fetched.document_url,
         ))
 
-    # ── Step 3: refresh the merged-tables cache once per company touched, and
-    # persist the raw text/tables to disk so a later server restart doesn't
-    # strand the AI Chat assistant with no evidence for this ticker. ──
+    # ── Step 3: derive Q4 (FY minus 9-month YTD) wherever the annual 10-K
+    # and all three 10-Qs are now present, refresh the merged-tables cache
+    # once per company touched,
+    # and persist the raw text/tables to disk so a later server restart
+    # doesn't strand the AI Chat assistant with no evidence for this ticker. ──
     for tk in result.affected_tickers:
         company_store = store.get_company_store(tk)
+        if form_type == "10-Q":
+            await _derive_q4_periods(company_store)
         company_store.rebuild_merged_tables()
         filing_cache.save_company_store(tk, company_store)
 
@@ -162,3 +198,50 @@ async def fetch_and_ingest_range(
         f"{result.succeeded}/{len(result.filings)} ingested"
     )
     return result
+
+
+async def _derive_q4_periods(company_store: CompanyStore) -> None:
+    """
+    Synthesize each fiscal year's standalone "Q4 FY{year}" period wherever the
+    10-K and all three 10-Qs are now present but Q4 hasn't been derived yet.
+
+    Cheap even across repeated calls: ``fetch_company_facts`` is cached per
+    CIK, so this costs no extra network round-trip once the 10-K has already
+    been fetched once for this ticker.
+    """
+    fiscal_years = {
+        int(m.group(1))
+        for key in company_store.table_store
+        if (m := _FY_KEY_RE.match(key))
+    }
+    for fy in fiscal_years:
+        q4_key = f"Q4 FY{fy}"
+        if q4_key in company_store.table_store:
+            continue  # already derived
+        quarter_keys = [f"Q{n} FY{fy}" for n in (1, 2, 3)]
+        if not all(k in company_store.table_store for k in quarter_keys):
+            continue  # need all three quarters on hand to subtract
+
+        cik = company_store.filing_meta.get(f"FY{fy}", {}).get("cik")
+        if cik is None:
+            continue  # this year's 10-K wasn't XBRL-sourced (e.g. pdfplumber fallback)
+
+        facts = await edgar_xbrl.fetch_company_facts(cik)
+        if facts is None:
+            continue
+
+        derived = edgar_xbrl.build_q4_synthetic_tables(facts, fy)
+        if derived is None:
+            continue
+        tables, metrics = derived
+
+        company_store.table_store[q4_key] = tables
+        company_store.metrics_store[q4_key] = metrics
+        fy_meta = company_store.filing_meta.get(f"FY{fy}", {})
+        company_store.filing_meta[q4_key] = {
+            **fy_meta,
+            "period_key": q4_key,
+            "period": f"Q4 FY{fy} (derived: FY annual minus 9-month YTD through Q3)",
+            "data_source": "xbrl-derived-q4",
+        }
+        logger.info(f"[sec] [{company_store.ticker}] derived {q4_key} from FY minus 9mo-YTD")

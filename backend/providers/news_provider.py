@@ -246,6 +246,61 @@ def _company_tokens(company: str, ticker: str | None) -> set[str]:
     return tokens
 
 
+# Markers bounding the ACTUAL call dialogue within a crawled transcript page.
+# Source sites (Motley Fool, investing.com) wrap the transcript in navigation
+# chrome and a promotional footer of unrelated article recommendations —
+# neither of which the earnings-call agent or a raw-data reader should see as
+# if it were part of the call. Matched case-insensitively; the header set finds
+# where the transcript itself begins (company/quarter banner, or the first
+# section heading), the footer set finds where it ends (the first "read more"
+# / cross-sell block). Taking the EARLIEST match on each side is deliberate:
+# a page can carry more than one candidate (e.g. the title banner repeats at
+# the very bottom of a Motley Fool page) and only the first occurrence bounds
+# the real content.
+_TRANSCRIPT_HEADER_MARKERS = [
+    re.compile(r"\*\*[^*\n]{1,120}\*\*[^\n]{0,100}\n\s*Q[1-4]\s+\d{4}\s+Earnings Call", re.IGNORECASE),
+    re.compile(r"^#{1,3}\s*Contents:?\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^#{1,3}\s*Prepared Remarks:?\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^#\s+.{0,120}Earnings Call Transcript\s*$", re.IGNORECASE | re.MULTILINE),
+]
+_TRANSCRIPT_FOOTER_MARKERS = [
+    re.compile(r"^#{1,3}\s*Read Next\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^#{1,3}\s*Stocks Mentioned\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\[View Premium Services", re.IGNORECASE),
+    re.compile(r"Duration:\s*\d+\s*minutes?", re.IGNORECASE),
+    re.compile(r"Where should you invest \$1,000 right now\?", re.IGNORECASE),
+]
+
+# Below this, a marker match is more likely a false positive (e.g. a passing
+# mid-dialogue mention) than a real boundary — falling back to the original
+# text is safer than risking a gutted transcript.
+_MIN_CLEANED_LENGTH = 500
+
+
+def clean_transcript_text(text: str) -> str:
+    """
+    Strip crawled website chrome from an earnings-call transcript page,
+    leaving the prepared remarks, analyst Q&A, and call sign-off intact.
+
+    Conservative by design: a page whose markup doesn't match any recognized
+    boundary is returned unmodified rather than guessing, and a match that
+    would shrink the text below `_MIN_CLEANED_LENGTH` is treated as a false
+    positive and discarded — an over-eager strip that deletes real dialogue
+    is a worse failure than leaving some boilerplate in.
+    """
+    if not text:
+        return text
+
+    starts = [m.start() for pat in _TRANSCRIPT_HEADER_MARKERS if (m := pat.search(text))]
+    start = min(starts) if starts else 0
+
+    ends = [m.start() for pat in _TRANSCRIPT_FOOTER_MARKERS if (m := pat.search(text, start))]
+    end = min(ends) if ends else len(text)
+
+    cleaned = text[start:end].strip()
+    return cleaned if len(cleaned) >= _MIN_CLEANED_LENGTH else text
+
+
 def _pick_transcript_result(
     results: list[dict],
     hint: str,
@@ -324,6 +379,7 @@ async def _tavily_transcript(
     text = (best.get("raw_content") or best.get("content") or "").strip()
     if not text:
         return TranscriptDoc(configured=True, found=False)
+    text = clean_transcript_text(text)
 
     return TranscriptDoc(
         configured=True,

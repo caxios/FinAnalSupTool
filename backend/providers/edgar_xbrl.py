@@ -587,6 +587,187 @@ def _get_concept_value(
     return None
 
 
+def _select_fact_by_fy_fp(
+    fact_entries: list[dict],
+    fiscal_year: int,
+    fp: str,
+    is_instant: bool,
+    span_lo: int | None = None,
+    span_hi: int | None = None,
+    target_span: int | None = None,
+) -> dict | None:
+    """
+    Pick the XBRL fact entry tagged with this exact fiscal year + fiscal
+    period (``fp``: "Q1"/"Q2"/"Q3"/"FY"), by the ``fy``/``fp`` tags SEC
+    attaches to every entry — rather than by matching a filing's own cover-
+    page end date, which is what :func:`_select_fact_entry` does.
+
+    Used to derive Q4 (FY − Q1 − Q2 − Q3): SEC never files a Q4 10-Q, so
+    there is no filing whose cover page we could match a "target end date"
+    against for that quarter. fy/fp selection sidesteps that entirely.
+
+    Two wrinkles in EDGAR's tagging make this less direct than it sounds:
+
+    1. ``fy``/``fp`` label which *filing* a fact came from, not which period
+       the fact itself covers. Every 10-Q/10-K also carries the prior-year
+       comparative figure for the same line item, tagged with that *same*
+       fy/fp. Among same-shaped candidates, the one with the most recent
+       ``end`` date is always the current period — a comparative is always
+       for an earlier date.
+    2. A 10-Q's XBRL usually carries BOTH the standalone ~3-month figure and
+       the cumulative year-to-date figure for a duration concept under that
+       same fy/fp (same filing, different ``start``). Duration candidates
+       are restricted to a ~45–120 day span to keep the standalone quarter
+       and skip the YTD one; the FY entry is restricted to ~300–430 days so
+       a stray non-annual duration under fp="FY" can't slip in.
+    """
+    candidates: list[tuple] = []
+    if target_span is None:
+        target_span = 365 if fp == "FY" else 91
+    if span_lo is None:
+        span_lo, span_hi = (300, 430) if fp == "FY" else (45, 120)
+
+    for entry in fact_entries:
+        if entry.get("fy") != fiscal_year or entry.get("fp") != fp:
+            continue
+        end = _parse_iso(entry.get("end", ""))
+        if end is None:
+            continue
+        if is_instant:
+            candidates.append((end, 0.0, entry))
+            continue
+        start = _parse_iso(entry.get("start", ""))
+        if start is None:
+            continue
+        span = (end - start).days
+        if span < span_lo or span > span_hi:
+            continue  # e.g. skip the YTD cumulative entry, keep the quarter
+        candidates.append((end, abs(span - target_span), entry))
+
+    if not candidates:
+        return None
+    # Most recent `end` wins (the current period, not a prior-year
+    # comparative); span-fit only breaks ties within the same end date.
+    candidates.sort(key=lambda c: (-c[0].toordinal(), c[1]))
+    return candidates[0][2]
+
+
+def _get_concept_value_by_fy_fp(
+    facts: dict,
+    concepts: list[str],
+    fiscal_year: int,
+    fp: str,
+    is_instant: bool,
+    **span_kwargs,
+) -> float | None:
+    """fy/fp counterpart to :func:`_get_concept_value`, for Q4 derivation."""
+    taxonomies = facts.get("facts", {})
+    for concept in concepts:
+        for taxonomy in ("us-gaap", "ifrs-full", "dei"):
+            node = taxonomies.get(taxonomy, {}).get(concept)
+            if not node:
+                continue
+            for unit_entries in node.get("units", {}).values():
+                entry = _select_fact_by_fy_fp(
+                    unit_entries, fiscal_year, fp, is_instant, **span_kwargs
+                )
+                if entry is not None and entry.get("val") is not None:
+                    return float(entry["val"])
+    return None
+
+
+# The 9-month year-to-date duration tagged under fp="Q3" — distinct from the
+# ~91-day standalone Q3 quarter selected by the default span in
+# `_select_fact_by_fy_fp`. Used for Q4 = FY − 9mo-YTD (see below): unlike
+# summing three standalone quarters, this also works for the cash-flow
+# statement, which SEC filings only ever report cumulatively (a 10-Q never
+# tags a standalone quarterly cash-flow figure, only YTD-since-fiscal-year-start).
+_YTD_9MO_SPAN = dict(span_lo=250, span_hi=300, target_span=273)
+
+
+def build_q4_synthetic_tables(
+    facts: dict, fiscal_year: int,
+) -> tuple[dict[str, list[pd.DataFrame]], dict[str, float | None]] | None:
+    """
+    Derive the standalone Q4 figures SEC never files on their own.
+
+    SEC only requires Q1–Q3 10-Qs; Q4 is folded into the 10-K's full-year
+    total. This reconstructs a genuine "three months ended" Q4 the same way
+    analysts do by hand: for every duration (income-statement / cash-flow)
+    line item, Q4 = FY (from the 10-K) − the 9-month year-to-date figure
+    (from the Q3 10-Q). This is equivalent to FY − Q1 − Q2 − Q3 for anything
+    reported quarterly, but also correctly handles the cash-flow statement,
+    which 10-Qs only ever report as YTD (never a standalone quarter). Balance
+    sheet figures are already point-in-time at the fiscal year end, so Q4's
+    balance sheet is simply the 10-K's own — no subtraction needed.
+
+    EPS and share-count concepts are skipped: they are weighted averages,
+    not additive across quarters, so subtracting them would misstate them.
+
+    Returns ``None`` if too few concepts could be resolved for both periods
+    to produce a meaningful Q4 (e.g. missing a quarter's tag, or a company
+    that changes how it tags a concept quarter to quarter).
+    """
+    result: dict[str, list[pd.DataFrame]] = {
+        "balance_sheet": [], "income_statement": [], "cash_flow": [], "unclassified": [],
+    }
+    produced_any_row = False
+
+    # Balance sheet: identical to the FY-end snapshot — no subtraction.
+    bs_rows: list[tuple[str, str]] = []
+    for label, aliases, kind in BALANCE_SHEET_CONCEPTS:
+        val = _get_concept_value_by_fy_fp(facts, aliases, fiscal_year, "FY", True)
+        if val is None:
+            continue
+        bs_rows.append((label, _format_value(val, kind)))
+        produced_any_row = True
+    if bs_rows:
+        result["balance_sheet"].append(pd.DataFrame(bs_rows, columns=["Line Item", "Value"]))
+
+    # Income statement + cash flow: FY − 9-month YTD (through Q3).
+    for stmt_type, concepts in (
+        ("income_statement", INCOME_STATEMENT_CONCEPTS),
+        ("cash_flow", CASH_FLOW_CONCEPTS),
+    ):
+        rows: list[tuple[str, str]] = []
+        for label, aliases, kind in concepts:
+            if kind in ("eps", "shares"):
+                continue  # not additive across quarters — see docstring
+            fy_val = _get_concept_value_by_fy_fp(facts, aliases, fiscal_year, "FY", False)
+            ytd_val = _get_concept_value_by_fy_fp(
+                facts, aliases, fiscal_year, "Q3", False, **_YTD_9MO_SPAN
+            )
+            if fy_val is None or ytd_val is None:
+                continue  # can't reliably derive Q4 without both anchors
+            rows.append((label, _format_value(fy_val - ytd_val, kind)))
+            produced_any_row = True
+        if rows:
+            result[stmt_type].append(pd.DataFrame(rows, columns=["Line Item", "Value"]))
+
+    if not produced_any_row:
+        return None
+
+    # Raw ratio-input metrics for Q4, same FY − 9mo-YTD derivation.
+    metrics: dict[str, float | None] = {}
+    for key, aliases, is_instant in _RATIO_METRIC_SPECS:
+        if is_instant:
+            metrics[key] = _get_concept_value_by_fy_fp(facts, aliases, fiscal_year, "FY", True)
+            continue
+        fy_val = _get_concept_value_by_fy_fp(facts, aliases, fiscal_year, "FY", False)
+        ytd_val = _get_concept_value_by_fy_fp(
+            facts, aliases, fiscal_year, "Q3", False, **_YTD_9MO_SPAN
+        )
+        metrics[key] = fy_val - ytd_val if fy_val is not None and ytd_val is not None else None
+    if (
+        metrics.get("gross_profit") is None
+        and metrics.get("revenue") is not None
+        and metrics.get("cost_of_revenue") is not None
+    ):
+        metrics["gross_profit"] = metrics["revenue"] - metrics["cost_of_revenue"]
+
+    return result, metrics
+
+
 def get_period_label(
     facts: dict,
     period_end: date | None,

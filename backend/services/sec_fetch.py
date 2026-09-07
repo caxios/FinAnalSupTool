@@ -358,7 +358,9 @@ def plan_filings(
             continue
         if form_type == "10-Q":
             if q not in (1, 2, 3):
-                continue  # Q4 is reported in the 10-K, never a 10-Q
+                continue  # Q4 is reported in the 10-K, never a 10-Q — see
+                # sec_ingest.fetch_and_ingest_range, which auto-includes the
+                # 10-K and derives standalone Q4 figures from it afterward
             # Precise quarter boundaries at the range's first/last fiscal year.
             if start_quarter is not None and fy == start_year and q < start_quarter:
                 continue

@@ -200,7 +200,11 @@ async def get_agent_raw_data(
     back empty) is not a 404 — ``research_copilot.rehydrate_raw_data`` recovers
     what it can from a disk-backed cache (earnings transcripts, filing text)
     and returns an honest "unavailable" note otherwise; `source` in the
-    response says which happened.
+    response says which happened. For ``earnings_call`` specifically, a cache
+    miss additionally triggers a LIVE re-fetch of the archived report's own
+    ``quarters_analyzed`` (when TAVILY_API_KEY is configured), so an old run's
+    transcripts show up for real on the next view rather than staying
+    permanently "unavailable".
     """
     record = history_store.get_analysis(run_id)
     if record is None:
@@ -222,6 +226,21 @@ async def get_agent_raw_data(
     else:
         raw = research_copilot.rehydrate_raw_data(agent_id, ticker, debate_store, store)
         source = "unavailable" if raw.startswith("(") else "rehydrated"
+
+        # Earnings transcripts are the one raw-data kind worth a LIVE recovery
+        # attempt: unlike a filing (re-fetched from the disk cache above, or
+        # simply not re-fetchable without re-uploading a PDF), a past quarter's
+        # transcript is a fixed, findable document — the same lookup
+        # `EarningsCallAgent` made originally, just deferred until someone
+        # actually asks to see it. `quarters_analyzed` on the archived report
+        # names exactly which quarters to look for.
+        if agent_id == "earnings_call" and source == "unavailable":
+            quarters_analyzed = reports[agent_id].get("quarters_analyzed") or []
+            recovered = await research_copilot.fetch_and_cache_earnings_transcripts(
+                record.get("company"), ticker, quarters_analyzed,
+            )
+            if recovered:
+                raw, source = recovered, "rehydrated"
 
     return AgentRawDataResponse(
         run_id=run_id, agent_id=agent_id, ticker=record.get("ticker"),

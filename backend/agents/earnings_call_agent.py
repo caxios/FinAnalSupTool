@@ -286,8 +286,19 @@ class EarningsCallAgent(BaseAgent):
             missing=", ".join(missing) or "(none)",
             transcripts=transcripts_block,
         )
+
         if capture is not None:
-            capture["raw_data"] = user_prompt
+            # The PURE, untruncated transcripts of every fetched quarter — not
+            # `user_prompt`. The prompt carries LLM instructions and, for a long
+            # period, RAG-retrieved excerpts in place of older quarters' full
+            # text; neither belongs in what the Raw Source Data tab / isolated
+            # agent chat present as "the raw data", which must stay the actual
+            # verbatim call transcripts regardless of what Gemini was shown.
+            full_blocks = [
+                f"=== {label} {qlabel} EARNINGS CALL TRANSCRIPT (source: {source}) ===\n\n{text}"
+                for qlabel, source, text in fetched
+            ]
+            capture["raw_data"] = ("\n\n" + "=" * 80 + "\n\n").join(full_blocks)
 
         # Per-quarter breakdown plus cross-quarter tracking is a long report, and
         # Gemini's thinking tokens draw from the same budget — too small a

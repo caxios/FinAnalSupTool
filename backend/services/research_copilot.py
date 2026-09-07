@@ -26,7 +26,9 @@ existing data paths rather than fetching anything new:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -131,6 +133,30 @@ def _sec_text_text(store: CompanyStore) -> str:
     return build_context({}, store.text_store, store.filing_meta)
 
 
+def _format_cached_quarters(ticker: str) -> str | None:
+    """
+    Every quarter ``services.transcript_cache`` has on disk for this ticker,
+    concatenated into one verbatim block — ``None`` if none are cached.
+
+    Re-cleans on read (not just at fetch time): a file cached before
+    ``news_provider.clean_transcript_text`` existed still carries the
+    original site chrome, and re-cleaning here fixes it for every ticker
+    already on disk without a re-fetch. Idempotent on an already-clean file.
+    """
+    from providers.news_provider import clean_transcript_text
+    from services import transcript_cache
+
+    parts: list[str] = []
+    for q in transcript_cache.list_cached_quarters(ticker):
+        year_str, _, quarter_str = q.partition("Q")
+        if not (year_str.isdigit() and quarter_str.isdigit()):
+            continue
+        doc = transcript_cache.get_transcript(ticker, int(year_str), int(quarter_str))
+        if doc and doc.found and doc.text:
+            parts.append(f"=== {ticker} {q} Earnings Call ({doc.source}) ===\n{clean_transcript_text(doc.text)}")
+    return "\n\n".join(parts) if parts else None
+
+
 def earnings_text(debate_store: DebateStore, ticker: str) -> str:
     """
     The last /analyze run's captured earnings-call raw data — not a new fetch.
@@ -141,20 +167,24 @@ def earnings_text(debate_store: DebateStore, ticker: str) -> str:
     Falls back, in order, for a COLD ticker (server restart, or an archived
     run opened without re-fetching):
       1. In-memory ``DebateStore`` (fastest, the common case — unchanged above).
-      2. ``rag.history_store``'s persisted record — its own captured raw_data
-         if the run predates/postdates a restart, else the (thinner, but still
-         grounded) structured ``earnings_call`` report.
+      2. ``rag.history_store``'s persisted record's own captured raw_data, if
+         the run predates/postdates a restart.
       3. ``services.transcript_cache`` — standalone cached transcripts for
          this ticker, fetched by a PAST analysis run's earnings-call agent,
          independent of any single run's debate record.
 
+    Deliberately does NOT fall back to the structured ``earnings_call``
+    report as a last resort: that JSON is an LLM's ANALYSIS of the calls, not
+    the calls themselves, and returning it as "raw data" would be exactly the
+    fabrication this app's raw-data contract exists to prevent. A ticker with
+    a report but no cached transcript anywhere returns an honest "not cached"
+    message instead — see :func:`fetch_and_cache_earnings_transcripts` for
+    the on-demand live recovery this leaves for `routers.analysis` to use.
+
     Public (not module-private) because ``routers.chat`` reuses it too, for
     the same "raw_data missing from this run's agent_contexts" fallback.
     """
-    import json
-
     from rag import history_store
-    from services import transcript_cache
 
     record = debate_store.get(ticker) or {}
     ctx = (record.get("agent_contexts") or {}).get("earnings_call")
@@ -168,30 +198,65 @@ def earnings_text(debate_store: DebateStore, ticker: str) -> str:
         archived_raw = (archived_ctx or {}).get("raw_data")
         if archived_raw:
             return archived_raw
-        # A record saved before `agent_contexts` was persisted has no raw_data
-        # — its structured findings are still a real, if thinner, grounding.
-        report = (archived.get("reports") or {}).get("earnings_call")
-        if report:
-            return json.dumps(report, ensure_ascii=False, indent=2, default=str)
 
-    quarters = transcript_cache.list_cached_quarters(ticker)
-    parts: list[str] = []
-    for q in quarters:
-        year_str, _, quarter_str = q.partition("Q")
-        if not (year_str.isdigit() and quarter_str.isdigit()):
-            continue
-        doc = transcript_cache.get_transcript(ticker, int(year_str), int(quarter_str))
-        if doc and doc.found and doc.text:
-            parts.append(f"=== {ticker} {q} Earnings Call ({doc.source}) ===\n{doc.text}")
-    if parts:
-        return "\n\n".join(parts)
+    cached = _format_cached_quarters(ticker)
+    if cached:
+        return cached
 
-    return (
-        "(No earnings-call data available. This scope reuses transcripts "
-        "captured by a Deep Analysis run or a standalone search for this "
-        "ticker rather than fetching new ones — run a Deep Analysis first "
-        "to populate it.)"
+    return f"(No verbatim earnings call transcripts are cached on disk for {ticker}.)"
+
+
+_QUARTER_LABEL_RE = re.compile(r"Q([1-4])\s+(\d{4})", re.IGNORECASE)
+
+# Mirrors `agents.earnings_call_agent._MAX_QUARTERS` — an on-demand recovery
+# must not fan out into an unbounded number of live Tavily calls just because
+# a report happens to list many quarters.
+_MAX_RECOVERY_QUARTERS = 8
+
+
+async def fetch_and_cache_earnings_transcripts(
+    company: str | None, ticker: str, quarters_analyzed: list[str]
+) -> str | None:
+    """
+    On-demand recovery for a run whose earnings-call transcripts are gone
+    from both ``agent_contexts`` and ``transcript_cache`` — parses the
+    ARCHIVED report's own ``quarters_analyzed`` labels (e.g. ``"Q3 2025"``)
+    and re-fetches exactly those quarters live, the same lookup
+    ``EarningsCallAgent`` made originally (cache-first, so a quarter another
+    run already recovered is never re-fetched). Lets an old run's Raw Source
+    Data tab show real transcripts on the next view, with no full re-analysis.
+
+    Returns ``None`` (never raises) when Tavily isn't configured, no label
+    parses, or nothing was actually found — callers should keep whatever
+    "unavailable" message they already have in that case.
+    """
+    from providers import news_provider
+
+    if not news_provider.tavily_api_key():
+        return None
+
+    quarters: list[tuple[int, int]] = []
+    for label in quarters_analyzed[:_MAX_RECOVERY_QUARTERS]:
+        m = _QUARTER_LABEL_RE.search(label or "")
+        if m:
+            quarters.append((int(m.group(2)), int(m.group(1))))
+    if not quarters:
+        return None
+
+    label = company or ticker
+    docs = await asyncio.gather(
+        *(news_provider.search_earnings_transcript(label, ticker, year, q) for year, q in quarters),
+        return_exceptions=True,
     )
+
+    parts: list[str] = []
+    for (year, q), doc in zip(quarters, docs):
+        if isinstance(doc, Exception):
+            logger.warning(f"[research_copilot] recovery fetch failed for {ticker} Q{q} {year}: {doc}")
+            continue
+        if doc.found and doc.text:
+            parts.append(f"=== {ticker} Q{q} {year} Earnings Call ({doc.source}) ===\n{doc.text}")
+    return "\n\n".join(parts) if parts else None
 
 
 def rehydrate_raw_data(agent_id: str, ticker: str, debate_store: DebateStore, store) -> str:
