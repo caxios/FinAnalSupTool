@@ -5,8 +5,8 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,       // Keep the URL stable so it's always http://localhost:5173
-    strictPort: true, // Fail loudly if 5173 is taken (instead of silently hopping ports)
-    open: true,       // Auto-open the browser to the right page on `npm run dev`
+    port: 5173,
+    strictPort: false, // Fallback to next available port (e.g. 5174) if 5173 is taken
+    open: true,
   },
 })
