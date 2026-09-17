@@ -21,7 +21,7 @@ import { useDashboard } from "../context/DashboardContext";
 import { useAsync } from "../hooks/useAsync";
 import {
   getCompanyNews, getCompanyVideos, getEarnings, getMacroNews, getMacroVideos,
-  getMarketSentiment, getCachedPrice,
+  getMarketSentiment, getCachedPrice, getPeriods, getCompany,
 } from "../api";
 import UpperPane from "../components/UpperPane";
 import LowerPane from "../components/LowerPane";
@@ -255,22 +255,68 @@ function CompanyDataPanel({ onUploadComplete, onDataChanged }: {
   onUploadComplete: (filings: FilingMeta[]) => void;
   onDataChanged: () => void;
 }) {
-  const { activeTicker, periods, refreshKey, company } = useDashboard();
+  const { activeTicker, refreshKey } = useDashboard();
   const [period] = useState(defaultPeriod);
   const [startDate, setStartDate] = useState(period.start);
   const [endDate, setEndDate] = useState(period.end);
   const [viewerTab, setViewerTab] = useState<ViewerTab>("financials");
   const [uploadOpen, setUploadOpen] = useState(false);
 
-  const companyLabel = company
-    ? `${company.name ?? "Unknown company"}${company.ticker ? ` (${company.ticker})` : ""}`
-    : activeTicker;
+  // The ticker this panel is browsing/fetching — deliberately separate from
+  // the app-wide `activeTicker` (which drives chat/sidebar/Deep Analysis).
+  // Typing a ticker here and fetching data for it does NOT switch the whole
+  // app over; every data type is independently fetchable the moment a ticker
+  // is entered, with no need to first pull a 10-K/10-Q through "Get Data".
+  const [tickerInput, setTickerInput] = useState(activeTicker ?? "");
+  const [targetTicker, setTargetTicker] = useState(activeTicker ?? "");
+
+  // Stay in sync when the app's active company changes elsewhere (header
+  // switcher, or a completed "Get Data" upload) — but only overwrite what the
+  // user hasn't started typing something else into.
+  useEffect(() => {
+    if (activeTicker) {
+      setTickerInput(activeTicker);
+      setTargetTicker(activeTicker);
+    }
+  }, [activeTicker]);
+
+  const commitTicker = () => {
+    const t = tickerInput.trim().toUpperCase();
+    if (t) setTargetTicker(t);
+  };
+
+  // Fetched directly by ticker string (not via DashboardContext) so this
+  // panel works for any ticker, not just the app-wide active one.
+  const localPeriods = useAsync(
+    () => (targetTicker ? getPeriods(targetTicker) : Promise.resolve(null)),
+    [targetTicker, refreshKey]
+  );
+  const localCompany = useAsync(
+    () => (targetTicker ? getCompany(targetTicker) : Promise.resolve(null)),
+    [targetTicker, refreshKey]
+  );
+  const financialsPeriods = localPeriods.data?.periods ?? [];
+  const primary = localCompany.data?.primary;
+  const companyLabel = primary
+    ? `${primary.name ?? "Unknown company"}${primary.ticker ? ` (${primary.ticker})` : ""}`
+    : targetTicker || null;
 
   return (
     <div className="data-company-panel">
       <div className="data-hub-toolbar">
-        <div className="data-hub-company">
-          {companyLabel ?? <span className="view-subtitle-muted">No company selected</span>}
+        <div className="data-hub-ticker-group">
+          <input
+            className="data-hub-ticker-input"
+            type="text"
+            placeholder="Ticker, e.g. AAPL"
+            value={tickerInput}
+            onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
+            onKeyDown={(e) => { if (e.key === "Enter") commitTicker(); }}
+            onBlur={commitTicker}
+          />
+          <div className="data-hub-company">
+            {companyLabel ?? <span className="view-subtitle-muted">No ticker entered</span>}
+          </div>
         </div>
         <div className="data-hub-period">
           <span className="range-bar-label">Period</span>
@@ -279,22 +325,22 @@ function CompanyDataPanel({ onUploadComplete, onDataChanged }: {
           <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
         </div>
         <button className="btn-upload" onClick={() => setUploadOpen(true)}>
-          📁 Upload PDF
+          📁 Get Data
         </button>
       </div>
 
-      {!activeTicker && (
+      {!targetTicker && (
         <MediaNotice
           icon="📄"
-          title="No company selected"
-          message="Upload a filing, or type a ticker into the SEC 10-K/10-Q fetch below and pick it in the header once it appears."
+          title="No ticker entered"
+          message="Type a ticker above and press Enter to start fetching its data — or use Get Data to upload a filing directly."
         />
       )}
 
-      {activeTicker && (
+      {targetTicker && (
         <>
           <FetchControlPanel
-            ticker={activeTicker}
+            ticker={targetTicker}
             startDate={startDate}
             endDate={endDate}
             onFetchComplete={onDataChanged}
@@ -314,14 +360,14 @@ function CompanyDataPanel({ onUploadComplete, onDataChanged }: {
 
           <div className="data-viewer-content">
             {viewerTab === "financials" && (
-              <FinancialsPanel ticker={activeTicker} refreshKey={refreshKey} periods={periods} />
+              <FinancialsPanel ticker={targetTicker} refreshKey={refreshKey} periods={financialsPeriods} />
             )}
             {viewerTab === "other" && (
-              <OtherFilingsView ticker={activeTicker} refreshKey={refreshKey} />
+              <OtherFilingsView ticker={targetTicker} refreshKey={refreshKey} />
             )}
-            {viewerTab === "news" && <NewsPanel ticker={activeTicker} refreshKey={refreshKey} />}
-            {viewerTab === "earnings" && <EarningsPanel ticker={activeTicker} refreshKey={refreshKey} />}
-            {viewerTab === "price" && <PricePanel ticker={activeTicker} refreshKey={refreshKey} />}
+            {viewerTab === "news" && <NewsPanel ticker={targetTicker} refreshKey={refreshKey} />}
+            {viewerTab === "earnings" && <EarningsPanel ticker={targetTicker} refreshKey={refreshKey} />}
+            {viewerTab === "price" && <PricePanel ticker={targetTicker} refreshKey={refreshKey} />}
           </div>
         </>
       )}

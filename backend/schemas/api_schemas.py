@@ -1368,6 +1368,15 @@ class DataFetchRequest(BaseModel):
     force_refresh: bool = Field(
         False, description="Bypass caches and re-fetch live for every included type"
     )
+    # sec_10k_10q ONLY — a fiscal year/quarter range takes precedence over
+    # start_date/end_date for that one type (the other 4 types always use the
+    # calendar date range above). Quarters are 1-3 (10-Q never covers Q4 —
+    # that quarter's figures come from the year's 10-K, fetched automatically
+    # alongside every 10-Q; see services.sec_ingest.fetch_and_ingest_range).
+    sec_start_year: int | None = Field(None, description="sec_10k_10q only")
+    sec_end_year: int | None = Field(None, description="sec_10k_10q only")
+    sec_start_quarter: int | None = Field(None, ge=1, le=3, description="sec_10k_10q only")
+    sec_end_quarter: int | None = Field(None, ge=1, le=3, description="sec_10k_10q only")
 
     @field_validator("include")
     @classmethod

@@ -72,11 +72,7 @@ def _company_label(store: DocumentStore, ticker: str) -> str:
     Control Panel is independently selectable — so this degrades to the bare
     ticker when no identity has been resolved yet.
     """
-    if not store.has_company(ticker):
-        filing_cache.rehydrate_company_store(ticker, store)
-    if not store.has_company(ticker):
-        return ticker
-    primary = company_service.primary_company(store.get_company_store(ticker))
+    primary = company_service.resolve_best_effort(store, ticker)
     return (primary.name if primary and primary.name else None) or ticker
 
 
@@ -89,16 +85,24 @@ def _year_range(start_date: str, end_date: str) -> tuple[int, int]:
 # =============================================================================
 
 async def _fetch_sec_10k_10q(
-    ticker: str, start_date: str, end_date: str, store: DocumentStore
+    ticker: str, start_date: str, end_date: str, store: DocumentStore,
+    start_year: int | None = None, end_year: int | None = None,
+    start_quarter: int | None = None, end_quarter: int | None = None,
 ) -> DataFetchResult:
-    start_year, end_year = _year_range(start_date, end_date)
+    # An explicit fiscal year/quarter range (the Data tab's own SEC period
+    # picker) takes precedence over the shared calendar date range — the
+    # latter only exists as a fallback for callers that never set one (e.g.
+    # a plain force-refresh). Quarter bounds are 10-Q-only; passed to 10-K
+    # they're simply ignored (services.sec_fetch.plan_filings resets them).
+    if start_year is None or end_year is None:
+        start_year, end_year = _year_range(start_date, end_date)
     succeeded, failed_msgs = 0, []
     for form_type in ("10-K", "10-Q"):
         try:
             result = await sec_ingest.fetch_and_ingest_range(
                 ticker=ticker, form_type=form_type,
                 start_year=start_year, end_year=end_year,
-                start_quarter=None, end_quarter=None, store=store,
+                start_quarter=start_quarter, end_quarter=end_quarter, store=store,
             )
             succeeded += result.succeeded
         except sec_fetch.SecFetchError as e:
@@ -221,7 +225,9 @@ async def fetch_data(
 
     if "sec_10k_10q" in req.include:
         results["sec_10k_10q"] = await _fetch_sec_10k_10q(
-            ticker, req.start_date, req.end_date, store
+            ticker, req.start_date, req.end_date, store,
+            start_year=req.sec_start_year, end_year=req.sec_end_year,
+            start_quarter=req.sec_start_quarter, end_quarter=req.sec_end_quarter,
         )
     if "sec_other" in req.include:
         results["sec_other"] = await _fetch_sec_other(

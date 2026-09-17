@@ -483,7 +483,17 @@ async def chat(
 
     # Assemble the grounding context from this company's in-memory data, plus the
     # media/macro data fetched for it (so the AI sees all views for ONE company).
+    # Two independent sources are concatenated: MediaCache (session-only, from
+    # actually opening a /media/* viewer tab) and the Data tab's own disk
+    # caches (news/earnings/price/insider — persisted, populated by POST
+    # /data/fetch regardless of session or whether Deep Analysis ever ran).
+    # Without the second one, a ticker fetched only through the Data tab would
+    # have nothing to say about beyond its financials.
     media_context = media_service.build_media_context(cache, ticker)
+    if ticker:
+        persisted_context = media_service.build_persisted_data_context(ticker)
+        if persisted_context.strip():
+            media_context = f"{media_context}\n\n{persisted_context}" if media_context.strip() else persisted_context
 
     # Only the named company's filings are in scope. Without a ticker the
     # assistant is macro-only (no filing data at all).

@@ -52,6 +52,27 @@ def primary_company(company_store: CompanyStore) -> CompanyInfo | None:
     return derive_companies(company_store).primary
 
 
+def resolve_best_effort(store: DocumentStore, ticker: str) -> CompanyInfo | None:
+    """
+    Best-effort company identity for `ticker` — never raises/404s.
+
+    Tries disk-cache rehydration first (a ticker ingested in an earlier
+    session/process this in-memory store hasn't seen yet), then returns None
+    if still unresolved. Callers that need a name for a live search (Tavily,
+    etc.) should fall back to the bare ticker rather than blocking the whole
+    request on SEC filings having been fetched first — a ticker with only
+    news/earnings/price data (no 10-K/10-Q) is a legitimate state in the Data
+    tab, not an error.
+    """
+    from services import filing_cache
+
+    if not store.has_company(ticker):
+        filing_cache.rehydrate_company_store(ticker, store)
+    if not store.has_company(ticker):
+        return None
+    return primary_company(store.get_company_store(ticker))
+
+
 def list_companies(store: DocumentStore) -> CompanyResponse:
     """
     Every company with ingested filings, across all per-ticker stores.

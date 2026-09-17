@@ -250,6 +250,13 @@ export interface DataFetchRequest {
   end_date: string;     // YYYY-MM-DD
   include: DataType[];
   force_refresh?: boolean;
+  // sec_10k_10q only — a fiscal year/quarter range, taking precedence over
+  // start_date/end_date for that one type. Quarters are 1-3 (Q4 comes from
+  // that year's 10-K, fetched automatically alongside every 10-Q).
+  sec_start_year?: number;
+  sec_end_year?: number;
+  sec_start_quarter?: number;
+  sec_end_quarter?: number;
 }
 
 export interface DataFetchResult {

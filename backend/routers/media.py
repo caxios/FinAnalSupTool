@@ -198,16 +198,19 @@ async def media_news(
     store: DocumentStore = Depends(get_document_store),
     cache: MediaCache = Depends(get_media_cache),
 ):
-    """Recent news for one uploaded company (Tavily, finance domains)."""
-    primary = company_service.primary_company(_company_or_404(store, ticker))
-    if primary is None or not (primary.name or primary.ticker):
-        return NewsResponse(
-            configured=bool(news_provider.tavily_api_key()),
-            scope="company",
-            message=f"No company identity resolved for '{ticker}'.",
-        )
+    """
+    Recent news for one company (Tavily, finance domains).
+
+    Degrades gracefully rather than 404ing when no SEC filings have been
+    ingested for `ticker` yet: the Data tab's News fetch is independently
+    selectable and works from the ticker alone, so this viewer must too —
+    it just searches by company name when identity IS resolved, and by the
+    bare ticker otherwise.
+    """
+    primary = company_service.resolve_best_effort(store, ticker)
+    name = (primary.name if primary and primary.name else None) or ticker
     result = await news_provider.search_company_news(
-        primary.name or primary.ticker or "", primary.ticker,
+        name, ticker,
         max_results=max_results, **_news_range_kwargs(days, start, end),
     )
     resp = NewsResponse(
@@ -392,20 +395,17 @@ async def media_earnings(
     Fetches the full transcript from investing.com first, falling back to
     Motley Fool (fool.com) if investing.com has none. Returns a graceful
     not-found / not-configured payload otherwise.
-    """
-    primary = company_service.primary_company(_company_or_404(store, ticker))
-    if primary is None or not (primary.name or primary.ticker):
-        return EarningsResponse(
-            configured=bool(news_provider.tavily_api_key()),
-            year=year, quarter=quarter,
-            message=f"No company identity resolved for '{ticker}'.",
-        )
 
+    Never 404s on unresolved company identity: the docstring's cache-first
+    promise only holds if a cache hit is served before identity is even
+    checked — a ticker with only an Earnings fetch (no 10-K/10-Q) is a
+    legitimate Data tab state, not an error.
+    """
     doc = transcript_cache.get_transcript(ticker, year, quarter)
+    primary = company_service.resolve_best_effort(store, ticker)
     if doc is None:
-        doc = await news_provider.search_earnings_transcript(
-            primary.name or "", primary.ticker, year, quarter
-        )
+        name = (primary.name if primary and primary.name else None) or ticker
+        doc = await news_provider.search_earnings_transcript(name, ticker, year, quarter)
         transcript_cache.save_transcript(ticker, year, quarter, doc)
 
     # Clean on read too, not just at fetch time: a file cached before the
