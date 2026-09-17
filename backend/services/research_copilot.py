@@ -34,12 +34,13 @@ from pydantic import BaseModel, Field
 
 from agents import llm_utils
 from gemini_chat import build_context
+from orchestration.graph import run_graph
 from providers import peer_provider
 from services.storage import CompanyStore, DebateStore
 
 logger = logging.getLogger(__name__)
 
-VALID_SCOPES = ("financials", "sec_text", "earnings", "peers", "all")
+VALID_SCOPES = ("financials", "sec_text", "earnings", "peers", "all", "hybrid")
 
 # Keeps a single copilot call bounded even at scope="all" on a company with a
 # long filing history — this is one ad-hoc question, not a full agent run.
@@ -390,6 +391,10 @@ async def query_data(
     scope = (data_scope or "all").strip().lower()
     if scope not in VALID_SCOPES:
         raise ValueError(f"Unknown data_scope {scope!r}. Use one of {VALID_SCOPES}.")
+
+    if scope == "hybrid":
+        result_state = await run_graph(query, ticker)
+        return QueryDataResponse(**result_state["answer"])
 
     blocks: list[str] = []
     if scope in ("financials", "all"):

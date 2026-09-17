@@ -56,7 +56,11 @@ Create a `.env` file in the `backend` directory and add the required API keys:
 GEMINI_API_KEY=your_gemini_api_key_here
 TAVILY_API_KEY=your_tavily_api_key_here
 YOUTUBE_API_KEY=your_youtube_api_key_here
+COHERE_API_KEY=your_cohere_api_key_here
 ```
+`COHERE_API_KEY` is optional — it powers cross-encoder reranking of hybrid
+search results (`rag/hybrid_search.py`); without it, search still works, just
+without the final reranking pass.
 #### Run the Server
 ```bash
 uvicorn main:app --reload --port 8000

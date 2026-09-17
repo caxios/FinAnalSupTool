@@ -250,10 +250,17 @@ def _rows_as_dicts(conn: duckdb.DuckDBPyConnection, sql: str, params: list) -> l
 
 
 def query_facts(
-    ticker: str, concepts: list[str] | None = None, fiscal_years: list[int] | None = None
+    ticker: str,
+    concepts: list[str] | None = None,
+    fiscal_years: list[int] | None = None,
+    fiscal_periods: list[str] | None = None,
 ) -> list[dict]:
-    """All financial_facts rows for a ticker, optionally narrowed to specific
-    concepts and/or fiscal years. Ordered chronologically."""
+    """
+    All financial_facts rows for a ticker, optionally narrowed to specific
+    concepts, fiscal years, and/or fiscal periods ('Q1'..'Q4'|'FY'; added for
+    orchestration.tools.sql_tool, which needs to ask for e.g. just Q1 of a
+    year, not every period that year has). Ordered chronologically.
+    """
     sql = "SELECT * FROM financial_facts WHERE ticker = ?"
     params: list = [(ticker or "").strip().upper()]
     if concepts:
@@ -262,6 +269,9 @@ def query_facts(
     if fiscal_years:
         sql += f" AND fiscal_year IN ({', '.join(['?'] * len(fiscal_years))})"
         params.extend(fiscal_years)
+    if fiscal_periods:
+        sql += f" AND fiscal_period IN ({', '.join(['?'] * len(fiscal_periods))})"
+        params.extend(fiscal_periods)
     sql += " ORDER BY fiscal_year, fiscal_period, is_instant"
     conn = get_connection()
     with _lock:
@@ -271,13 +281,25 @@ def query_facts(
 def query_footnotes(
     ticker: str, period_key: str, statement_item: str | None = None
 ) -> list[dict]:
-    """statement_footnote_links rows for one company/period, optionally
-    narrowed to one statement line item."""
+    """
+    statement_footnote_links rows for one company/period, optionally
+    narrowed to one statement line item.
+
+    `statement_item` matches case-insensitively and as a substring in either
+    direction (not an exact ``=``): the caller is typically an LLM-generated
+    free-text description (orchestration.tools.footnote_tool), which won't
+    reliably reproduce the exact casing/wording parsers.sec_html_parser
+    extracted from the filing HTML (e.g. "commitments and contingencies"
+    from a planner vs. the stored "Commitments and Contingencies") — found
+    live via Phase 5's own verification, where an exact-match filter here
+    silently returned [] despite the row genuinely existing.
+    """
     sql = "SELECT * FROM statement_footnote_links WHERE ticker = ? AND period_key = ?"
     params: list = [(ticker or "").strip().upper(), period_key]
     if statement_item:
-        sql += " AND statement_item = ?"
-        params.append(statement_item)
+        needle = statement_item.strip().lower()
+        sql += " AND (INSTR(LOWER(statement_item), ?) > 0 OR INSTR(?, LOWER(statement_item)) > 0)"
+        params.extend([needle, needle])
     conn = get_connection()
     with _lock:
         return _rows_as_dicts(conn, sql, params)

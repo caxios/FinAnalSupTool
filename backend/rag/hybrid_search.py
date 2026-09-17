@@ -24,6 +24,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from providers import rerank_provider
 from rag import vector_store
 from services import search_index
 
@@ -82,6 +83,46 @@ def _build_where(ticker: str | None, period: str | None) -> dict | None:
 
 
 async def search(
+    query: str,
+    *,
+    ticker: str | None = None,
+    doc_types: list[str] | None = None,
+    period: str | None = None,
+    k: int = 20,
+    rerank: bool = False,
+    rerank_top_n: int = 5,
+) -> list[SearchHit]:
+    """
+    rag.hybrid_search's public entry point: RRF-fused results (_fused_search),
+    optionally narrowed by a cross-encoder rerank pass.
+
+    rerank=True asks providers.rerank_provider to re-score the fused
+    candidates against the query directly (something neither BM25 nor vector
+    similarity does — each scores a document independently of the others).
+    Off by default so this phase's own verification and Phase 3's already
+    stay unaffected; Phase 5's tool router is expected to pass rerank=True.
+
+    Degrades exactly like every other provider in this codebase: no
+    COHERE_API_KEY, an empty candidate list, or a live API failure all fall
+    back to the plain RRF order (top rerank_top_n) rather than raising or
+    returning nothing — see providers.rerank_provider.rerank's own
+    never-raises contract.
+    """
+    hits = await _fused_search(query, ticker=ticker, doc_types=doc_types, period=period, k=k)
+    if not rerank or not hits:
+        return hits
+
+    result = await rerank_provider.rerank(query, [h.text for h in hits], top_n=rerank_top_n)
+    if not result.configured or not result.ranked:
+        logger.info(
+            f"[hybrid_search] rerank skipped ({result.message or 'not configured'}) "
+            f"— using RRF order."
+        )
+        return hits[:rerank_top_n]
+    return [hits[i] for i, _score in result.ranked]
+
+
+async def _fused_search(
     query: str,
     *,
     ticker: str | None = None,

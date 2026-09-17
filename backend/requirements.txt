@@ -13,3 +13,5 @@ chromadb
 duckdb
 beautifulsoup4
 lxml
+langgraph
+langchain-core

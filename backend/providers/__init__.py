@@ -14,6 +14,8 @@ routers, services, and agents never talk to third-party SDKs directly:
   - ``macro_data_provider`` — FRED API + yfinance macro indicators (CPI,
                               unemployment, multi-tenor Treasury yields,
                               VIX, yield spread) for the History Agent
+  - ``rerank_provider``     — Cohere Rerank cross-encoder, used by
+                              rag/hybrid_search.py to narrow RRF candidates
 
 They are intentionally free of local (in-repo) imports so they can be reused
 anywhere without pulling in the app's state or service layers.

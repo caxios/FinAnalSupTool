@@ -466,7 +466,13 @@ class QueryDataRequest(BaseModel):
     query: str = Field(description="The analyst's question, e.g. '3-year segment revenue table'")
     data_scope: str = Field(
         "all",
-        description="'financials' | 'sec_text' | 'earnings' | 'peers' | 'all'",
+        description=(
+            "'financials' | 'sec_text' | 'earnings' | 'peers' | 'all' | 'hybrid'. "
+            "'hybrid' routes through the LangGraph orchestrator (orchestration.graph) "
+            "over the FULL persisted history in structured_db/hybrid_search, rather "
+            "than a token-budget-limited dump of the current in-memory session — "
+            "best once a ticker has been through the Data tab's ingestion."
+        ),
     )
 
 
