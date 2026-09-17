@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -587,6 +587,33 @@ def _get_concept_value(
     return None
 
 
+def _get_concept_entry(
+    facts: dict,
+    concepts: list[str],
+    target_end: date | None,
+    form_type: str,
+    is_instant: bool,
+) -> tuple[str, dict] | None:
+    """
+    Like :func:`_get_concept_value`, but returns ``(matched_concept_alias,
+    raw_entry)`` instead of just the value — ``facts_to_rows`` needs the
+    entry's ``fy``/``fp``/period dates/form/accession number, not only ``val``.
+    """
+    taxonomies = facts.get("facts", {})
+    for concept in concepts:
+        for taxonomy in ("us-gaap", "ifrs-full", "dei"):
+            node = taxonomies.get(taxonomy, {}).get(concept)
+            if not node:
+                continue
+            for unit_entries in node.get("units", {}).values():
+                entry = _select_fact_entry(
+                    unit_entries, target_end, form_type, is_instant
+                )
+                if entry is not None and entry.get("val") is not None:
+                    return concept, entry
+    return None
+
+
 def _select_fact_by_fy_fp(
     fact_entries: list[dict],
     fiscal_year: int,
@@ -673,6 +700,32 @@ def _get_concept_value_by_fy_fp(
                 )
                 if entry is not None and entry.get("val") is not None:
                     return float(entry["val"])
+    return None
+
+
+def _get_concept_entry_by_fy_fp(
+    facts: dict,
+    concepts: list[str],
+    fiscal_year: int,
+    fp: str,
+    is_instant: bool,
+    **span_kwargs,
+) -> tuple[str, dict] | None:
+    """Entry-returning fy/fp counterpart, mirroring :func:`_get_concept_entry`
+    — used by :func:`q4_facts_to_rows` for the same reason: it needs the raw
+    entry (period dates, accession number), not just the resolved value."""
+    taxonomies = facts.get("facts", {})
+    for concept in concepts:
+        for taxonomy in ("us-gaap", "ifrs-full", "dei"):
+            node = taxonomies.get(taxonomy, {}).get(concept)
+            if not node:
+                continue
+            for unit_entries in node.get("units", {}).values():
+                entry = _select_fact_by_fy_fp(
+                    unit_entries, fiscal_year, fp, is_instant, **span_kwargs
+                )
+                if entry is not None and entry.get("val") is not None:
+                    return concept, entry
     return None
 
 
@@ -810,6 +863,12 @@ def get_period_label(
 # =============================================================================
 # SECTION 6: Value Formatting
 # =============================================================================
+
+# structured_db.financial_facts.unit values, keyed by the same `kind` tag
+# BALANCE_SHEET_CONCEPTS / INCOME_STATEMENT_CONCEPTS / CASH_FLOW_CONCEPTS
+# already carry — see facts_to_rows() / q4_facts_to_rows().
+_UNIT_BY_KIND = {"usd": "USD", "shares": "shares", "eps": "USD/shares"}
+
 
 def _format_value(val: float, kind: str) -> str:
     """
@@ -1143,3 +1202,124 @@ async def build_xbrl_statement_tables(
     metrics = extract_ratio_metrics(facts, period_end, form_type)
     period_label = get_period_label(facts, period_end, form_type)
     return tables, cik, metrics, period_label
+
+
+# =============================================================================
+# SECTION 10: Structured Facts Rows (services.structured_db projection)
+# =============================================================================
+# Both functions below are PROJECTIONS of the exact same facts already used
+# for build_financial_tables()/build_q4_synthetic_tables() into flat rows
+# matching services.structured_db's financial_facts schema — never a second
+# source of truth. A value here is identical to what the existing
+# table_store/merged_tables already show for the same period; this just also
+# makes it queryable by SQL (see implementation_plan/new_db_architecture_plan/
+# Phase2_Ingestion_Pipelines.md, Track A).
+
+def facts_to_rows(
+    facts: dict, ticker: str, cik: int, period_end: date | None, form_type: str,
+) -> list[dict]:
+    """
+    Project one filing's resolved concepts into structured_db.financial_facts
+    rows, using the SAME `_select_fact_entry` selection logic as
+    build_financial_tables() so a row's value is identical to what the
+    Financials tab already shows for this period.
+
+    Returns one row per concept that resolves to a value; concepts with no
+    match for this period are simply omitted (never a placeholder row).
+    """
+    rows: list[dict] = []
+    now = datetime.now(timezone.utc)
+    for statement, concepts in _STATEMENT_CONCEPTS.items():
+        is_instant = statement in _INSTANT_STATEMENTS
+        for label, aliases, kind in concepts:
+            found = _get_concept_entry(facts, aliases, period_end, form_type, is_instant)
+            if found is None:
+                continue
+            concept, entry = found
+            rows.append({
+                "ticker": (ticker or "").strip().upper(),
+                "cik": cik,
+                "statement": statement,
+                "concept": f"us-gaap:{concept}",
+                "label": label,
+                "value": float(entry["val"]),
+                "unit": _UNIT_BY_KIND.get(kind, "USD"),
+                "fiscal_year": entry.get("fy"),
+                "fiscal_period": entry.get("fp"),
+                "period_start": None if is_instant else _parse_iso(entry.get("start", "")),
+                "period_end": _parse_iso(entry.get("end", "")),
+                "is_instant": is_instant,
+                "form_type": form_type,
+                "accession_number": entry.get("accn"),
+                "source": "xbrl-direct",
+                "ingested_at": now,
+            })
+    return rows
+
+
+def q4_facts_to_rows(facts: dict, ticker: str, cik: int, fiscal_year: int) -> list[dict]:
+    """
+    Same FY-minus-9-month-YTD derivation as build_q4_synthetic_tables(), but
+    emitting flat structured_db.financial_facts rows (``source =
+    "xbrl-derived-q4"``, ``fiscal_period = "Q4"``) instead of display
+    DataFrames — so a SQL query for this ticker's quarterly series sees a
+    complete Q1-Q4 run without the caller needing to know Q4 is derived.
+
+    A derived duration row's period_start/period_end are recovered from its
+    two anchors: the 9-month YTD entry's own `end` (= the day Q4 begins) and
+    the FY entry's `end` (= the fiscal year end = Q4's own end) — neither
+    anchor alone carries Q4's true date range, but together they do.
+
+    Returns [] if too few concepts resolved (mirrors
+    build_q4_synthetic_tables()'s own "nothing meaningful to derive" case).
+    """
+    rows: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    # Balance sheet: identical to the FY-end snapshot — no subtraction.
+    for label, aliases, kind in BALANCE_SHEET_CONCEPTS:
+        found = _get_concept_entry_by_fy_fp(facts, aliases, fiscal_year, "FY", True)
+        if found is None:
+            continue
+        concept, entry = found
+        rows.append({
+            "ticker": (ticker or "").strip().upper(), "cik": cik,
+            "statement": "balance_sheet", "concept": f"us-gaap:{concept}", "label": label,
+            "value": float(entry["val"]), "unit": _UNIT_BY_KIND.get(kind, "USD"),
+            "fiscal_year": fiscal_year, "fiscal_period": "Q4",
+            "period_start": None, "period_end": _parse_iso(entry.get("end", "")),
+            "is_instant": True, "form_type": "10-K",
+            "accession_number": entry.get("accn"), "source": "xbrl-derived-q4",
+            "ingested_at": now,
+        })
+
+    # Income statement + cash flow: FY − 9-month YTD (through Q3).
+    for statement, concepts in (
+        ("income_statement", INCOME_STATEMENT_CONCEPTS),
+        ("cash_flow", CASH_FLOW_CONCEPTS),
+    ):
+        for label, aliases, kind in concepts:
+            if kind in ("eps", "shares"):
+                continue  # not additive across quarters — see build_q4_synthetic_tables
+            fy_found = _get_concept_entry_by_fy_fp(facts, aliases, fiscal_year, "FY", False)
+            ytd_found = _get_concept_entry_by_fy_fp(
+                facts, aliases, fiscal_year, "Q3", False, **_YTD_9MO_SPAN
+            )
+            if fy_found is None or ytd_found is None:
+                continue
+            concept, fy_entry = fy_found
+            _, ytd_entry = ytd_found
+            rows.append({
+                "ticker": (ticker or "").strip().upper(), "cik": cik,
+                "statement": statement, "concept": f"us-gaap:{concept}", "label": label,
+                "value": float(fy_entry["val"]) - float(ytd_entry["val"]),
+                "unit": _UNIT_BY_KIND.get(kind, "USD"),
+                "fiscal_year": fiscal_year, "fiscal_period": "Q4",
+                "period_start": _parse_iso(ytd_entry.get("end", "")),
+                "period_end": _parse_iso(fy_entry.get("end", "")),
+                "is_instant": False, "form_type": "10-K",
+                "accession_number": fy_entry.get("accn"), "source": "xbrl-derived-q4",
+                "ingested_at": now,
+            })
+
+    return rows

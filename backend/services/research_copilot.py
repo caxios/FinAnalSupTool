@@ -214,6 +214,50 @@ _QUARTER_LABEL_RE = re.compile(r"Q([1-4])\s+(\d{4})", re.IGNORECASE)
 _MAX_RECOVERY_QUARTERS = 8
 
 
+async def index_earnings_transcript(ticker: str, year: int, quarter: int, text: str) -> None:
+    """
+    Persistently index one earnings-call transcript's speaker-aware chunks
+    into BOTH the vector store (Chroma) and the BM25 search index (FTS5),
+    under a STABLE scope key (``{ticker}_{quarter}``) — unlike the MAS
+    pipeline's own ``rag/earnings_rag.py``, which indexes per-run under
+    ``{ticker}:{run_id}`` and is re-embedded every analysis run. A transcript
+    indexed here is reusable from any future question, not just the run that
+    happened to trigger the fetch — see implementation_plan/
+    new_db_architecture_plan/Phase2_Ingestion_Pipelines.md, Track B.
+
+    Reuses ``vector_store.index_chunks``'s own ``{id_prefix}-{i}`` id
+    scheme (rather than inventing a different one) so a chunk's id is
+    IDENTICAL in both stores — the join key Phase 3's RRF fusion depends on.
+
+    Also archives the raw transcript text to the data lake. Best-effort:
+    logs and returns on any failure rather than raising — indexing must
+    never block a transcript fetch/cache-read from succeeding.
+    """
+    from rag import chunking, vector_store
+    from services import data_lake, search_index
+
+    quarter_label = f"{year}Q{quarter}"
+    id_prefix = f"{ticker}_{quarter_label}_earnings"
+    try:
+        chunks = chunking.chunk_earnings_transcript(text, quarter_label)
+        if not chunks:
+            return
+        for c in chunks:
+            c["metadata"]["ticker"] = ticker
+            c["metadata"]["doc_type"] = "earnings_transcript"
+        await vector_store.index_chunks("earnings_transcripts", chunks, id_prefix=id_prefix)
+        for i, c in enumerate(chunks):
+            search_index.index_chunk(
+                f"{id_prefix}-{i}", c["text"], ticker, "earnings_transcript", c["metadata"]
+            )
+        data_lake.save_raw(ticker, "earnings_transcript", quarter_label, "txt", text)
+        logger.info(
+            f"[research_copilot] indexed {len(chunks)} earnings chunk(s) for {ticker} {quarter_label}"
+        )
+    except Exception as e:  # noqa: BLE001 — indexing is best-effort
+        logger.warning(f"[research_copilot] earnings indexing failed for {ticker} {quarter_label}: {e}")
+
+
 async def fetch_and_cache_earnings_transcripts(
     company: str | None, ticker: str, quarters_analyzed: list[str]
 ) -> str | None:
@@ -249,13 +293,21 @@ async def fetch_and_cache_earnings_transcripts(
         return_exceptions=True,
     )
 
+    from services import transcript_cache
+
     parts: list[str] = []
     for (year, q), doc in zip(quarters, docs):
         if isinstance(doc, Exception):
             logger.warning(f"[research_copilot] recovery fetch failed for {ticker} Q{q} {year}: {doc}")
             continue
+        # Despite this function's name, it never actually wrote to
+        # transcript_cache before — every "recovery" re-fetched live from
+        # Tavily on each view. Persist it now, same as the Data tab's own
+        # earnings fetch (routers/data.py._fetch_earnings) already does.
+        transcript_cache.save_transcript(ticker, year, q, doc)
         if doc.found and doc.text:
             parts.append(f"=== {ticker} Q{q} {year} Earnings Call ({doc.source}) ===\n{doc.text}")
+            await index_earnings_transcript(ticker, year, q, doc.text)
     return "\n\n".join(parts) if parts else None
 
 

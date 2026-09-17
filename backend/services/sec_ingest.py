@@ -27,8 +27,9 @@ from dataclasses import dataclass, field
 from starlette.concurrency import run_in_threadpool
 
 from providers import edgar_xbrl
+from parsers import sec_html_parser
 from schemas import FilingMeta, ResolvedFiling
-from services import filing_cache, sec_fetch
+from services import filing_cache, sec_fetch, structured_db
 from services.ingestion import ingest_pdf, staging_path
 from services.storage import CompanyStore, DocumentStore
 
@@ -181,6 +182,19 @@ async def fetch_and_ingest_range(
             document_url=fetched.document_url,
         ))
 
+        # Best-effort footnote-graph enrichment: fetches the SAME document
+        # ingest_pdf just rendered to PDF, but read here as raw HTML (which
+        # the PDF path throws away — see parsers/sec_html_parser.py). Never
+        # fails the range: a parse/fetch failure here just means this one
+        # filing has no footnote links, not that ingestion itself failed.
+        if meta.ticker and meta.status != "failed":
+            try:
+                await _archive_and_link_footnotes(
+                    meta.ticker, p.document_url, meta.detected_period or p.period_label,
+                )
+            except Exception as e:  # noqa: BLE001 — enrichment only
+                logger.warning(f"[sec] footnote-graph enrichment failed for {p.period_label}: {e}")
+
     # ── Step 3: derive Q4 (FY minus 9-month YTD) wherever the annual 10-K
     # and all three 10-Qs are now present, refresh the merged-tables cache
     # once per company touched,
@@ -198,6 +212,33 @@ async def fetch_and_ingest_range(
         f"{result.succeeded}/{len(result.filings)} ingested"
     )
     return result
+
+
+async def _archive_and_link_footnotes(ticker: str, document_url: str, period_key: str) -> None:
+    """
+    Fetch+archive one filing's raw HTML and parse its footnote graph into
+    services.structured_db.statement_footnote_links. Best-effort (see the
+    call site): fetch_and_archive_html already never raises, and
+    parse_footnote_graph always returns [] rather than raising, so this
+    function's own try/except only guards against a genuinely unexpected
+    failure (e.g. structured_db being unavailable).
+    """
+    html = await sec_html_parser.fetch_and_archive_html(document_url, ticker, period_key)
+    if html is None:
+        return
+    links = sec_html_parser.parse_footnote_graph(html)
+    if not links:
+        return
+    structured_db.upsert_footnote_links([
+        {
+            "ticker": ticker, "period_key": period_key,
+            "statement_item": l.statement_item, "note_id": l.note_id,
+            "note_title": l.note_title, "note_text": l.note_text,
+            "source_url": document_url,
+        }
+        for l in links
+    ])
+    logger.info(f"[sec] [{ticker}/{period_key}] {len(links)} footnote link(s) upserted")
 
 
 async def _derive_q4_periods(company_store: CompanyStore) -> None:
@@ -237,6 +278,16 @@ async def _derive_q4_periods(company_store: CompanyStore) -> None:
 
         company_store.table_store[q4_key] = tables
         company_store.metrics_store[q4_key] = metrics
+
+        # Same derivation, projected into structured_db as flat rows
+        # (source="xbrl-derived-q4") so a SQL query for this ticker's
+        # quarterly series is complete without needing to know Q4 is
+        # special. Best-effort: never blocks the in-memory derivation above.
+        try:
+            q4_rows = edgar_xbrl.q4_facts_to_rows(facts, company_store.ticker, cik, fy)
+            structured_db.upsert_facts(q4_rows)
+        except Exception as e:  # noqa: BLE001 — structured-facts projection is best-effort
+            logger.warning(f"[sec] [{company_store.ticker}] Q4 financial_facts upsert failed: {e}")
         fy_meta = company_store.filing_meta.get(f"FY{fy}", {})
         company_store.filing_meta[q4_key] = {
             **fy_meta,

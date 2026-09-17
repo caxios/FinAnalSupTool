@@ -24,6 +24,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
+from providers.news_dedup import hamming_distance
+
 logger = logging.getLogger(__name__)
 
 DB_PATH: Path = Path(__file__).parent.parent / "registry.db"
@@ -138,18 +140,54 @@ def close_db() -> None:
 # =============================================================================
 # Near-duplicate news detection
 # =============================================================================
+# providers.news_dedup.simhash() produces a 64-bit UNSIGNED fingerprint
+# (any bit 0-63 may be set), but SQLite's INTEGER column is signed 64-bit
+# (-2^63 .. 2^63-1) — storing an unsigned value with bit 63 set raises
+# "Python int too large to convert to SQLite INTEGER". These two helpers are
+# the ONLY place that distinction matters: every function in this module
+# past this point works with the canonical unsigned form Python already
+# uses elsewhere (news_dedup.hamming_distance, the caller's own fingerprint),
+# converting only at the SQLite read/write boundary.
 
-def _hamming(a: int, b: int) -> int:
-    return bin(a ^ b).count("1")
+_UINT64_MASK = 0xFFFFFFFFFFFFFFFF
+_INT64_SIGN_BIT = 0x8000000000000000
+_INT64_WRAP = 0x10000000000000000
 
 
-def find_near_duplicate(simhash: int, ticker: str, *, max_hamming: int = 3) -> str | None:
+def _to_sqlite_int64(v: int) -> int:
+    v &= _UINT64_MASK
+    return v - _INT64_WRAP if v >= _INT64_SIGN_BIT else v
+
+
+def _from_sqlite_int64(v: int) -> int:
+    return v & _UINT64_MASK
+
+
+def find_near_duplicate(simhash: int, ticker: str, *, max_hamming: int = 10) -> str | None:
     """
     Scan this ticker's registered hashes for one within max_hamming bits of
     `simhash`, returning its canonical_id (the id near-duplicates should
     collapse onto), or None if this is genuinely new. O(n) over one ticker's
     rows — fine at this app's per-ticker news volume; an LSH bucket index is
     a future optimization, not needed yet.
+
+    max_hamming=10 (of 64 bits) is calibrated against REAL Tavily results for
+    one ticker over several weeks (providers.news_dedup.simhash operates on
+    short title+snippet text, not full articles) — a first, looser attempt at
+    this calibration (max_hamming=20, from two hand-picked example pairs) was
+    verified WRONG against a larger real batch: dozens of genuinely distinct
+    AVGO articles (earnings, Nvidia competition, credit risk, unrelated
+    market roundups) measured 22-42 bits apart, while even a lightly-reworded
+    real duplicate headline measured 14 — the two distributions OVERLAP for
+    short text, so no threshold catches every paraphrase without also
+    collapsing distinct articles. This value is deliberately on the strict
+    side of that overlap: it reliably catches only near-identical text (the
+    same wire copy syndicated verbatim, e.g. an AMP vs non-AMP URL of the
+    same story measured 0 bits apart) and accepts missing loosely-reworded
+    duplicates as the price of NEVER silently discarding a genuinely
+    distinct article — a missed duplicate is cosmetic noise; a false
+    collapse is real, silent data loss, which is the worse failure mode for
+    an architecture whose whole point is "search the exact data fetched."
     """
     conn = get_connection()
     with _write_lock:
@@ -158,7 +196,7 @@ def find_near_duplicate(simhash: int, ticker: str, *, max_hamming: int = 3) -> s
             ((ticker or "").strip().upper(),),
         ).fetchall()
     for row in rows:
-        if _hamming(simhash, row["simhash"]) <= max_hamming:
+        if hamming_distance(simhash, _from_sqlite_int64(row["simhash"])) <= max_hamming:
             return row["canonical_id"]
     return None
 
@@ -174,7 +212,7 @@ def register_article(article_id: str, simhash: int, canonical_id: str, url: str,
             "ON CONFLICT(article_id) DO UPDATE SET "
             "simhash = excluded.simhash, canonical_id = excluded.canonical_id, "
             "url = excluded.url, ticker = excluded.ticker",
-            (article_id, simhash, canonical_id, url, (ticker or "").strip().upper(), now),
+            (article_id, _to_sqlite_int64(simhash), canonical_id, url, (ticker or "").strip().upper(), now),
         )
 
 
@@ -197,17 +235,32 @@ def resolve_alias(name: str) -> str | None:
 
 def learn_alias(alias: str, ticker: str, cik: int | None, source: str = "learned") -> None:
     """Record (or update) one alias → ticker mapping."""
-    key = (alias or "").strip().lower()
-    if not key or not ticker:
-        return
+    learn_aliases_bulk([(alias, ticker, cik, source)])
+
+
+def learn_aliases_bulk(rows: list[tuple[str, str, int | None, str]]) -> int:
+    """
+    Bulk upsert many (alias, ticker, cik, source) tuples in ONE transaction —
+    used by the one-time SEC ticker-map backfill (~10k rows,
+    providers.entity_tagging.seed_entity_aliases), where committing once per
+    row would be needlessly slow. Returns the number of rows attempted
+    (including any skipped for a blank alias/ticker).
+    """
+    if not rows:
+        return 0
     with transaction() as conn:
-        conn.execute(
-            "INSERT INTO entity_aliases (alias, canonical_ticker, cik, source) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(alias) DO UPDATE SET "
-            "canonical_ticker = excluded.canonical_ticker, cik = excluded.cik, source = excluded.source",
-            (key, ticker.strip().upper(), cik, source),
-        )
+        for alias, ticker, cik, source in rows:
+            key = (alias or "").strip().lower()
+            if not key or not ticker:
+                continue
+            conn.execute(
+                "INSERT INTO entity_aliases (alias, canonical_ticker, cik, source) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(alias) DO UPDATE SET "
+                "canonical_ticker = excluded.canonical_ticker, cik = excluded.cik, source = excluded.source",
+                (key, ticker.strip().upper(), cik, source),
+            )
+    return len(rows)
 
 
 # =============================================================================

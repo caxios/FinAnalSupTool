@@ -11,3 +11,5 @@ yfinance
 numpy
 chromadb
 duckdb
+beautifulsoup4
+lxml

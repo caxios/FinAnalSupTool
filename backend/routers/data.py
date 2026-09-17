@@ -47,6 +47,7 @@ from services import (
     insider_cache,
     news_cache,
     price_cache,
+    research_copilot,
     sec_fetch,
     sec_ingest,
     transcript_cache,
@@ -162,13 +163,26 @@ async def _fetch_earnings(
     for year, quarter in quarters:
         cached = None if force else transcript_cache.get_transcript(ticker, year, quarter)
         if cached is not None:
-            if cached.found:
+            if cached.found and cached.text:
                 found += 1
+                # Index-on-read too, not just on fresh fetch: a quarter cached
+                # before this indexing existed (every transcript already on
+                # disk from earlier sessions) must still become searchable
+                # without forcing a live re-fetch. index_chunk/index_chunks
+                # are upserts, so re-indexing an already-indexed quarter is a
+                # harmless no-op, not a duplicate. Re-clean on read, same as
+                # research_copilot._format_cached_quarters and /media/earnings
+                # already do: a file cached before news_provider.clean_
+                # transcript_text existed still carries raw site chrome —
+                # idempotent on an already-clean file, so this is safe either way.
+                clean_text = news_provider.clean_transcript_text(cached.text)
+                await research_copilot.index_earnings_transcript(ticker, year, quarter, clean_text)
             continue
         doc = await news_provider.search_earnings_transcript(label, ticker, year, quarter)
         transcript_cache.save_transcript(ticker, year, quarter, doc)
-        if doc.found:
+        if doc.found and doc.text:
             found += 1
+            await research_copilot.index_earnings_transcript(ticker, year, quarter, doc.text)
     return DataFetchResult(
         status="ok", count=found,
         message=f"{found} of {len(quarters)} quarter(s) had a transcript available.",

@@ -18,11 +18,15 @@ call — the whole point of Phase 3 of the Unified Data Tab plan.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 
-from providers import news_provider, price_provider
-from services import insider_cache, news_cache, price_cache
+from providers import entity_tagging, news_dedup, news_provider, price_provider
+from rag import vector_store
+from services import data_lake, insider_cache, news_cache, price_cache, registry_db, search_index
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +59,9 @@ async def fetch_company_news(
     splits a range into) so the Data tab and the Deep Analysis pipeline hit
     the same cache entries instead of each keeping its own copy.
     """
+    scope = ticker or company
     if not force:
-        cached = news_cache.get_news(ticker or company, start_date, end_date)
+        cached = news_cache.get_news(scope, start_date, end_date)
         if cached is not None:
             return [news_provider.NewsArticle(**row) for row in cached]
 
@@ -68,8 +73,59 @@ async def fetch_company_news(
         raise NotConfigured(
             result.message or "News is not configured: set TAVILY_API_KEY on the backend."
         )
-    news_cache.save_news(ticker or company, start_date, end_date, result.articles)
-    return result.articles
+
+    kept = await _dedup_and_index_articles(result.articles, scope, ticker)
+    news_cache.save_news(scope, start_date, end_date, kept)
+    return kept
+
+
+async def _dedup_and_index_articles(
+    articles: list[news_provider.NewsArticle], scope: str, ticker: str | None,
+) -> list[news_provider.NewsArticle]:
+    """
+    SimHash-dedup this batch against everything already registered for
+    `scope` (services.registry_db.news_dedup — persists across ALL past
+    fetches for this ticker, not just this one window), then archive + index
+    (Chroma + FTS5) every genuinely new article. A near-duplicate is still
+    registered (pointing at its canonical article) so a LATER re-fetch of the
+    same syndicated story also resolves to that same canonical id, but is
+    neither kept in the returned list nor archived/indexed.
+
+    Best-effort per article: a tagging/indexing failure is logged and that
+    one article is still kept in the result (its dedup registration already
+    succeeded) — a slow/broken enrichment step must never cause an article
+    to silently vanish from the news feed.
+    """
+    kept: list[news_provider.NewsArticle] = []
+    for a in articles:
+        text = f"{a.title} {a.snippet}"
+        h = news_dedup.simhash(text)
+        article_id = f"{scope}_{hashlib.sha1(a.url.encode()).hexdigest()[:10]}"
+        canonical = registry_db.find_near_duplicate(h, scope)
+        if canonical is not None:
+            registry_db.register_article(article_id, h, canonical, a.url, scope)
+            continue
+
+        registry_db.register_article(article_id, h, article_id, a.url, scope)
+        kept.append(a)
+
+        try:
+            _, mentioned = await entity_tagging.tag_tickers(text, ticker or "")
+            doc_id = f"{article_id}_news_000"
+            meta = {
+                "ticker": ticker, "doc_type": "news_article", "period": a.published,
+                "published_at": a.published, "mentioned_tickers": ",".join(mentioned),
+                "url": a.url, "source": a.source,
+            }
+            await vector_store.index_chunks(
+                "news_articles", [{"text": text, "metadata": meta}], id_prefix=doc_id,
+            )
+            search_index.index_chunk(doc_id, text, scope, "news_article", meta)
+            data_lake.save_raw(scope, "news_article", article_id, "json", json.dumps(asdict(a), default=str))
+        except Exception as e:  # noqa: BLE001 — enrichment only, never drops the article
+            logger.warning(f"[data_fetcher] news indexing failed for {a.url}: {e}")
+
+    return kept
 
 
 # =============================================================================

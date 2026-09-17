@@ -36,11 +36,13 @@ from parsers.pdf_utils import (
     extract_all_sections,
     extract_tables,
 )
+from providers import edgar_xbrl
 from providers.edgar_xbrl import (
     build_xbrl_statement_tables,
     parse_period_end,
     resolve_company_identity,
 )
+from services import structured_db
 from services.storage import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -193,6 +195,23 @@ async def ingest_pdf(
             f"  [{routing_ticker}/{period_key}] tables from XBRL "
             f"(CIK {detected_cik}): {table_count} statement table(s)"
         )
+
+        # Project the SAME facts into services.structured_db so this period
+        # is queryable by SQL (see implementation_plan/new_db_architecture_plan/
+        # Phase2_Ingestion_Pipelines.md, Track A). Best-effort: fetch_company_facts
+        # is a free cache hit (already fetched above by build_xbrl_statement_tables),
+        # so this costs no extra network round-trip; a failure here must never
+        # fail an ingestion that already succeeded at building the display tables.
+        try:
+            xbrl_facts = await edgar_xbrl.fetch_company_facts(detected_cik)
+            if xbrl_facts is not None:
+                rows = edgar_xbrl.facts_to_rows(
+                    xbrl_facts, routing_ticker, detected_cik, period_end, form_type
+                )
+                n = structured_db.upsert_facts(rows)
+                logger.info(f"  [{routing_ticker}/{period_key}] {n} row(s) upserted into financial_facts")
+        except Exception as e:  # noqa: BLE001 — structured-facts projection is best-effort
+            logger.warning(f"  [{routing_ticker}/{period_key}] financial_facts upsert failed: {e}")
     else:
         # No XBRL for this period — drop any stale ratio metrics so a
         # re-upload that falls back to pdfplumber doesn't show old ratios.

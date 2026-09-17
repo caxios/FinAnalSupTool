@@ -33,6 +33,7 @@ _COLLECTIONS = {
     "sec_filings_text": "SEC filing MD&A / Risk Factors section chunks",
     "youtube_transcripts": "YouTube analyst video transcript chunks",
     "analysis_history": "Past MAS analysis run summaries",
+    "news_articles": "Deduplicated company news articles (title + snippet)",
 }
 
 # Lazily initialized so importing this module never fails or does I/O.
