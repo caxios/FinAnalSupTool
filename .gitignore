@@ -19,6 +19,16 @@ backend/analysis_history/
 backend/portfolio.db
 backend/portfolio.db-wal
 backend/portfolio.db-shm
+# Hybrid retrieval architecture's structured/search/registry DBs — regenerated
+# at runtime from the source data, same treatment as portfolio.db
+backend/financial_facts.duckdb
+backend/financial_facts.duckdb.wal
+backend/search_index.db
+backend/search_index.db-wal
+backend/search_index.db-shm
+backend/registry.db
+backend/registry.db-wal
+backend/registry.db-shm
 
 # ── Python ──
 __pycache__/

@@ -40,6 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import document, analysis, chat, media, sec, portfolio, coach, data
 from services import ingestion
 from services import db
+from services import structured_db, search_index, registry_db
 from services.storage import get_document_store
 
 
@@ -109,12 +110,19 @@ app.include_router(data.router)
 @app.on_event("startup")
 async def startup():
     """
-    Prepare the durable portfolio database.
+    Prepare the durable stores: the portfolio database, plus the hybrid
+    retrieval architecture's storage foundations (structured financial
+    facts, the FTS5 search index, and the dedup/alias/cache registry — see
+    implementation_plan/new_db_architecture_plan/Phase1_Storage_Foundations.md).
 
-    ``init_db`` is idempotent (every statement is CREATE ... IF NOT EXISTS), so
-    this is safe on every boot and creates ``backend/portfolio.db`` on the first.
+    Every ``init_db`` is idempotent (every statement is CREATE ... IF NOT
+    EXISTS), so this is safe on every boot and creates each database file on
+    the first.
     """
     db.init_db()
+    structured_db.init_db()
+    search_index.init_db()
+    registry_db.init_db()
 
 
 # =============================================================================
@@ -130,9 +138,9 @@ async def cleanup():
     Each company has its own temp dir (see ``CompanyStore``), plus one shared
     ingestion staging dir — clean up all of them.
 
-    The portfolio database is deliberately NOT touched here: unlike the temp
-    dirs, ``backend/portfolio.db`` holds the user's holdings and journal and
-    must survive the restart. We only close the connection.
+    None of the durable databases are touched here beyond closing their
+    connections: unlike the temp dirs, they hold data that must survive the
+    restart.
     """
     dirs = [cs.upload_dir for cs in get_document_store().companies.values()]
     dirs.append(ingestion.STAGING_DIR)
@@ -142,3 +150,6 @@ async def cleanup():
             logger.info(f"Cleaned up temp dir: {d}")
 
     db.close_db()
+    structured_db.close_db()
+    search_index.close_db()
+    registry_db.close_db()
