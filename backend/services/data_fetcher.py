@@ -111,14 +111,23 @@ async def _dedup_and_index_articles(
 
         try:
             _, mentioned = await entity_tagging.tag_tickers(text, ticker or "")
-            doc_id = f"{article_id}_news_000"
             meta = {
                 "ticker": ticker, "doc_type": "news_article", "period": a.published,
                 "published_at": a.published, "mentioned_tickers": ",".join(mentioned),
                 "url": a.url, "source": a.source,
             }
+            # vector_store.index_chunks() always appends "-{i}" to id_prefix
+            # (here always "-0", one chunk per article) — reuse that EXACT
+            # id for FTS5 too, rather than inventing a separate "_news_000"
+            # suffix, so the two stores share one doc_id per chunk (the join
+            # key rag/hybrid_search.py's RRF fusion depends on). A mismatch
+            # here silently breaks fusion for every article — caught live via
+            # Phase 3's own verification, the same bug already fixed once for
+            # research_copilot.index_earnings_transcript in Phase 2.
+            id_prefix = f"{article_id}_news"
+            doc_id = f"{id_prefix}-0"
             await vector_store.index_chunks(
-                "news_articles", [{"text": text, "metadata": meta}], id_prefix=doc_id,
+                "news_articles", [{"text": text, "metadata": meta}], id_prefix=id_prefix,
             )
             search_index.index_chunk(doc_id, text, scope, "news_article", meta)
             data_lake.save_raw(scope, "news_article", article_id, "json", json.dumps(asdict(a), default=str))

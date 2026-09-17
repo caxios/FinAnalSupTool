@@ -125,8 +125,9 @@ async def query(
     collection_name: str, query_text: str, *, n_results: int = 5, where: dict | None = None
 ) -> list[dict]:
     """
-    Semantic search. Returns `[{"text", "metadata", "distance"}]`, closest first.
-    Empty list when the store is unavailable or the collection is empty.
+    Semantic search. Returns `[{"doc_id", "text", "metadata", "distance"}]`,
+    closest first. Empty list when the store is unavailable or the
+    collection is empty.
     """
     col = _get_collection(collection_name)
     if col is None or not query_text.strip():
@@ -145,12 +146,18 @@ async def query(
         logger.warning(f"Query on '{collection_name}' failed: {e}")
         return []
 
+    # Chroma always returns ids regardless of `include` (that list only gates
+    # the optional extra fields). rag/hybrid_search.py's RRF fusion needs
+    # this id: it's the SAME doc_id search_index.search_bm25 returns for the
+    # identical chunk, and is the join key between the two ranked lists.
+    ids = (res.get("ids") or [[]])[0]
     docs = (res.get("documents") or [[]])[0]
     metas = (res.get("metadatas") or [[]])[0]
     dists = (res.get("distances") or [[]])[0]
     out: list[dict] = []
     for i, doc in enumerate(docs):
         out.append({
+            "doc_id": ids[i] if i < len(ids) else None,
             "text": doc,
             "metadata": metas[i] if i < len(metas) else {},
             "distance": dists[i] if i < len(dists) else None,

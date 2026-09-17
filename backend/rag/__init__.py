@@ -11,7 +11,7 @@ the (pure-Python) 3-axis scoring work regardless.
 
 from __future__ import annotations
 
-from . import chunking, embeddings, history_store, scoring, vector_store, earnings_rag, sec_rag
+from . import chunking, embeddings, history_store, scoring, vector_store, earnings_rag, sec_rag, hybrid_search
 from .scoring import compute_three_axis_scores, interpret_signal, SIGNAL_LABELS
 
 # RAG activates only when the combined data volume is large enough that context
@@ -39,6 +39,7 @@ __all__ = [
     "vector_store",
     "earnings_rag",
     "sec_rag",
+    "hybrid_search",
     "compute_three_axis_scores",
     "interpret_signal",
     "SIGNAL_LABELS",

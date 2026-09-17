@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -166,6 +167,33 @@ def delete_chunks(doc_id_prefix: str) -> int:
 # Reads
 # =============================================================================
 
+_FTS5_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _build_fts5_query(text: str) -> str:
+    """
+    Turn arbitrary free text into a safe FTS5 MATCH expression.
+
+    FTS5's MATCH argument isn't plain text — it's parsed as a query
+    expression (AND/OR/NOT, `*` prefix, `"..."` phrases, `column:` filters),
+    so a raw user query containing '$', '(', ':', a bare '-', etc. can raise
+    "fts5: syntax error" (discovered live: searching "$14 billion" against
+    real indexed earnings text did exactly this, silently costing BM25 all
+    credit for a hit the fusion happened to still find via the vector leg —
+    the opposite of what this function exists to contribute).
+
+    The fix: extract word/number tokens the same way the tokenizer already
+    would (punctuation is stripped either way), and double-quote each one as
+    its own literal term, space-joined — FTS5's default is an implicit AND
+    across space-separated terms, so `"$14 billion"` becomes `"14" "billion"`,
+    matching documents containing both, with no operator characters left for
+    the parser to trip on. Returns "" if nothing tokenizes (caller should
+    treat that as "no match", not attempt the query).
+    """
+    tokens = _FTS5_TOKEN_RE.findall(text or "")
+    return " ".join(f'"{t}"' for t in tokens)
+
+
 def search_bm25(
     query: str, *, ticker: str | None = None, doc_type: str | None = None, k: int = 20
 ) -> list[dict]:
@@ -174,12 +202,14 @@ def search_bm25(
     match — this function already sorts ascending by score, so callers such as
     rag/hybrid_search.py can assign rank 1 to the first result directly).
 
-    Returns [{doc_id, text, metadata, bm25_score}]. A blank/whitespace query
-    returns [] rather than raising an FTS5 syntax error; a malformed FTS5
-    query string (stray quotes, bare operators) is caught and logged the
-    same way, returning [] rather than propagating.
+    Returns [{doc_id, text, metadata, bm25_score}]. A blank/whitespace query,
+    or one with no extractable word/number tokens, returns [] rather than
+    querying at all. The query is sanitized via _build_fts5_query before
+    reaching FTS5, so arbitrary user text (including '$', punctuation, etc.)
+    is safe — the sqlite3.OperationalError catch below is a last-resort
+    guard, not the primary defense.
     """
-    q = (query or "").strip()
+    q = _build_fts5_query(query)
     if not q:
         return []
     sql = (
