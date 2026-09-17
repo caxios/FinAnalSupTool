@@ -44,7 +44,7 @@ from services.storage import (
     get_document_store,
     get_media_cache,
 )
-from services import company_service
+from services import company_service, transcript_cache
 
 router = APIRouter(tags=["media"])
 
@@ -384,6 +384,11 @@ async def media_earnings(
     """
     Earnings-call transcript for one company and quarter (e.g. 2026 Q1).
 
+    Cache-first: a past quarter's transcript never changes once found (or
+    confirmed absent), so this checks ``transcript_cache`` before calling out
+    to Tavily — the same cache the Data tab's "Earnings" fetch writes into,
+    so a transcript fetched from there shows up here without a second search.
+
     Fetches the full transcript from investing.com first, falling back to
     Motley Fool (fool.com) if investing.com has none. Returns a graceful
     not-found / not-configured payload otherwise.
@@ -396,13 +401,21 @@ async def media_earnings(
             message=f"No company identity resolved for '{ticker}'.",
         )
 
-    doc = await news_provider.search_earnings_transcript(
-        primary.name or "", primary.ticker, year, quarter
-    )
+    doc = transcript_cache.get_transcript(ticker, year, quarter)
+    if doc is None:
+        doc = await news_provider.search_earnings_transcript(
+            primary.name or "", primary.ticker, year, quarter
+        )
+        transcript_cache.save_transcript(ticker, year, quarter, doc)
+
+    # Clean on read too, not just at fetch time: a file cached before the
+    # boilerplate-stripping fix (or from any source that changes) must not
+    # keep showing site chrome forever — idempotent on already-clean text.
+    text = news_provider.clean_transcript_text(doc.text) if doc.text else doc.text
 
     resp = EarningsResponse(
         configured=doc.configured, company=primary, year=year, quarter=quarter,
-        found=doc.found, transcript=doc.text or None, source=doc.source,
+        found=doc.found, transcript=text or None, source=doc.source,
         url=doc.url, title=doc.title, published=doc.published, message=doc.message,
     )
     # Cache a slice so the AI assistant can reference the latest earnings call.

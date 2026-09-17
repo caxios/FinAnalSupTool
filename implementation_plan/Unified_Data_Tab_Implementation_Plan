@@ -1,0 +1,348 @@
+# Unified Data Tab — Implementation Plan
+
+Consolidate the current 5-tab navigation (`Dashboard`, `Company Media`, `Macro Sentiment`, `Deep Analysis`, `Portfolio`) into 3 tabs (`Data`, `Deep Analysis`, `Portfolio`). The new **Data** tab becomes the single hub for browsing and selectively fetching all company-level raw data, plus a dedicated YouTube channel insights sub-tab. All fetched data is persisted to local disk caches so Deep Analysis can reuse it without redundant API calls.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Tab deletion scope**: The existing `Dashboard` (FilingDashboard), `Company Media`, and `Macro Sentiment` views will be **replaced** by the new Data tab. Their functionality (financials viewer, news feed, earnings transcript viewer, YouTube video list, macro sentiment gauge) will be absorbed into the Data tab's sub-panels. The original view files will be deleted.
+
+> [!IMPORTANT]
+> **Header simplification**: The current Header has `🔎 Fetch from SEC` and `📁 Upload PDF` buttons that open `UploadModal`. These will be **removed from the header** and replaced by the Data tab's built-in fetch control panel. The `UploadModal` component remains for manual PDF upload but is accessed from within the Data tab, not the header.
+
+> [!IMPORTANT]
+> **8-K / Form 4 data**: The `findata` package already has `get_insider_trades(ticker, count)` for Form 4 and `find_filings(ticker, form_type="8-K", ...)` for 8-K metadata. Full 8-K body text extraction is **not** supported by `findata` — the initial implementation will fetch 8-K metadata + filing links (title, date, URL) and Form 4 structured trade data. Full 8-K text parsing could be added later.
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Macro Sentiment destination**: The current `Macro Sentiment` view shows a Gemini-synthesized market sentiment gauge + macro news + macro/economy videos. These are market-wide and not per-company. Options:
+> - **(A)** Add a third sub-tab "Market Overview" inside Data (alongside Company Data and YouTube)
+> - **(B)** Fold macro news and sentiment into the YouTube/general insights sub-tab
+> - **(C)** Drop it entirely (Deep Analysis already has a Macro Market Agent)
+>
+> The plan below assumes **(A)** — a lightweight "Market Overview" sub-tab — but awaiting your preference.
+
+> [!IMPORTANT]
+> **Company switcher**: Currently the Header owns the company-selector dropdown. With Data tab absorbing company selection, should the Header dropdown remain (for globally switching active company across all tabs), or should company selection be Data-tab-local only?
+>
+> The plan below **keeps the header dropdown** because Deep Analysis and Portfolio also need to know the active ticker.
+
+---
+
+## Proposed Changes
+
+### Phase 1 — Backend: New Disk Caches for News & Price Data
+
+Currently only SEC filings (`filing_cache/`) and earnings transcripts (`transcript_cache/`) are cached to disk. News and price data are ephemeral (fetched on each request, stored only in RAM for the session). We need disk caches for all 5 data types so they survive restarts and can be reused by Deep Analysis.
+
+---
+
+#### [NEW] [`backend/services/news_cache.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/news_cache.py)
+
+Disk cache for company news results, keyed by `(ticker, start_date, end_date)`.
+
+- `save_news(ticker, start_date, end_date, articles: list[dict])` — serialize to `backend/news_cache/{TICKER}_{start}_{end}.json`
+- `get_news(ticker, start_date, end_date) -> list[dict] | None` — return cached articles or None
+- `list_cached_ranges(ticker) -> list[tuple[str, str]]` — list all cached date ranges for a ticker
+- Modeled on `transcript_cache.py`: best-effort writes, never raises
+
+---
+
+#### [NEW] [`backend/services/price_cache.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/price_cache.py)
+
+Disk cache for pre-computed technical/price data, keyed by `(ticker, start_date, end_date)`.
+
+- `save_price_data(ticker, start_date, end_date, data: dict)` — serialize `TechnicalData` (as dict) + raw OHLCV candle rows to `backend/price_cache/{TICKER}_{start}_{end}.json`
+- `get_price_data(ticker, start_date, end_date) -> dict | None`
+- The cache key includes the date range so overlapping but different windows don't collide
+- Stale data policy: price data older than 1 day is considered stale for the "current price" field, but historical candles remain valid. A `force_refresh` flag in the fetch endpoint will bypass cache.
+
+---
+
+#### [NEW] [`backend/services/insider_cache.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/insider_cache.py)
+
+Disk cache for Form 4 insider trades and 8-K filing metadata.
+
+- `save_insider_trades(ticker, trades: list[dict])` → `backend/insider_cache/{TICKER}_form4.json`
+- `get_insider_trades(ticker) -> list[dict] | None`
+- `save_8k_filings(ticker, filings: list[dict])` → `backend/insider_cache/{TICKER}_8k.json`
+- `get_8k_filings(ticker) -> list[dict] | None`
+
+---
+
+#### [MODIFY] [`backend/services/pipeline.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/pipeline.py)
+
+Make each agent's data-fetching step **cache-first**: before calling the external API, check the corresponding disk cache. If cached data exists and covers the requested date range, use it directly.
+
+**Changes per agent initialization in `analyze_pipeline()`:**
+
+| Agent | Currently fetches from | Change |
+|-------|----------------------|--------|
+| `sec_filings` | In-memory `CompanyStore` | Already cache-first via `filing_cache.rehydrate_company_store()` — no change needed |
+| `technical_analysis` | `price_provider.fetch_technical_data()` (live Yahoo Finance) | Check `price_cache` first; fall back to live fetch and cache result |
+| `earnings_call` | `news_provider.search_earnings_transcript()` (live Tavily) | Already cache-first via `transcript_cache` — no change needed |
+| `company_news` | `news_provider.search_company_news()` (live Tavily) | Check `news_cache` first; fall back to live fetch and cache result |
+| `macro_market` | `news_provider.search_macro_news()` (live Tavily) | Lower priority — macro news is time-sensitive; optionally cache |
+| `youtube_analysis` | `youtube_provider` (live YouTube API) | Lower priority — videos are time-sensitive |
+
+The key change: wrap each agent's data-fetching call inside a helper that reads cache → falls back to live fetch → writes cache. This is done in the agent's `analyze()` method or in a shared `services/data_fetcher.py` orchestrator.
+
+---
+
+#### [NEW] [`backend/routers/data.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/routers/data.py)
+
+New router that exposes **selective data fetching** — the frontend can request any combination of the 5 data types for a given ticker + date range in a single call.
+
+```python
+# POST /data/fetch
+class DataFetchRequest(BaseModel):
+    ticker: str
+    start_date: str              # YYYY-MM-DD
+    end_date: str                # YYYY-MM-DD
+    include: list[str]           # subset of: ["sec_10k_10q", "sec_other", "news", "earnings", "price"]
+    force_refresh: bool = False  # bypass cache
+
+class DataFetchResponse(BaseModel):
+    ticker: str
+    results: dict[str, DataFetchResult]  # keyed by data type
+
+class DataFetchResult(BaseModel):
+    status: str       # "ok" | "cached" | "error" | "skipped"
+    message: str | None = None
+    count: int = 0    # number of items fetched/loaded
+```
+
+- `GET /data/status/{ticker}` — returns which data types are cached for this ticker and their date ranges. The frontend uses this to show filled/empty indicators on each data-type checkbox.
+- `GET /data/news/{ticker}` — return cached news articles (read-only, no fetch)
+- `GET /data/price/{ticker}` — return cached price/technical data (read-only)
+- `GET /data/insider/{ticker}` — return cached Form 4 + 8-K data (read-only)
+
+The existing `GET /media/earnings`, `GET /periods`, `GET /financials` endpoints remain unchanged — they already serve the SEC + earnings data that the Data tab's viewer panels will consume.
+
+---
+
+#### [MODIFY] [`backend/main.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/main.py)
+
+- Import and include the new `data` router: `app.include_router(data.router)`
+
+---
+
+### Phase 2 — Frontend: New Data Tab View & Navigation Restructure
+
+---
+
+#### [MODIFY] [`frontend/src/components/Sidebar.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/Sidebar.tsx)
+
+Replace the 5-item `NAV_ITEMS` array with 3 items:
+
+```typescript
+const NAV_ITEMS: NavItem[] = [
+  { to: "/",         label: "Data",          icon: "📊", hint: "Company data & market insights" },
+  { to: "/analysis", label: "Deep Analysis", icon: "🧭", hint: "Multi-agent report" },
+  { to: "/portfolio", label: "Portfolio",    icon: "💼", hint: "Holdings & journal" },
+];
+```
+
+---
+
+#### [MODIFY] [`frontend/src/App.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/App.tsx)
+
+- Remove imports for `FilingDashboard`, `CompanyMedia`, `MacroSentiment`
+- Add import for new `DataHub` view
+- Replace the 5 `<Route>` entries with 3:
+  ```tsx
+  <Route path="/" element={<DataHub />} />
+  <Route path="/analysis" element={<DeepAnalysis />} />
+  <Route path="/portfolio" element={<Portfolio />} />
+  ```
+- Remove the `/media` and `/macro` routes
+
+---
+
+#### [MODIFY] [`frontend/src/components/Header.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/Header.tsx)
+
+- Remove the `🔎 Fetch from SEC` and `📁 Upload PDF` buttons (data fetching moves to the Data tab)
+- Keep the company-switcher dropdown and the `📜 Rules` button
+- The header becomes slimmer: `[App Title] ... [Company dropdown] [Rules button]`
+
+---
+
+#### [NEW] [`frontend/src/views/DataHub.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/DataHub.tsx)
+
+The new unified Data view. Contains **sub-tab navigation** at the top:
+
+```
+[ 🏢 Company Data ]  [ 🎥 YouTube Insights ]  [ 🌐 Market Overview ]
+```
+
+**Sub-tab 1: Company Data** — the core experience:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Ticker: [AVGO ▾]   Period: [2024-01-01] to [2025-09-01]          │
+│                                                                     │
+│  ┌─ Fetch Control Panel ──────────────────────────────────────────┐ │
+│  │  [x] SEC 10-K / 10-Q        ● cached (8 periods)             │ │
+│  │  [x] Other SEC (Form 4/8-K) ○ not fetched                    │ │
+│  │  [x] Company News           ○ not fetched                    │ │
+│  │  [x] Earnings Call Transcript ● cached (5 quarters)          │ │
+│  │  [x] Price & Technicals     ○ not fetched                    │ │
+│  │                                                               │ │
+│  │  [Select All]  [Fetch Selected ▶]  [ ] Force refresh         │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+│  ┌─ Data Viewer (tab strip) ─────────────────────────────────────┐ │
+│  │ [📄 Financials] [📋 Other Filings] [📰 News] [📞 Earnings]   │ │
+│  │ [📈 Price Chart]                                              │ │
+│  │                                                               │ │
+│  │  (content area — shows the selected data type's full viewer)  │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Implementation details:
+
+- **Fetch Control Panel**: checkboxes for each of the 5 data types. A status indicator (●/○) shows whether cached data exists (queried via `GET /data/status/{ticker}` on mount/ticker change). "Fetch Selected" calls `POST /data/fetch` with the checked items. A progress bar shows fetch status per data type.
+- **Data Viewer tabs**: each tab renders the appropriate viewer component:
+  - `📄 Financials` — reuses existing `UpperPane` (financial tables + ratios) and `LowerPane` (filing text sections) from the current FilingDashboard
+  - `📋 Other Filings` — new component showing Form 4 insider trades table + 8-K filings list with links
+  - `📰 News` — reuses existing `NewsFeed` component
+  - `📞 Earnings` — reuses existing `EarningsTranscript` component, enhanced to show full multi-quarter transcripts
+  - `📈 Price Chart` — reuses existing `ThreeAxisChart` or builds a simple candlestick/line chart from cached OHLCV data
+
+**Sub-tab 2: YouTube Insights** — reuses existing `VideoList` and `ChannelBar` components from the CompanyMedia/MacroSentiment views. Shows registered channels' latest videos with AI-generated summaries. This is **not** per-company — it's a general market/industry video feed.
+
+**Sub-tab 3: Market Overview** — reuses existing `SentimentDashboard` and macro news `NewsFeed` from the MacroSentiment view. Lightweight, no major new code.
+
+---
+
+#### [NEW] [`frontend/src/components/data/FetchControlPanel.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/data/FetchControlPanel.tsx)
+
+The checkbox-based selective fetch control. Props:
+- `ticker: string`
+- `startDate: string`, `endDate: string`
+- `onFetchComplete: () => void` — triggers data viewer refresh
+
+State: per-data-type checkbox state, cache-status indicators, fetch progress.
+
+---
+
+#### [NEW] [`frontend/src/components/data/OtherFilingsView.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/components/data/OtherFilingsView.tsx)
+
+Renders Form 4 insider trades (sortable table: date, insider name, title, transaction type, shares, price) and 8-K filings (list: date, title, link to SEC).
+
+---
+
+#### Files to delete (absorbed into DataHub):
+
+#### [DELETE] [`frontend/src/views/FilingDashboard.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/FilingDashboard.tsx)
+#### [DELETE] [`frontend/src/views/CompanyMedia.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/CompanyMedia.tsx)
+#### [DELETE] [`frontend/src/views/MacroSentiment.tsx`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/views/MacroSentiment.tsx)
+
+Their functionality is absorbed into the DataHub's sub-tabs and viewer panels. The reusable **components** they relied on (`UpperPane`, `LowerPane`, `NewsFeed`, `VideoList`, `ChannelBar`, `SentimentDashboard`, `EarningsTranscript`, `DateRangeSelector`, `QuarterSelector`) are **kept** — only the view orchestrators are removed.
+
+---
+
+### Phase 3 — Integration: Deep Analysis Cache-First Pipeline
+
+---
+
+#### [NEW] [`backend/services/data_fetcher.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/services/data_fetcher.py)
+
+Centralized data-fetching orchestrator. Both `POST /data/fetch` (Data tab) and `analyze_pipeline()` (Deep Analysis) call through this single layer, which enforces cache-first semantics:
+
+```python
+async def fetch_company_news(ticker, start_date, end_date, *, force=False) -> list[dict]:
+    """Cache-first news fetch. Returns cached articles if available, else live-fetches and caches."""
+    if not force:
+        cached = news_cache.get_news(ticker, start_date, end_date)
+        if cached is not None:
+            return cached
+    articles = await news_provider.search_company_news(...)
+    news_cache.save_news(ticker, start_date, end_date, articles)
+    return articles
+
+async def fetch_price_data(ticker, start_date, end_date, *, force=False) -> TechnicalData:
+    """Cache-first price/technical data fetch."""
+    ...
+
+async def fetch_insider_data(ticker, *, count=20, force=False) -> dict:
+    """Cache-first Form 4 + 8-K fetch."""
+    ...
+
+# Earnings and SEC 10-K/Q already have their own cache-first layers
+# (transcript_cache and filing_cache), so they're not duplicated here.
+```
+
+---
+
+#### [MODIFY] [`backend/agents/company_news_agent.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/company_news_agent.py)
+
+Replace the direct `news_provider.search_company_news()` call with `data_fetcher.fetch_company_news()`. The agent's prompt assembly and LLM call remain unchanged — only the data source changes from "always live" to "cache-first".
+
+---
+
+#### [MODIFY] [`backend/agents/technical_analysis_agent.py`](file:///c:/Users/mrsim/FinAnalSupTool/backend/agents/technical_analysis_agent.py)
+
+Replace the direct `price_provider.fetch_technical_data()` call with `data_fetcher.fetch_price_data()`. Same principle: the LLM interpretation is unchanged, only the data layer gains caching.
+
+---
+
+### Phase 4 — Frontend API & Type Updates
+
+---
+
+#### [MODIFY] [`frontend/src/api.ts`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/api.ts)
+
+Add new API functions:
+- `fetchData(req: DataFetchRequest): Promise<DataFetchResponse>` — `POST /data/fetch`
+- `getDataStatus(ticker: string): Promise<DataStatusResponse>` — `GET /data/status/{ticker}`
+- `getCachedNews(ticker: string): Promise<NewsArticle[]>` — `GET /data/news/{ticker}`
+- `getCachedPrice(ticker: string): Promise<PriceData>` — `GET /data/price/{ticker}`
+- `getInsiderData(ticker: string): Promise<InsiderData>` — `GET /data/insider/{ticker}`
+
+---
+
+#### [MODIFY] [`frontend/src/types.ts`](file:///c:/Users/mrsim/FinAnalSupTool/frontend/src/types.ts)
+
+Add new types:
+- `DataFetchRequest`, `DataFetchResponse`, `DataFetchResult`
+- `DataStatusResponse` (per-data-type cache status + date ranges)
+- `InsiderTrade`, `Filing8K`, `InsiderData`
+
+---
+
+## Execution Order
+
+| Step | Phase | Description | Estimated Effort |
+|------|-------|-------------|-----------------|
+| 1 | Phase 1 | Create `news_cache.py`, `price_cache.py`, `insider_cache.py` | Small |
+| 2 | Phase 1 | Create `data_fetcher.py` (cache-first orchestrator) | Medium |
+| 3 | Phase 1 | Create `routers/data.py` (POST /data/fetch, GET /data/status, etc.) | Medium |
+| 4 | Phase 1 | Register new router in `main.py` | Small |
+| 5 | Phase 3 | Modify `company_news_agent.py` + `technical_analysis_agent.py` to use `data_fetcher` | Small |
+| 6 | Phase 2 | Modify `Sidebar.tsx` (3 tabs) | Small |
+| 7 | Phase 2 | Create `DataHub.tsx` (new view with sub-tabs) | Large |
+| 8 | Phase 2 | Create `FetchControlPanel.tsx` (checkbox fetch UI) | Medium |
+| 9 | Phase 2 | Create `OtherFilingsView.tsx` (Form 4 + 8-K viewer) | Medium |
+| 10 | Phase 2 | Modify `Header.tsx` (remove fetch/upload buttons) | Small |
+| 11 | Phase 2 | Modify `App.tsx` (update routes, remove old view imports) | Small |
+| 12 | Phase 4 | Update `api.ts` and `types.ts` | Small |
+| 13 | Cleanup | Delete `FilingDashboard.tsx`, `CompanyMedia.tsx`, `MacroSentiment.tsx` | Small |
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- `python -c "from services import news_cache, price_cache, insider_cache; ..."` — verify each cache round-trips data correctly
+- `curl -X POST http://localhost:8000/data/fetch -d '{"ticker":"AVGO","start_date":"2024-01-01","end_date":"2025-01-01","include":["news","price","sec_other"]}'` — verify selective fetch works
+- `curl http://localhost:8000/data/status/AVGO` — verify cache status returns correct indicators
+
+### Manual Verification
+1. Open the app → only 3 sidebar tabs visible (Data, Deep Analysis, Portfolio)
+2. In **Data tab**: select AVGO, check only "News" + "Earnings", click Fetch → see progress → see cached indicator turn green
+3. Switch to **Deep Analysis** → run analysis → observe in backend logs that news and earnings agents use cached data (no Tavily calls)
+4. Restart the backend server → open Data tab → cached indicators still show green for previously fetched data
+5. In Data tab, switch between the 5 viewer panels (Financials, Other Filings, News, Earnings, Price) and confirm each renders correctly

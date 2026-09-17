@@ -30,9 +30,7 @@ import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import TradingRulesDrawer from "./components/portfolio/TradingRulesDrawer";
-import FilingDashboard from "./views/FilingDashboard";
-import CompanyMedia from "./views/CompanyMedia";
-import MacroSentiment from "./views/MacroSentiment";
+import DataHub from "./views/DataHub";
 import DeepAnalysis from "./views/DeepAnalysis";
 import Portfolio from "./views/Portfolio";
 
@@ -177,6 +175,15 @@ export default function App() {
     [refreshCompanies]
   );
 
+  // After a Data tab fetch (SEC / news / earnings / price / insider data) —
+  // unlike an upload, the active ticker never changes, so this only needs to
+  // refresh the company list (filing counts may have changed) and bump
+  // refreshKey so the views' data reloads.
+  const handleDataChanged = useCallback(async () => {
+    await refreshCompanies();
+    setRefreshKey((prev) => prev + 1);
+  }, [refreshCompanies]);
+
   const contextValue = useMemo(
     () => ({
       activeTicker,
@@ -194,7 +201,6 @@ export default function App() {
       <div className="app">
         <Header
           periods={periods}
-          onUploadComplete={handleUploadComplete}
           onOpenRules={() => setRulesPanel("modal")}
           rulesRefreshKey={rulesRefreshKey}
         />
@@ -204,9 +210,15 @@ export default function App() {
 
           <main className="view-area">
             <Routes>
-              <Route path="/" element={<FilingDashboard />} />
-              <Route path="/media" element={<CompanyMedia />} />
-              <Route path="/macro" element={<MacroSentiment />} />
+              <Route
+                path="/"
+                element={
+                  <DataHub
+                    onUploadComplete={handleUploadComplete}
+                    onDataChanged={handleDataChanged}
+                  />
+                }
+              />
               <Route path="/analysis" element={<DeepAnalysis />} />
               <Route path="/portfolio" element={<Portfolio />} />
             </Routes>

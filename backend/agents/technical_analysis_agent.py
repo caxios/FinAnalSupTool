@@ -16,6 +16,7 @@ import logging
 from dataclasses import asdict
 
 from providers import price_provider
+from services import data_fetcher
 
 from .base_agent import BaseAgent
 from .schemas.technical_analysis import TechnicalAnalysisReport
@@ -131,8 +132,10 @@ class TechnicalAnalysisAgent(BaseAgent):
         if not ticker:
             raise RuntimeError("Technical analysis requires a ticker symbol.")
 
-        # Fetch + compute indicators (raises ValueError for bad ticker/empty data).
-        td = await price_provider.fetch_technical_data(ticker, start_date, end_date)
+        # Cache-first fetch + compute indicators (raises ValueError for bad
+        # ticker/empty data). A window ending today is always re-fetched live;
+        # a fully-closed historical window is shared with the Data tab's cache.
+        td = await data_fetcher.fetch_price_data(ticker, start_date, end_date)
 
         user_prompt = _USER_TEMPLATE.format(ticker=ticker, data=_format_data(td))
         if capture is not None:

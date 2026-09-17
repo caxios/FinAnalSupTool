@@ -69,6 +69,12 @@ import type {
   PortfolioSimulationResponse,
   QueryDataScope,
   QueryDataResponse,
+  DataFetchRequest,
+  DataFetchResponse,
+  DataStatusResponse,
+  CachedNewsResponse,
+  CachedPriceResponse,
+  InsiderDataResponse,
 } from "./types";
 
 // Base URL for the FastAPI backend (change this if using a different port)
@@ -423,6 +429,42 @@ export async function getMacroVideos(
 /** Market sentiment synthesis (View 3). */
 export async function getMarketSentiment(): Promise<SentimentResponse> {
   return fetchJson<SentimentResponse>(`${API_BASE}/macro/sentiment`);
+}
+
+// =============================================================================
+// Unified Data Tab
+// =============================================================================
+
+/**
+ * Selectively fetch any subset of {sec_10k_10q, sec_other, news, earnings,
+ * price} for one ticker + date range. Cache-first unless `force_refresh`.
+ */
+export async function fetchData(req: DataFetchRequest): Promise<DataFetchResponse> {
+  return fetchJson<DataFetchResponse>(`${API_BASE}/data/fetch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+/** Per-data-type cache status for one ticker — drives the Fetch Control Panel's indicators. */
+export async function getDataStatus(ticker: string): Promise<DataStatusResponse> {
+  return fetchJson<DataStatusResponse>(`${API_BASE}/data/status/${encodeURIComponent(ticker)}`);
+}
+
+/** Every cached news article for a ticker, merged across cached windows. Never fetches. */
+export async function getCachedNews(ticker: string): Promise<CachedNewsResponse> {
+  return fetchJson<CachedNewsResponse>(`${API_BASE}/data/news/${encodeURIComponent(ticker)}`);
+}
+
+/** The most recently cached price/technical data for a ticker. Never fetches. */
+export async function getCachedPrice(ticker: string): Promise<CachedPriceResponse> {
+  return fetchJson<CachedPriceResponse>(`${API_BASE}/data/price/${encodeURIComponent(ticker)}`);
+}
+
+/** Cached Form 4 insider trades + 8-K filings for a ticker. Never fetches. */
+export async function getInsiderData(ticker: string): Promise<InsiderDataResponse> {
+  return fetchJson<InsiderDataResponse>(`${API_BASE}/data/insider/${encodeURIComponent(ticker)}`);
 }
 
 // =============================================================================

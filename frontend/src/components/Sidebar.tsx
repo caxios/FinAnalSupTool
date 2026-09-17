@@ -15,9 +15,7 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { to: "/", label: "Dashboard", icon: "📊", hint: "Financials & filings" },
-  { to: "/media", label: "Company Media", icon: "📰", hint: "News, videos, earnings" },
-  { to: "/macro", label: "Macro Sentiment", icon: "🌐", hint: "Market-wide trends" },
+  { to: "/", label: "Data", icon: "📊", hint: "Company data & market insights" },
   { to: "/analysis", label: "Deep Analysis", icon: "🧭", hint: "Multi-agent report" },
   { to: "/portfolio", label: "Portfolio", icon: "💼", hint: "Holdings & journal" },
 ];

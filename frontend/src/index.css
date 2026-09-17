@@ -4193,3 +4193,104 @@ body {
    180px flex-basis would stretch each field to 180px tall. Reset it
    for fields used directly (not inside a nested .trade-form-row). */
 .add-rule-form > .trade-field { flex: 1 1 auto; }
+
+/* ── Unified Data Tab ─────────────────────────────────────────── */
+.data-hub { display: flex; flex-direction: column; height: 100%; }
+.data-hub-tabs {
+  display: flex; gap: 4px; padding: 10px 20px 0;
+  border-bottom: 1px solid var(--border-subtle); flex-shrink: 0;
+}
+.data-company-panel {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 16px 20px; overflow-y: auto; flex: 1;
+}
+
+.data-hub-toolbar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+.data-hub-company { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.data-hub-period { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.data-hub-period input[type="date"] {
+  background: var(--bg-secondary); border: 1px solid var(--border-subtle);
+  border-radius: 6px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;
+  font-family: inherit;
+}
+
+.data-viewer-content { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.data-viewer-content .split-container { min-height: 420px; }
+
+/* Fetch Control Panel */
+.fetch-control-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border-subtle); border-radius: 10px;
+  background: var(--bg-secondary); padding: 14px 16px;
+}
+.fetch-control-list { display: flex; flex-direction: column; gap: 8px; }
+.fetch-control-row {
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+  color: var(--text-primary); cursor: pointer;
+}
+.fetch-control-icon { font-size: 14px; }
+.fetch-control-label { flex: 1; }
+.fetch-control-status { font-size: 11px; white-space: nowrap; }
+.fetch-control-status.is-cached { color: var(--color-success); }
+.fetch-control-status.is-empty { color: var(--text-secondary); }
+.fetch-control-result { font-size: 11px; white-space: nowrap; font-weight: 600; }
+.fetch-control-result-ok, .fetch-control-result-cached { color: var(--color-success); }
+.fetch-control-result-error { color: var(--color-error); }
+.fetch-control-result-skipped { color: var(--text-secondary); }
+.fetch-control-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.fetch-control-actions .btn-primary,
+.fetch-control-actions .btn-secondary {
+  width: auto; margin-top: 0; padding: 7px 16px; font-size: 12px;
+}
+.btn-secondary {
+  background: var(--bg-tertiary, transparent); border: 1px solid var(--border-subtle);
+  border-radius: 8px; color: var(--text-primary); cursor: pointer; font-family: inherit;
+  transition: all 150ms;
+}
+.btn-secondary:hover:not(:disabled) { border-color: var(--border-active); }
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+.fetch-control-force {
+  display: flex; align-items: center; gap: 6px; font-size: 12px;
+  color: var(--text-secondary); cursor: pointer; margin-left: auto;
+}
+
+/* Other Filings (Form 4 + 8-K) */
+.other-filings-view { display: flex; flex-direction: column; gap: 20px; }
+.table-scroll { overflow-x: auto; }
+.insider-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.insider-table th, .insider-table td {
+  padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.insider-table th.sortable-th { cursor: pointer; color: var(--text-secondary); user-select: none; }
+.insider-table th.sortable-th:hover { color: var(--text-primary); }
+.insider-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; color: var(--accent-blue);
+}
+.trade-type-buy { color: var(--color-success); font-weight: 600; }
+.trade-type-sell { color: var(--color-error); font-weight: 600; }
+.filing-8k-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.filing-8k-item { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.filing-8k-date { color: var(--text-secondary); min-width: 90px; }
+.filing-8k-link { color: var(--accent-blue); text-decoration: none; }
+.filing-8k-link:hover { text-decoration: underline; }
+
+/* Price viewer */
+.price-panel { display: flex; flex-direction: column; gap: 16px; }
+.price-stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px;
+}
+.price-stat {
+  display: flex; flex-direction: column; gap: 4px; padding: 10px 12px;
+  border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-secondary);
+}
+.price-stat-label { font-size: 11px; color: var(--text-secondary); }
+.price-stat-value { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.price-chart-block { color: var(--accent-blue); }
+.price-sparkline { width: 100%; height: 120px; }
+.price-chart-range {
+  display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary);
+}
+.price-panel-note { font-size: 12px; color: var(--text-secondary); margin: 0; }

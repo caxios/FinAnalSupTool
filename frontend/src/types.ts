@@ -239,6 +239,83 @@ export interface NewsRange {
 }
 
 // =============================================================================
+// Unified Data Tab (POST /data/fetch, GET /data/*)
+// =============================================================================
+
+export type DataType = "sec_10k_10q" | "sec_other" | "news" | "earnings" | "price";
+
+export interface DataFetchRequest {
+  ticker: string;
+  start_date: string;   // YYYY-MM-DD
+  end_date: string;     // YYYY-MM-DD
+  include: DataType[];
+  force_refresh?: boolean;
+}
+
+export interface DataFetchResult {
+  status: "ok" | "cached" | "error" | "skipped";
+  message: string | null;
+  count: number;
+}
+
+export interface DataFetchResponse {
+  ticker: string;
+  results: Partial<Record<DataType, DataFetchResult>>;
+}
+
+export interface DataTypeStatus {
+  cached: boolean;
+  detail: string | null;
+}
+
+export interface DataStatusResponse {
+  ticker: string;
+  status: Record<DataType, DataTypeStatus>;
+}
+
+export interface InsiderTrade {
+  transaction_date: string | null;
+  owner_name: string | null;
+  officer_title: string | null;
+  is_director: boolean;
+  is_officer: boolean;
+  is_ten_pct_owner: boolean;
+  transaction_code: string | null;
+  transaction_code_description: string | null;
+  acquired_or_disposed: string | null;
+  amount: string | null;
+  price_per_share: string | null;
+  shares_owned_after: string | null;
+  transaction_value: number | null;
+  source_url: string | null;
+}
+
+export interface Filing8K {
+  filing_date: string | null;
+  title: string | null;
+  accession_number: string | null;
+  document_url: string | null;
+}
+
+export interface InsiderDataResponse {
+  ticker: string;
+  trades: InsiderTrade[];
+  filings_8k: Filing8K[];
+}
+
+export interface CachedNewsResponse {
+  ticker: string;
+  articles: NewsArticle[];
+  ranges: [string, string][];
+}
+
+export interface CachedPriceResponse {
+  ticker: string;
+  data: Record<string, unknown> | null;
+  ranges: [string, string][];
+}
+
+// =============================================================================
 // Deep Analysis (POST /analyze, /analyze/stream, GET /analysis/*)
 // =============================================================================
 

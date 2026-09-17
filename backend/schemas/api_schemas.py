@@ -1343,6 +1343,121 @@ class PendingReviewsResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Unified Data Tab (POST /data/fetch, GET /data/*)
+# ─────────────────────────────────────────────────────────────
+
+DATA_TYPES = ("sec_10k_10q", "sec_other", "news", "earnings", "price")
+
+
+class DataFetchRequest(BaseModel):
+    """Request body for POST /data/fetch — selectively fetch any combination
+    of the 5 data types for one company + date range in a single call."""
+
+    ticker: str
+    start_date: str = Field(description="YYYY-MM-DD")
+    end_date: str = Field(description="YYYY-MM-DD")
+    include: list[str] = Field(
+        description=f"Subset of: {list(DATA_TYPES)}"
+    )
+    force_refresh: bool = Field(
+        False, description="Bypass caches and re-fetch live for every included type"
+    )
+
+    @field_validator("include")
+    @classmethod
+    def _validate_include(cls, v: list[str]) -> list[str]:
+        bad = [t for t in v if t not in DATA_TYPES]
+        if bad:
+            raise ValueError(f"Unknown data type(s) {bad}. Must be one of {list(DATA_TYPES)}.")
+        return v
+
+
+class DataFetchResult(BaseModel):
+    """Outcome of fetching ONE data type."""
+    status: str = Field(description="'ok' | 'cached' | 'error' | 'skipped'")
+    message: str | None = None
+    count: int = Field(0, description="Number of items fetched/loaded")
+
+
+class DataFetchResponse(BaseModel):
+    """Response from POST /data/fetch — one result per requested data type."""
+    ticker: str
+    results: dict[str, DataFetchResult]
+
+
+class DataTypeStatus(BaseModel):
+    """Whether one data type is cached for a ticker, and how much of it."""
+    cached: bool = False
+    detail: str | None = None
+
+
+class DataStatusResponse(BaseModel):
+    """Response from GET /data/status/{ticker} — per-data-type cache status,
+    so the Data tab can show filled/empty indicators without fetching anything."""
+    ticker: str
+    status: dict[str, DataTypeStatus]
+
+
+class InsiderTradeModel(BaseModel):
+    """One Form 4 insider-trade row (SEC EDGAR field names, kept close to the
+    source since analysts expect these exact labels)."""
+    transaction_date: str | None = None
+    owner_name: str | None = None
+    officer_title: str | None = None
+    is_director: bool = False
+    is_officer: bool = False
+    is_ten_pct_owner: bool = False
+    transaction_code: str | None = None
+    transaction_code_description: str | None = None
+    acquired_or_disposed: str | None = None
+    amount: str | None = None
+    price_per_share: str | None = None
+    shares_owned_after: str | None = None
+    transaction_value: float | None = None
+    source_url: str | None = None
+
+    model_config = {"extra": "ignore"}
+
+    @field_validator("is_director", "is_officer", "is_ten_pct_owner", mode="before")
+    @classmethod
+    def _coerce_flag(cls, v):
+        return str(v) == "1" if v is not None else False
+
+
+class Filing8KModel(BaseModel):
+    """One 8-K filing's metadata + link (full body text is not extracted)."""
+    filing_date: str | None = None
+    title: str | None = None
+    accession_number: str | None = None
+    document_url: str | None = None
+
+
+class InsiderDataResponse(BaseModel):
+    """Response from GET /data/insider/{ticker}."""
+    ticker: str
+    trades: list[InsiderTradeModel] = Field(default_factory=list)
+    filings_8k: list[Filing8KModel] = Field(default_factory=list)
+
+
+class CachedNewsResponse(BaseModel):
+    """Response from GET /data/news/{ticker} — read-only, no fetch."""
+    ticker: str
+    articles: list[NewsArticleModel] = Field(default_factory=list)
+    ranges: list[list[str]] = Field(
+        default_factory=list, description="Cached [start_date, end_date] windows"
+    )
+
+
+class CachedPriceResponse(BaseModel):
+    """Response from GET /data/price/{ticker} — read-only, no fetch."""
+    ticker: str
+    data: dict | None = Field(None, description="Most recent cached TechnicalData, if any")
+    ranges: list[list[str]] = Field(
+        default_factory=list, description="Cached [start_date, end_date] windows"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # Error Model
 # ─────────────────────────────────────────────────────────────
 

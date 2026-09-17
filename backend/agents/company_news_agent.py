@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from providers import news_provider
+from services import data_fetcher
 
 from .base_agent import BaseAgent
 from .date_windows import month_windows
@@ -148,17 +148,24 @@ class CompanyNewsAgent(BaseAgent):
         label = company or ticker or ""
         windows = month_windows(start_date, end_date)
 
+        # Cache-first per window: a window fully in the past is immutable, so a
+        # Data-tab fetch and this agent share the same disk cache entry instead
+        # of each re-searching Tavily for the same month.
         results = await asyncio.gather(
             *(
-                news_provider.search_company_news(
-                    label, ticker,
-                    max_results=_PER_WINDOW_RESULTS,
-                    days=None, start_date=w_start, end_date=w_end,
+                data_fetcher.fetch_company_news(
+                    label, ticker, w_start, w_end, max_results=_PER_WINDOW_RESULTS,
                 )
                 for w_start, w_end in windows
             ),
             return_exceptions=True,
         )
+
+        # A missing API key fails every window identically — raise it directly
+        # rather than let it look like N unrelated per-window fetch failures.
+        for res in results:
+            if isinstance(res, data_fetcher.NotConfigured):
+                raise res
 
         # Merge windows, keeping month grouping and dropping duplicate URLs.
         grouped: list[tuple[str, list]] = []
@@ -168,13 +175,8 @@ class CompanyNewsAgent(BaseAgent):
             if isinstance(res, Exception):
                 logger.warning(f"Company news fetch failed for {w_start}..{w_end}: {res}")
                 continue
-            if not res.configured:
-                raise RuntimeError(
-                    res.message
-                    or "News is not configured: set TAVILY_API_KEY on the backend."
-                )
             fresh = []
-            for a in res.articles:
+            for a in res:
                 if a.url in seen or total >= _MAX_ARTICLES:
                     continue
                 seen.add(a.url)
