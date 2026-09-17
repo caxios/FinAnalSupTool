@@ -15,6 +15,14 @@ backend/channels.json
 # RAG vector store + persisted analysis history (regenerated at runtime)
 backend/chroma_data/
 backend/analysis_history/
+# Fetched company data — SEC filings, news, earnings transcripts, price data,
+# insider trades. All re-fetchable from source; stays local only, never on GitHub.
+backend/data_lake/
+backend/filing_cache/
+backend/news_cache/
+backend/price_cache/
+backend/insider_cache/
+backend/transcript_cache/
 # Portfolio + trading journal (durable user data, never committed)
 backend/portfolio.db
 backend/portfolio.db-wal
