@@ -19,8 +19,10 @@ Period semantics depend on the form:
   - anything else (8-K, DEF 14A, S-1, 4, 13D, …) : FILING-DATE range. YYYY
                   means the whole calendar year; YYYY-MM-DD is exact.
 
-Files land in  <repo>/downloads/{TICKER}/{FORM}/  (gitignored — fetched data
-stays local). Already-downloaded files are skipped unless --overwrite.
+Files land in  <your Downloads folder>/SEC Filings/{TICKER}/{FORM}/  (the
+real Windows Downloads location, even if it was moved), outside the repo. Use
+--out to choose another folder. Already-downloaded files are skipped unless
+--overwrite.
 
 --format html (default) saves the primary document exactly as SEC serves it —
 fast, no extra dependencies. --format pdf renders it through headless
@@ -47,8 +49,49 @@ try:
 except AttributeError:  # pragma: no cover — non-reconfigurable stream
     pass
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_OUT = _REPO_ROOT / "downloads"
+_OUT_SUBFOLDER = "SEC Filings"
+
+
+def _user_downloads_dir() -> Path:
+    """
+    The user's real Downloads folder.
+
+    On Windows this asks the shell for the Downloads *known folder* rather than
+    assuming %USERPROFILE%\\Downloads — users can move it (e.g. to D:\\), and
+    Explorer's "Downloads" follows the move while the hard-coded path doesn't.
+    Falls back to ~/Downloads (also right on macOS/Linux), then to home.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            import uuid
+
+            class _GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            # FOLDERID_Downloads
+            u = uuid.UUID("{374DE290-123F-4565-9164-39C4925E467B}")
+            guid = _GUID(u.time_low, u.time_mid, u.time_hi_version,
+                         (ctypes.c_ubyte * 8).from_buffer_copy(u.bytes[8:]))
+            path_ptr = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(guid), 0, None, ctypes.byref(path_ptr)
+            ) == 0:
+                try:
+                    return Path(path_ptr.value)
+                finally:
+                    ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+        except Exception:  # noqa: BLE001 — fall back to the conventional path
+            pass
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.is_dir() else Path.home()
+
+
+_DEFAULT_OUT = _user_downloads_dir() / _OUT_SUBFOLDER
 
 # SEC's fair-access policy requires a declared User-Agent and caps automated
 # traffic at 10 requests/second; stay comfortably under it.

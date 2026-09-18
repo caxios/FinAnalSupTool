@@ -23,7 +23,7 @@ backend/news_cache/
 backend/price_cache/
 backend/insider_cache/
 backend/transcript_cache/
-# Filings saved by backend/download_filings.py
+# In case download_filings.py is pointed back into the repo with --out downloads
 downloads/
 # Portfolio + trading journal (durable user data, never committed)
 backend/portfolio.db
