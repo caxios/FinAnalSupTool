@@ -111,15 +111,31 @@ export interface PeriodsResponse {
 // Chat Endpoint Types (POST /chat)
 // =============================================================================
 
+/**
+ * One record an answer's `[S#]` citation points at, so a claim can be checked
+ * against the database row / document it came from.
+ */
+export interface ChatSource {
+  tag: string;            // "S3" — as cited inline in the answer
+  kind: string;           // financial_fact | footnote | earnings_transcript | …
+  label: string;
+  url: string | null;     // link to the primary source, when one exists
+  doc_id: string | null;  // chunk id in the search index
+  excerpt: string | null; // the retrieved text itself
+}
+
 /** One turn in the AI assistant conversation. */
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Assistant turns only: the sources this answer cited. */
+  sources?: ChatSource[];
 }
 
 /** Response from POST /chat — the assistant's answer. */
 export interface ChatResponse {
   answer: string;
+  sources?: ChatSource[];
 }
 
 // =============================================================================

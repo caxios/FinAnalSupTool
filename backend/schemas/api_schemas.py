@@ -328,10 +328,31 @@ class ChatRequest(BaseModel):
     )
 
 
+class ChatSource(BaseModel):
+    """One citable record behind an answer, keyed by the ``[S#]`` tag the
+    assistant cites inline so the reader can check any claim against the
+    database row / document it came from."""
+
+    tag: str = Field(description="Citation tag used in the answer, e.g. 'S3'")
+    kind: str = Field(
+        description="financial_fact | footnote | sec_filing_text | "
+                    "earnings_transcript | news_article | price | insider | filing_8k"
+    )
+    label: str = Field(description="Human-readable source name")
+    url: str | None = Field(None, description="Link to the primary source, when one exists")
+    doc_id: str | None = Field(None, description="Chunk id in the search index / vector store")
+    excerpt: str | None = Field(None, description="The retrieved text itself, truncated")
+
+
 class ChatResponse(BaseModel):
     """Response from POST /chat — the assistant's answer."""
 
     answer: str = Field(description="The assistant's Markdown answer")
+    sources: list[ChatSource] = Field(
+        default_factory=list,
+        description="Records the answer's [S#] citations refer to (empty when "
+                    "the answer wasn't grounded in a database retrieval)",
+    )
 
 
 # ─────────────────────────────────────────────────────────────

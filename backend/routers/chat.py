@@ -40,6 +40,7 @@ from.
 from __future__ import annotations
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -107,8 +108,14 @@ Ground rules:
   never fall back on outside knowledge about the company's actuals.
 - Stay inside your own domain ({domain}). If the question falls outside it, say
   so and point the user to the right analyst.
-- Cite specifics (period, line item, value, source) and stay conversational —
-  this is a chat, not a report.
+- Cite specifics (period, line item, value) and stay conversational — this is
+  a chat, not a report.
+- CITE EVERY CLAIM. Each item in the DATA carries a tag like [S1], [S2].
+  End every sentence that states a fact, number or quote with the tag(s) it
+  came from, e.g. "Cloud revenue grew 63% to $20,028M [S1]." Use ONLY tags
+  that appear in the DATA — never invent one, and never cite a tag for a
+  statement the DATA doesn't support. A sentence you cannot tag is a sentence
+  you should not write.
 - If the DATA is empty or doesn't cover the question, say so plainly and tell
   the user to fetch "{fetch_hint}" on the Data tab. Do NOT tell them to run a
   Deep Analysis — this conversation does not need one.
@@ -138,7 +145,13 @@ Rules:
   tab checkbox that would fetch it (SEC 10-K / 10-Q, Other SEC, Company News,
   Earnings Call Transcript, or Price & Technicals). Never tell the user to run
   a Deep Analysis — this assistant does not need one.
-- Answer conversationally and concretely: cite the period, line item and value.
+- Answer conversationally and concretely: name the period, line item and value.
+- CITE EVERY CLAIM. Each item in the DATA carries a tag like [S1], [S2].
+  End every sentence that states a fact, number or quote with the tag(s) it
+  came from, e.g. "Cloud revenue grew 63% to $20,028M [S1]." Use ONLY tags
+  that appear in the DATA — never invent one, and never cite a tag for a
+  statement the DATA doesn't support. A sentence you cannot tag is a sentence
+  you should not write.
 
 === DATA (retrieved from the database for this question) ===
 {context}
@@ -149,6 +162,29 @@ Rules:
 # about the prior year?") still retrieves the right thing — the planner sees
 # one self-contained question, not the whole conversation.
 _PLANNING_HISTORY_TURNS = 2
+
+# Matches a bracketed citation group, so both "[S3]" and the grouped form the
+# model naturally writes for multiple sources ("[S2, S5]") are picked up.
+_CITATION_GROUP_RE = re.compile(r"\[([^\]\n]*?S\d+[^\]\n]*?)\]")
+_CITATION_TAG_RE = re.compile(r"S\d+")
+
+
+def _cited_sources(answer: str, sources: list[dict]) -> list[dict]:
+    """
+    The subset of `sources` the answer actually cites, in the order the reader
+    meets them. Returning every retrieved record instead would attach sources
+    to claims that never used them — the opposite of what a citation is for.
+    """
+    if not sources:
+        return []
+    by_tag = {s["tag"]: s for s in sources}
+    seen: list[dict] = []
+    for group in _CITATION_GROUP_RE.findall(answer or ""):
+        for tag in _CITATION_TAG_RE.findall(group):
+            item = by_tag.pop(tag, None)
+            if item:
+                seen.append(item)
+    return seen
 
 
 def _planning_query(history: list, question: str) -> str:
@@ -168,16 +204,17 @@ def _planning_query(history: list, question: str) -> str:
 
 async def _db_persona_prompt(
     agent_id: str, ticker: str, question: str, history: list
-) -> str:
+) -> tuple[str, list[dict]]:
     """A persona system prompt grounded in DB retrieval rather than a Deep
-    Analysis run — what an agent chat falls back to when no analysis exists."""
+    Analysis run — what an agent chat falls back to when no analysis exists.
+    Returns the prompt and the citation registry for what it retrieved."""
     kinds, doc_types = _AGENT_DOMAINS.get(agent_id, ([], []))
-    context = await orchestration_graph.retrieve_context(
+    context, sources = await orchestration_graph.retrieve_with_sources(
         _planning_query(history, question), ticker,
         allowed_kinds=kinds, search_doc_types=doc_types,
     )
     name = "Manager" if agent_id == "manager" else display_name(agent_id)
-    return _DB_PERSONA_TEMPLATE.format(
+    prompt = _DB_PERSONA_TEMPLATE.format(
         name=name,
         ticker=ticker,
         domain=(
@@ -187,6 +224,7 @@ async def _db_persona_prompt(
         fetch_hint=_FETCH_HINTS.get(agent_id, "the relevant data type"),
         context=context or "(nothing in the database matched this question yet)",
     )
+    return prompt, sources
 
 
 _FIELD_CHAT_TEMPLATE = """\
@@ -588,6 +626,7 @@ async def chat(
         # The coach is the one persona that does NOT need a ticker or a prior
         # analysis: its subject is the user's own journal, which exists from the
         # first logged trade. A ticker just adds the company reports on top.
+        persona_sources: list[dict] = []
         if agent_id == "trading_coach":
             system_prompt = await _coach_chat_persona(debate_store, ticker)
         else:
@@ -608,7 +647,7 @@ async def chat(
                 if e.status_code != 409:
                     raise
                 await doc_indexer.ensure_indexed(ticker, store)
-                system_prompt = await _db_persona_prompt(
+                system_prompt, persona_sources = await _db_persona_prompt(
                     agent_id, ticker, question, request.history
                 )
         history = [{"role": m.role, "content": m.content} for m in request.history]
@@ -616,7 +655,7 @@ async def chat(
             answer = await ask_persona(question, history, system_prompt)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
-        return ChatResponse(answer=answer)
+        return ChatResponse(answer=answer, sources=_cited_sources(answer, persona_sources))
 
     # ── DB-first grounding ────────────────────────────────────────────────
     # Retrieve only what THIS question needs from the DB tier (structured_db
@@ -627,7 +666,7 @@ async def chat(
     # in-memory/archived path below only when retrieval finds nothing.
     if ticker:
         await doc_indexer.ensure_indexed(ticker, store)
-        retrieved = await orchestration_graph.retrieve_context(
+        retrieved, retrieved_sources = await orchestration_graph.retrieve_with_sources(
             _planning_query(request.history, question), ticker
         )
         if retrieved.strip():
@@ -639,7 +678,9 @@ async def chat(
                 )
             except RuntimeError as e:
                 raise HTTPException(status_code=502, detail=str(e))
-            return ChatResponse(answer=answer)
+            return ChatResponse(
+                answer=answer, sources=_cited_sources(answer, retrieved_sources)
+            )
 
     # Assemble the grounding context from this company's in-memory data, plus the
     # media/macro data fetched for it (so the AI sees all views for ONE company).

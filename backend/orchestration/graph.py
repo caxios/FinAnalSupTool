@@ -321,6 +321,44 @@ async def run_graph(question: str, ticker: str | None) -> ResearchState:
     return await _compiled.ainvoke({"question": question, "ticker": ticker})
 
 
+async def retrieve_with_sources(
+    question: str,
+    ticker: str | None,
+    *,
+    allowed_kinds: list[str] | None = None,
+    search_doc_types: list[str] | None = None,
+) -> tuple[str, list[dict]]:
+    """
+    Like retrieve_context, but also returns the citation registry for what was
+    retrieved (see services.context_builder.build_context_with_sources) — so a
+    caller can require the model to cite ``[S#]`` tags and then resolve those
+    tags to real records for the reader.
+
+    Never raises: on failure the answer is simply ungrounded, which the caller
+    handles, rather than the conversation breaking.
+    """
+    global _compiled_retrieval
+    if _compiled_retrieval is None:
+        _compiled_retrieval = build_retrieval_graph()
+    try:
+        state = await _compiled_retrieval.ainvoke({
+            "question": question,
+            "ticker": ticker,
+            "allowed_kinds": allowed_kinds or [],
+            "search_doc_types": search_doc_types or [],
+        })
+    except Exception as e:  # noqa: BLE001 — retrieval degrades, never propagates
+        logger.warning(f"[orchestration.graph] retrieval failed for {ticker!r}: {e}")
+        return "", []
+    return context_builder.build_context_with_sources(
+        state.get("sql_results", []),
+        state.get("footnote_results", []),
+        state.get("search_results", []),
+        price_results=state.get("price_results", []),
+        insider_results=state.get("insider_results", []),
+    )
+
+
 async def retrieve_context(
     question: str,
     ticker: str | None,

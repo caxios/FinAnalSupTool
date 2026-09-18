@@ -12,7 +12,7 @@
  */
 
 import { useState, useRef, useEffect } from "react";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, ChatSource } from "../types";
 import { askChat } from "../api";
 import { useDashboard } from "../context/DashboardContext";
 import { AGENT_ORDER, AGENT_NAMES } from "./agentMeta";
@@ -37,7 +37,56 @@ const SUGGESTIONS = [
 // Handles: **bold**, `code`, bullet lists, and paragraph/line breaks.
 // ─────────────────────────────────────────────────────────────
 
-function renderInline(text: string, keyBase: string): React.ReactNode[] {
+// A bracketed citation group the assistant writes inline: "[S3]" or "[S2, S5]".
+const CITATION_GROUP = /(\[[^\]\n]*?S\d+[^\]\n]*?\])/g;
+
+function renderCitations(
+  text: string,
+  keyBase: string,
+  sources: ChatSource[]
+): React.ReactNode[] {
+  if (sources.length === 0) return [text];
+  const byTag = new Map(sources.map((s) => [s.tag, s]));
+  return text.split(CITATION_GROUP).map((seg, i) => {
+    if (!seg.startsWith("[") || !/S\d+/.test(seg)) return seg;
+    const tags = seg.match(/S\d+/g) ?? [];
+    const known = tags.filter((t) => byTag.has(t));
+    if (known.length === 0) return seg;
+    return (
+      <span key={`${keyBase}-cite${i}`} className="chat-cite-group">
+        {known.map((tag) => {
+          const src = byTag.get(tag)!;
+          const n = sources.findIndex((x) => x.tag === tag) + 1;
+          const title = src.excerpt
+            ? `${src.label}\n\n"${src.excerpt}"`
+            : src.label;
+          return src.url ? (
+            <a
+              key={tag}
+              className="chat-cite"
+              href={src.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={title}
+            >
+              {n}
+            </a>
+          ) : (
+            <span key={tag} className="chat-cite" title={title}>
+              {n}
+            </span>
+          );
+        })}
+      </span>
+    );
+  });
+}
+
+function renderInline(
+  text: string,
+  keyBase: string,
+  sources: ChatSource[] = []
+): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   // Split on **bold** or `code`, keeping the delimiters via capture groups.
   const regex = /(\*\*[^*]+\*\*|`[^`]+`)/g;
@@ -49,13 +98,13 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
     } else if (seg.startsWith("`") && seg.endsWith("`")) {
       nodes.push(<code key={`${keyBase}-c${i}`}>{seg.slice(1, -1)}</code>);
     } else {
-      nodes.push(seg);
+      nodes.push(...renderCitations(seg, `${keyBase}-t${i}`, sources));
     }
   });
   return nodes;
 }
 
-function renderMarkdown(text: string): React.ReactNode[] {
+function renderMarkdown(text: string, sources: ChatSource[] = []): React.ReactNode[] {
   const lines = text.split("\n");
   const blocks: React.ReactNode[] = [];
   let bullets: string[] = [];
@@ -67,7 +116,7 @@ function renderMarkdown(text: string): React.ReactNode[] {
     blocks.push(
       <ul key={`ul-${blockKey++}`} className="chat-md-list">
         {items.map((b, i) => (
-          <li key={i}>{renderInline(b, `li-${blockKey}-${i}`)}</li>
+          <li key={i}>{renderInline(b, `li-${blockKey}-${i}`, sources)}</li>
         ))}
       </ul>
     );
@@ -87,12 +136,52 @@ function renderMarkdown(text: string): React.ReactNode[] {
     if (/^\s*\|?\s*:?-{2,}/.test(line) && line.includes("-")) continue;
     blocks.push(
       <p key={`p-${blockKey++}`} className="chat-md-p">
-        {renderInline(line, `p-${blockKey}`)}
+        {renderInline(line, `p-${blockKey}`, sources)}
       </p>
     );
   }
   flushBullets();
   return blocks;
+}
+
+const SOURCE_KIND_LABELS: Record<string, string> = {
+  financial_fact: "XBRL 재무 데이터",
+  footnote: "공시 주석",
+  sec_filing_text: "SEC 공시 본문",
+  earnings_transcript: "어닝콜",
+  news_article: "뉴스",
+  youtube_transcript: "영상",
+  price: "주가/기술지표",
+  insider: "내부자 거래",
+  filing_8k: "8-K 공시",
+};
+
+/** The evidence list under an answer — one row per cited record, numbered to
+ *  match the inline markers, so any claim can be traced to its source. */
+function SourceList({ sources }: { sources: ChatSource[] }) {
+  if (sources.length === 0) return null;
+  return (
+    <div className="chat-sources">
+      <div className="chat-sources-title">출처 ({sources.length})</div>
+      <ol className="chat-sources-list">
+        {sources.map((s) => (
+          <li key={s.tag} className="chat-source-item">
+            <span className="chat-source-kind">
+              {SOURCE_KIND_LABELS[s.kind] ?? s.kind}
+            </span>
+            {s.url ? (
+              <a href={s.url} target="_blank" rel="noopener noreferrer">
+                {s.label}
+              </a>
+            ) : (
+              <span>{s.label}</span>
+            )}
+            {s.excerpt && <p className="chat-source-excerpt">“{s.excerpt}”</p>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
 }
 
 export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
@@ -170,7 +259,10 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       );
       setMessagesByAgent((prev) => ({
         ...prev,
-        [agent]: [...(prev[agent] ?? nextMessages), { role: "assistant", content: res.answer }],
+        [agent]: [
+          ...(prev[agent] ?? nextMessages),
+          { role: "assistant", content: res.answer, sources: res.sources ?? [] },
+        ],
       }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -289,7 +381,12 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
         {messages.map((m, i) => (
           <div key={i} className={`chat-msg chat-msg-${m.role}`}>
             {m.role === "assistant" ? (
-              <div className="chat-md">{renderMarkdown(m.content)}</div>
+              <>
+                <div className="chat-md">
+                  {renderMarkdown(m.content, m.sources ?? [])}
+                </div>
+                <SourceList sources={m.sources ?? []} />
+              </>
             ) : (
               m.content
             )}

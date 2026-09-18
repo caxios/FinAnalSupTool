@@ -257,7 +257,9 @@ export async function askChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       question,
-      history,
+      // Only role/content travel — an earlier turn's `sources` are for
+      // rendering, not part of the conversation the model replays.
+      history: history.map((m) => ({ role: m.role, content: m.content })),
       agent_id: agentId,
       ticker: ticker ?? undefined,
     }),

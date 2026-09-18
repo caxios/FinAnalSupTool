@@ -1357,6 +1357,38 @@ body {
   margin-bottom: 4px;
 }
 
+/* Inline citation markers + the evidence list under an answer */
+.chat-cite-group { display: inline-flex; gap: 2px; margin-left: 3px; vertical-align: super; }
+.chat-cite {
+  display: inline-block; min-width: 14px; padding: 0 4px;
+  border: 1px solid var(--border-subtle); border-radius: 4px;
+  background: var(--bg-tertiary, rgba(255,255,255,0.05));
+  color: var(--accent-blue, #6aa7ff); font-size: 9px; line-height: 14px;
+  text-align: center; text-decoration: none; cursor: help;
+}
+a.chat-cite:hover { border-color: var(--accent-blue, #6aa7ff); cursor: pointer; }
+.chat-sources {
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.chat-sources-title {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase;
+}
+.chat-sources-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.chat-source-item { font-size: 11px; color: var(--text-secondary); }
+.chat-source-item a { color: var(--accent-blue, #6aa7ff); text-decoration: none; }
+.chat-source-item a:hover { text-decoration: underline; }
+.chat-source-kind {
+  display: inline-block; margin-right: 6px; padding: 1px 5px;
+  border-radius: 4px; background: var(--bg-tertiary, rgba(255,255,255,0.06));
+  font-size: 9px; color: var(--text-secondary);
+}
+.chat-source-excerpt {
+  margin: 4px 0 0; font-size: 10px; line-height: 1.5; color: var(--text-muted, #8b93a7);
+  max-height: 3.2em; overflow: hidden;
+}
+
 .chat-md strong {
   color: var(--text-primary);
   font-weight: 600;
