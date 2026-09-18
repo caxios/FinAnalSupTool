@@ -182,7 +182,9 @@ async def _fetch_earnings(
                 clean_text = news_provider.clean_transcript_text(cached.text)
                 await research_copilot.index_earnings_transcript(ticker, year, quarter, clean_text)
             continue
-        doc = await news_provider.search_earnings_transcript(label, ticker, year, quarter)
+        doc = await news_provider.search_earnings_transcript(
+            label, ticker, year, quarter, force=force
+        )
         transcript_cache.save_transcript(ticker, year, quarter, doc)
         if doc.found and doc.text:
             found += 1
@@ -269,7 +271,10 @@ async def get_data_status(
 
     news_ranges = news_cache.list_cached_ranges(t)
     price_ranges = price_cache.list_cached_ranges(t)
-    quarters = transcript_cache.list_cached_quarters(t)
+    # found_only: a quarter cached as "no transcript exists" is not data
+    # the user has — reporting it as cached made the Data tab claim
+    # transcripts for companies that have none.
+    quarters = transcript_cache.list_cached_quarters(t, found_only=True)
 
     status = {
         "sec_10k_10q": DataTypeStatus(

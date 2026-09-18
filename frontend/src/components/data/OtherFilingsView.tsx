@@ -20,9 +20,28 @@ interface OtherFilingsViewProps {
 
 type SortField = "transaction_date" | "owner_name" | "amount" | "price_per_share" | "transaction_value";
 
+// SEC Form 4 transaction codes. Only P and S are open-market trades — the
+// rest are grants, vesting, exercises and tax withholding, which read as
+// misleading noise when labelled "Buy"/"Sell" (most of a big-cap's rows are
+// code A grants and code F withholdings, not anyone buying or selling).
+const TRADE_CODE_LABELS: Record<string, string> = {
+  P: "Buy",
+  S: "Sell",
+  A: "Grant",
+  F: "Tax withheld",
+  M: "Option exercise",
+  X: "Option exercise",
+  C: "Conversion",
+  G: "Gift",
+  D: "To issuer",
+  J: "Other",
+};
+
 function tradeLabel(t: InsiderTrade): string {
-  if (t.acquired_or_disposed === "A") return "Buy";
-  if (t.acquired_or_disposed === "D") return "Sell";
+  const byCode = t.transaction_code ? TRADE_CODE_LABELS[t.transaction_code] : undefined;
+  if (byCode) return byCode;
+  if (t.acquired_or_disposed === "A") return "Acquired";
+  if (t.acquired_or_disposed === "D") return "Disposed";
   return t.transaction_code_description ?? t.transaction_code ?? "—";
 }
 

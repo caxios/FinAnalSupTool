@@ -100,11 +100,29 @@ def save_transcript(ticker: str, year: int, quarter: int, doc) -> None:
         )
 
 
-def list_cached_quarters(ticker: str) -> list[str]:
-    """Quarter keys (e.g. ``'2026Q2'``) cached for this ticker, sorted."""
+def list_cached_quarters(ticker: str, *, found_only: bool = False) -> list[str]:
+    """
+    Quarter keys (e.g. ``'2026Q2'``) cached for this ticker, sorted.
+
+    A cache entry exists for quarters where NO transcript was found too (see
+    the module docstring) — so ``found_only=True`` is what callers reporting
+    "do we have transcripts?" want. Counting negative entries made the Data
+    tab show a green "5 quarter(s) cached" for a company with no transcripts
+    at all.
+    """
     if not _CACHE_DIR.exists():
         return []
     prefix = f"{_safe(ticker)}_"
-    return sorted(
-        f.stem[len(prefix):] for f in _CACHE_DIR.glob(f"{prefix}*.json")
-    )
+    keys = sorted(f.stem[len(prefix):] for f in _CACHE_DIR.glob(f"{prefix}*.json"))
+    if not found_only:
+        return keys
+    kept = []
+    for qk in keys:
+        try:
+            year, quarter = int(qk[:4]), int(qk[5])
+        except (ValueError, IndexError):
+            continue
+        doc = get_transcript(ticker, year, quarter)
+        if doc is not None and getattr(doc, "found", False) and (doc.text or "").strip():
+            kept.append(qk)
+    return kept

@@ -121,7 +121,7 @@ async def ensure_indexed(ticker: str, store=None) -> int:
             written += await index_filing_sections(ticker, period_key, sections)
 
     # ── Earnings-call transcripts cached by the Data tab ──
-    for qk in transcript_cache.list_cached_quarters(ticker):
+    for qk in transcript_cache.list_cached_quarters(ticker, found_only=True):
         try:
             year, quarter = int(qk[:4]), int(qk[5])
         except (ValueError, IndexError):

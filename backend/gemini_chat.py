@@ -111,6 +111,12 @@ _HTTP_TIMEOUT = 90.0
 _MAX_HISTORY_MESSAGES = 6
 _MAX_HISTORY_CHARS = 24_000     # ~6K tokens, a second guard for very long turns
 
+# Output ceiling for a CHAT answer. The shared default (2048) is sized for the
+# one-shot helpers; a conversational answer that walks through several quarters
+# of earnings-call Q&A needs far more, and on a thinking model the reasoning
+# tokens come out of this same budget — 2048 left answers stopping mid-sentence.
+_CHAT_MAX_OUTPUT_TOKENS = 8192
+
 
 def gemini_api_key() -> str | None:
     """Return the configured Gemini API key, or None if unset."""
@@ -459,6 +465,21 @@ async def _gemini_call(
     answer = "".join(p.get("text", "") for p in parts).strip()
     if not answer:
         raise RuntimeError("Gemini returned an empty answer.")
+
+    # A response cut off at the token ceiling used to be returned as-is, so a
+    # long answer simply stopped mid-sentence with nothing saying why. Say so
+    # instead of pretending the answer is complete.
+    if candidates[0].get("finishReason") == "MAX_TOKENS":
+        usage = data.get("usageMetadata", {})
+        logger.warning(
+            f"Gemini hit the output cap ({max_output_tokens} tokens; "
+            f"used {usage.get('candidatesTokenCount', '?')} for the answer, "
+            f"{usage.get('thoughtsTokenCount', 0)} for reasoning)."
+        )
+        answer += (
+            "\n\n_[답변이 길이 제한에 걸려 중간에 끊겼습니다. "
+            "범위를 좁혀 다시 질문해 주세요 — 예: 한 분기만, 또는 특정 주제만.]_"
+        )
     return answer
 
 
@@ -475,6 +496,7 @@ async def ask_gemini(
     return await _gemini_call(
         _build_system_prompt(context),
         _to_gemini_contents(history, question),
+        max_output_tokens=_CHAT_MAX_OUTPUT_TOKENS,
     )
 
 
@@ -495,6 +517,7 @@ async def ask_persona(
     return await _gemini_call(
         system_prompt,
         _to_gemini_contents(history, question),
+        max_output_tokens=_CHAT_MAX_OUTPUT_TOKENS,
     )
 
 

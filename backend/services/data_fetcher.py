@@ -177,6 +177,65 @@ async def fetch_price_data(
 # Insider Data (Form 4 + 8-K)
 # =============================================================================
 
+# Each Form 4 filing parsed is one rate-limited SEC request, so the scan is
+# bounded: ~40 filings per month of window, capped. A mega-cap like GOOGL files
+# several Form 4s a week, so the cap is what actually binds for long windows —
+# the result is "as far back as we could reasonably scan", not silently "the
+# last two weeks" as before.
+_FORM4_FILINGS_PER_MONTH = 40
+_MAX_FORM4_FILINGS = 240
+_MAX_8K_FILINGS = 100
+
+
+def _form4_scan_count(start_date: str | None, end_date: str | None, minimum: int) -> int:
+    """How many recent Form 4 filings to parse to cover the requested window."""
+    if not start_date or not end_date:
+        return minimum
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        return minimum
+    months = max(1, round((end - start).days / 30))
+    return max(minimum, min(_MAX_FORM4_FILINGS, months * _FORM4_FILINGS_PER_MONTH))
+
+
+def _is_transaction_row(t: dict) -> bool:
+    """
+    Whether a Form 4 row is an actual TRANSACTION.
+
+    A Form 4 also carries "holding" rows (Table I/II lines that report a
+    position with no trade): no transaction date, no code, no amount — only
+    shares_owned_after. They're legitimate filing content but meaningless in a
+    trades table, where they rendered as rows of dashes (~40% of GOOGL's rows).
+    """
+    return bool((t.get("transaction_date") or "").strip()) or bool(
+        (t.get("transaction_code") or "").strip()
+    )
+
+
+def _trades_in_range(
+    trades: list[dict], start_date: str | None, end_date: str | None
+) -> list[dict]:
+    """Keep only trades whose transaction_date falls inside the window. Rows
+    with an unparseable/missing date are kept — dropping a real trade because
+    its date is malformed is worse than showing it."""
+    if not start_date and not end_date:
+        return trades
+    out = []
+    for t in trades:
+        d = (t.get("transaction_date") or "").strip()[:10]
+        if not d:
+            out.append(t)
+            continue
+        if start_date and d < start_date:
+            continue
+        if end_date and d > end_date:
+            continue
+        out.append(t)
+    return out
+
+
 async def fetch_insider_data(
     ticker: str,
     *,
@@ -195,23 +254,41 @@ async def fetch_insider_data(
         trades = insider_cache.get_insider_trades(ticker)
         filings = insider_cache.get_8k_filings(ticker)
         if trades is not None and filings is not None:
-            return {"trades": trades, "filings_8k": filings}
+            return {
+                "trades": _trades_in_range(trades, start_date, end_date),
+                "filings_8k": filings,
+            }
 
     import findata
 
+    # findata.get_insider_trades takes a FILING COUNT, not a date range — its
+    # `count` is "how many recent Form 4 filings to parse". Left at the default
+    # it returned only the last couple of weeks no matter which period the user
+    # picked, so a year-long window silently showed a fortnight of grants.
+    # Scale the filing count to the requested window (then filter by
+    # transaction date below, since the count is still only an approximation).
+    filings_to_scan = _form4_scan_count(start_date, end_date, count)
+
     def _fetch_trades() -> list[dict]:
-        return findata.get_insider_trades(ticker, count=count)
+        return findata.get_insider_trades(ticker, count=filings_to_scan)
 
     def _fetch_8k() -> list[dict]:
         return findata.find_filings(
             ticker, form_type="8-K",
-            date_from=start_date, date_to=end_date, count=count,
+            date_from=start_date, date_to=end_date, count=_MAX_8K_FILINGS,
         )
 
     trades, filings = await asyncio.gather(
         asyncio.to_thread(_fetch_trades),
         asyncio.to_thread(_fetch_8k),
     )
+    # Cache every TRANSACTION row regardless of window, so a later, narrower
+    # window can still be served from this fetch; the range filter is applied
+    # on the way out instead. Holding rows are dropped here, not cached.
+    trades = [t for t in trades if _is_transaction_row(t)]
     insider_cache.save_insider_trades(ticker, trades)
     insider_cache.save_8k_filings(ticker, filings)
-    return {"trades": trades, "filings_8k": filings}
+    return {
+        "trades": _trades_in_range(trades, start_date, end_date),
+        "filings_8k": filings,
+    }

@@ -1436,7 +1436,14 @@ class InsiderTradeModel(BaseModel):
     @field_validator("is_director", "is_officer", "is_ten_pct_owner", mode="before")
     @classmethod
     def _coerce_flag(cls, v):
-        return str(v) == "1" if v is not None else False
+        # EDGAR's Form 4 XML spells these several ways depending on the filing
+        # agent: "1"/"0", "true"/"false", or a real bool. Matching only "1"
+        # silently reported every director and officer as neither.
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "y", "yes")
 
 
 class Filing8KModel(BaseModel):

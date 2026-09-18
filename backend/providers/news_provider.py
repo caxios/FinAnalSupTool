@@ -349,6 +349,14 @@ async def _tavily_transcript(
     if not api_key:
         return TranscriptDoc(configured=False, message="TAVILY_API_KEY not set.")
 
+    # NOTE: deliberately NOT topic="news" (unlike the news searches above).
+    # Tavily's news topic is recency-ranked, so it surfaces whatever
+    # transcripts were posted in the last few days — for ANY company — instead
+    # of the requested company's call. A quarter reported more than a week or
+    # two ago became unfindable: searching Alphabet Q2 2026 returned Hooker
+    # Furnishings, Dollarama and Compugen, and the quarter was then cached as
+    # "no transcript exists". The default (general) topic returns the right
+    # page for the same query.
     body = {
         "api_key": api_key,
         "query": query,
@@ -356,7 +364,6 @@ async def _tavily_transcript(
         "max_results": 6,
         "search_depth": "advanced",
         "include_raw_content": True,
-        "topic": "news",
     }
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -393,7 +400,7 @@ async def _tavily_transcript(
 
 
 async def search_earnings_transcript(
-    company: str, ticker: str | None, year: int, quarter: int
+    company: str, ticker: str | None, year: int, quarter: int, *, force: bool = False
 ) -> TranscriptDoc:
     """
     Find a quarter's earnings-call transcript, trying each source in priority
@@ -407,7 +414,12 @@ async def search_earnings_transcript(
     """
     from services import transcript_cache
 
-    if ticker:
+    # `force` skips the cache read — the Data tab's "Force refresh" is the
+    # user's way out of a NEGATIVE cache entry (a quarter recorded as "no
+    # transcript" because the search was broken or the call hadn't posted
+    # yet). Without this, force_refresh re-searched everything EXCEPT
+    # transcripts, which read straight back out of this cache.
+    if ticker and not force:
         cached = transcript_cache.get_transcript(ticker, year, quarter)
         if cached is not None:
             logger.info(
