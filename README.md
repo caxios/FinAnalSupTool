@@ -103,7 +103,7 @@ python download_filings.py NVDA 10-K 2025 --format pdf        # PDF instead of H
 python download_filings.py AAPL 10-Q 2024 2025 --dry-run      # list only, download nothing
 ```
 
-- **Any form type works** (`4`, `S-1`, `20-F`, `6-K`, `10-K/A`, `SCHEDULE 13G`, …). Write the name exactly as EDGAR does; quote it if it has a space (`"DEF 14A"`). Since Dec 2024, `SC 13G`/`SC 13D` are named `SCHEDULE 13G`/`SCHEDULE 13D`. Only the primary document is saved, not exhibits.
+- **Any form type works** (`4`, `S-1`, `20-F`, `6-K`, `10-K/A`, `SCHEDULE 13G`, …). Write the name exactly as EDGAR does (`DEF 14A` works with or without quotes). Several types can be listed as `10-K,10-Q`, `10-K, 10-Q` or `10-K 10-Q`. Since Dec 2024, `SC 13G`/`SC 13D` are named `SCHEDULE 13G`/`SCHEDULE 13D`. Only the primary document is saved, not exhibits.
 - **Periods:** 10-K / 10-Q use the company's *fiscal* year (`YYYY` or `YYYYQn`). Other forms use the *filing date* (`YYYY`, `YYYYQn` or `YYYY-MM-DD`). There is no Q4 10-Q; Q4 figures are in the 10-K.
 - **Format:** `--format html` (default, fast), `pdf` (headless Chromium, slower), or `both`.
 - **Output:** `downloads/{TICKER}/{FORM}/` at the repo root. Change it with `--out`. Existing files are skipped unless `--overwrite`.

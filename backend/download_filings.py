@@ -112,11 +112,60 @@ def _parse_date_bound(value: str, *, is_start: bool) -> str:
     )
 
 
+# A form name that is a single token on its own ("10-K", "8-K", "S-1", "20-F",
+# "10-K/A") — used to tell "10-K 10-Q" (two forms) from "DEF 14A" (one form
+# whose name contains a space).
+_STANDALONE_FORM_RE = re.compile(r"^(\d+-[A-Z]+|[A-Z]+-\d+[A-Z]*)(/A)?$")
+
+
+def _is_period_token(tok: str) -> bool:
+    t = tok.strip()
+    return bool(_YEAR_RE.match(t) or _YEAR_Q_RE.match(t) or _DATE_RE.match(t))
+
+
+def _split_positionals(tokens: list[str]) -> tuple[str, str, str, str | None]:
+    """
+    TICKER FORM... START [END] -> (ticker, forms, start, end).
+
+    The form part may span several shell arguments: `10-K, 10-Q` (a space
+    after the comma), `10-K 10-Q`, or an unquoted `DEF 14A` all split into
+    more than one argument, which used to shift START/END out of place. The
+    period arguments are therefore taken from the END of the list (they have
+    an unambiguous shape), and everything between the ticker and them is the
+    form list.
+    """
+    if len(tokens) < 3:
+        raise ValueError("expected TICKER FORM START [END]")
+    ticker, rest = tokens[0], tokens[1:]
+    periods: list[str] = []
+    while rest and len(periods) < 2 and _is_period_token(rest[-1]):
+        periods.insert(0, rest.pop())
+    if not periods:
+        raise ValueError(
+            f"no period found after the filing type — expected YYYY, YYYYQn "
+            f"or YYYY-MM-DD, got '{tokens[-1]}'"
+        )
+    if not rest:
+        raise ValueError("no filing type given (e.g. 10-K)")
+    forms = " ".join(rest)
+    return ticker, forms, periods[0], periods[1] if len(periods) > 1 else None
+
+
 def _normalize_forms(raw: str) -> list[str]:
-    forms = [f.strip().upper() for f in raw.split(",") if f.strip()]
+    forms: list[str] = []
+    for piece in raw.split(","):
+        piece = " ".join(piece.split()).upper()
+        if not piece:
+            continue
+        words = piece.split(" ")
+        # "10-K 10-Q" is two forms; "DEF 14A" / "SCHEDULE 13G" is one.
+        if len(words) > 1 and all(_STANDALONE_FORM_RE.match(w) for w in words):
+            forms.extend(words)
+        else:
+            forms.append(piece)
     if not forms:
         raise ValueError("At least one filing type is required (e.g. 10-K).")
-    return forms
+    return list(dict.fromkeys(forms))
 
 
 # =============================================================================
@@ -295,24 +344,28 @@ def main(argv: list[str] | None = None) -> int:
         description="Download SEC filings (10-K, 10-Q, 8-K, DEF 14A, ...) to local disk.",
         epilog="Run without arguments for interactive prompts.",
     )
-    parser.add_argument("ticker", nargs="?", help="Ticker symbol, e.g. AAPL")
-    parser.add_argument("forms", nargs="?", help="Filing type(s), comma-separated, e.g. 10-K,10-Q")
-    parser.add_argument("start", nargs="?", help="Start: YYYY, YYYYQn, or YYYY-MM-DD")
-    parser.add_argument("end", nargs="?", help="End: YYYY, YYYYQn, or YYYY-MM-DD (default: start)")
+    parser.add_argument(
+        "args", nargs="*", metavar="TICKER FORM... START [END]",
+        help="e.g.  AAPL 10-K 2022 2025  |  AAPL 10-K, 10-Q 2024 2026  |  MSFT DEF 14A 2025. "
+             "Periods: YYYY, YYYYQn, or YYYY-MM-DD (END defaults to START).",
+    )
     parser.add_argument("--format", choices=("html", "pdf", "both"), default="html")
     parser.add_argument("--out", default=str(_DEFAULT_OUT), help=f"Output folder (default: {_DEFAULT_OUT})")
     parser.add_argument("--overwrite", action="store_true", help="Re-download files that already exist")
     parser.add_argument("--dry-run", action="store_true", help="List what would be downloaded, download nothing")
     args = parser.parse_args(argv)
 
-    if not args.ticker:
+    if not args.args:
         try:
             args = _interactive()
         except (KeyboardInterrupt, EOFError):
             print()
             return 130
-    elif not (args.forms and args.start):
-        parser.error("give TICKER FORMS START [END], or no arguments for interactive mode")
+    else:
+        try:
+            args.ticker, args.forms, args.start, args.end = _split_positionals(args.args)
+        except ValueError as e:
+            parser.error(f"{e}. Or run with no arguments for interactive mode.")
 
     if args.format not in ("html", "pdf", "both"):
         print(f"Unknown format '{args.format}' — use html, pdf or both.")
