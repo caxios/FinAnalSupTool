@@ -17,11 +17,12 @@ from typing import Literal, TypedDict
 from rag.hybrid_search import SearchHit
 
 
-class SubTask(TypedDict):
-    kind: Literal["sql", "footnote", "search"]
+class SubTask(TypedDict, total=False):
+    kind: Literal["sql", "footnote", "search", "price", "insider"]
     ticker: str
     metric_or_topic: str
     periods: list[str]   # e.g. ["FY2025 Q1", ..., "FY2025 Q4"] for sql; [] for search
+    doc_types: list[str]  # search only: narrow to e.g. ["earnings_transcript"]
 
 
 class ResearchState(TypedDict, total=False):
@@ -31,6 +32,13 @@ class ResearchState(TypedDict, total=False):
     sql_results: list[dict]          # rows from structured_db.query_facts
     footnote_results: list[dict]     # rows from structured_db.query_footnotes
     search_results: list[SearchHit]  # fused+reranked hits from hybrid_search.search
+    price_results: list[dict]        # latest cached price/technicals (services.price_cache)
+    insider_results: list[dict]      # Form 4 trades + 8-K rows (services.insider_cache)
+    # Narrowing applied by a CALLER (e.g. an agent persona that may only see its
+    # own domain): sub_tasks of other kinds / search hits of other doc_types are
+    # dropped after planning rather than being planned around.
+    allowed_kinds: list[str]
+    search_doc_types: list[str]
     context: str                     # built in Phase 6's assemble node
     answer: dict                     # final synthesis (Phase 6) — QueryDataResponse-shaped dict
     citations: list[str]             # doc_ids actually used, for the UI to link back

@@ -1,18 +1,14 @@
 """
 services.media_service
 ───────────────────────
-Turn cached media/macro/Data-tab data into Markdown context blocks for the AI
-assistant, so it can answer questions across all views.
+Turn the cached media/macro data (fetched by the Company Media & Macro views)
+into a Markdown context block for the AI assistant, so it can answer questions
+across all views. Only includes what the user has actually fetched this session.
 
-Two sources, two functions:
-  - build_media_context        — the SESSION-only MediaCache, populated by the
-    old /media/* viewer endpoints when actually opened this session (or by an
-    isolated agent persona's own data).
-  - build_persisted_data_context — the Data tab's own DISK caches (news_cache,
-    price_cache, insider_cache, transcript_cache), populated by POST /data/fetch
-    regardless of session or Deep Analysis history. This is what lets the
-    general chat assistant answer from data fetched via the Data tab alone —
-    see routers/chat.py, which concatenates both into one context.
+Company data that was fetched through the DATA TAB is NOT rendered here — it
+lives in the DB tier (structured_db / search_index / Chroma) and reaches the
+assistant through retrieval (orchestration.graph.retrieve_context), not by
+being pasted into every prompt.
 """
 
 from __future__ import annotations
@@ -76,105 +72,6 @@ def build_media_context(cache: MediaCache, ticker: str | None = None) -> str:
             excerpt = info.get("text", "")[:400]
             if excerpt:
                 parts.append(f"- ({vid}) {excerpt}")
-        parts.append("")
-
-    return "\n".join(parts)
-
-
-def build_persisted_data_context(ticker: str) -> str:
-    """
-    Render the Data tab's disk-persisted caches — company news, earnings-call
-    transcripts, price/technicals, insider trades (Form 4) and 8-K filings —
-    as a Markdown context block for one ticker.
-
-    Deliberately independent of MediaCache/DebateStore: this reads straight
-    from services.news_cache/price_cache/insider_cache/transcript_cache, the
-    same disk caches POST /data/fetch writes into — so a ticker that has only
-    ever been through the Data tab (no Deep Analysis run, no /media/* viewer
-    tab opened this session) still grounds the general chat assistant.
-    Financials + filing text are NOT here — CompanyStore already covers those
-    (see gemini_chat.build_context) once SEC 10-K/10-Q has been fetched.
-    """
-    from services import insider_cache, news_cache, price_cache, transcript_cache
-
-    t = (ticker or "").strip().upper()
-    if not t:
-        return ""
-    parts: list[str] = []
-
-    # ── News — merged across cached windows, deduped by URL (same as GET /data/news/{ticker}) ──
-    ranges = news_cache.list_cached_ranges(t)
-    if ranges:
-        seen: set[str] = set()
-        merged: list[dict] = []
-        for start, end in ranges:
-            for row in news_cache.get_news(t, start, end) or []:
-                url = row.get("url")
-                if url and url not in seen:
-                    seen.add(url)
-                    merged.append(row)
-        merged.sort(key=lambda r: r.get("published") or "", reverse=True)
-        if merged:
-            parts.append("# Company News (cached, from the Data tab)")
-            for a in merged[:15]:
-                snippet = (a.get("snippet") or "")[:200]
-                parts.append(f"- [{a.get('source', '?')}] {a.get('title', '')} — {snippet}")
-            parts.append("")
-
-    # ── Earnings-call transcripts — an excerpt per cached quarter, newest few ──
-    quarters = transcript_cache.list_cached_quarters(t)
-    if quarters:
-        found: list[tuple[int, int, str]] = []
-        for qk in quarters:
-            try:
-                year, quarter = int(qk[:4]), int(qk[5])
-            except (ValueError, IndexError):
-                continue
-            doc = transcript_cache.get_transcript(t, year, quarter)
-            if doc and doc.found and doc.text:
-                found.append((year, quarter, doc.text))
-        if found:
-            parts.append("# Earnings Call Transcripts (cached, from the Data tab)")
-            for year, quarter, text in found[-4:]:
-                parts.append(f"## {year} Q{quarter}")
-                parts.append(text[:4000])
-            parts.append("")
-
-    # ── Price & technicals — the most recently cached window ──
-    price_ranges = price_cache.list_cached_ranges(t)
-    if price_ranges:
-        latest_start, latest_end = price_ranges[-1]
-        pdata = price_cache.get_price_data(t, latest_start, latest_end)
-        if pdata:
-            parts.append(f"# Price & Technicals (cached {latest_start} to {latest_end})")
-            for key in ("current_price", "period_return", "sma_50", "sma_200", "rsi_14", "golden_cross"):
-                if pdata.get(key) is not None:
-                    parts.append(f"- {key}: {pdata[key]}")
-            parts.append("")
-
-    # ── Insider trades (Form 4) + 8-K filings ──
-    trades = insider_cache.get_insider_trades(t) or []
-    if trades:
-        parts.append("# Insider Trades — Form 4 (cached, from the Data tab)")
-        for tr in trades[:15]:
-            action = (
-                "Buy" if tr.get("acquired_or_disposed") == "A"
-                else "Sell" if tr.get("acquired_or_disposed") == "D"
-                else tr.get("transaction_code_description") or "?"
-            )
-            role = tr.get("officer_title") or ("Director" if tr.get("is_director") else "")
-            parts.append(
-                f"- {tr.get('transaction_date', '?')}: {tr.get('owner_name', '?')} "
-                f"({role}) {action} {tr.get('amount', '?')} shares "
-                f"@ {tr.get('price_per_share', '?')}"
-            )
-        parts.append("")
-
-    filings_8k = insider_cache.get_8k_filings(t) or []
-    if filings_8k:
-        parts.append("# 8-K Filings (cached, from the Data tab)")
-        for f in filings_8k[:10]:
-            parts.append(f"- {f.get('filing_date', '?')}: {f.get('title', '?')}")
         parts.append("")
 
     return "\n".join(parts)

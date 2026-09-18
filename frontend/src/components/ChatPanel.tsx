@@ -198,13 +198,13 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     selectedAgent === "manager" ? "Manager" : AGENT_NAMES[selectedAgent] ?? "agent";
   const emptyLead = isGeneral
     ? activeTicker
-      ? `Ask about ${activeTicker}'s financials, ratios, or filing text.`
+      ? `Ask about ${activeTicker}'s financials, filings, earnings calls, news, or price — anything fetched on the Data tab.`
       : "Select a company in the header to ask about its filings, or ask about macro/market data."
     : selectedAgent === "trading_coach"
     ? "Chat with your Trading Coach about your own decisions — it reads your journal, so it works without an analysis run."
     : selectedAgent === "manager"
-    ? "Chat with the Manager about the synthesized verdict and how the debate resolved. Run a Deep Analysis first."
-    : `Chat with the ${personaName} agent — scoped to its own data and the debate transcript. Run a Deep Analysis first.`;
+    ? "Chat with the Manager about the company. With a Deep Analysis run it speaks to the debate verdict; without one it answers from the fetched data."
+    : `Chat with the ${personaName} agent — scoped to its own domain. It uses the debate transcript after a Deep Analysis run, and the data you fetched on the Data tab before one.`;
   const suggestions = isGeneral
     ? SUGGESTIONS
     : selectedAgent === "trading_coach"

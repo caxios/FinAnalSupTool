@@ -46,6 +46,10 @@ Rules:
 - "footnote" tasks are for "why did X change" questions about a specific
   statement line item — only emit these when the question explicitly asks
   about a footnote/note or an unusual accounting treatment.
+- "price" tasks are for the stock itself: price level, return, moving
+  averages, RSI, momentum/technicals. metric_or_topic describes what is
+  asked; periods are ignored (the latest cached window is used).
+- "insider" tasks are for insider buying/selling (Form 4) and 8-K events.
 - Infer the ticker from the question; if genuinely ambiguous, use the ticker
   the caller supplied as ambient context.
 - Never invent periods not implied by the question; default to the last 4
@@ -62,7 +66,7 @@ Ambient ticker (use only if the question doesn't name one): {ambient_ticker}
 class _SubTaskModel(BaseModel):
     """Validates the LLM's own JSON — converted to the plain SubTask
     TypedDict (orchestration.state) before this module hands it to the graph."""
-    kind: Literal["sql", "footnote", "search"]
+    kind: Literal["sql", "footnote", "search", "price", "insider"]
     ticker: str
     metric_or_topic: str
     periods: list[str] = Field(default_factory=list)

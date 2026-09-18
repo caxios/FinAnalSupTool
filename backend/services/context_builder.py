@@ -90,10 +90,57 @@ def _build_excerpts_block(search_results: list[SearchHit]) -> str:
     return "\n".join(lines)
 
 
+def _build_price_block(price_results: list[dict]) -> str:
+    if not price_results:
+        return ""
+    lines = ["## 3. Price & Technicals (Source: cached market data)"]
+    for p in price_results:
+        lines.append(
+            f"\n### Window {p.get('period_start', '?')} to {p.get('period_end', '?')}"
+        )
+        for key in (
+            "current_price", "period_high", "period_low", "period_return",
+            "sma_50", "sma_200", "rsi_14", "golden_cross",
+            "price_vs_sma50", "price_vs_sma200",
+        ):
+            if p.get(key) is not None:
+                lines.append(f"- {key}: {p[key]}")
+    return "\n".join(lines)
+
+
+def _build_insider_block(insider_results: list[dict]) -> str:
+    if not insider_results:
+        return ""
+    trades = [r for r in insider_results if r.get("row_type") == "form4"]
+    filings = [r for r in insider_results if r.get("row_type") == "8k"]
+    lines = ["## 4. Insider Activity & 8-K Events (Source: SEC EDGAR)"]
+    if trades:
+        lines.append("\n### Form 4 insider transactions")
+        for t in trades:
+            action = (
+                "Buy" if t.get("acquired_or_disposed") == "A"
+                else "Sell" if t.get("acquired_or_disposed") == "D"
+                else t.get("transaction_code_description") or "?"
+            )
+            role = t.get("officer_title") or ("Director" if t.get("is_director") else "")
+            lines.append(
+                f"- {t.get('transaction_date', '?')}: {t.get('owner_name', '?')} "
+                f"({role}) {action} {t.get('amount', '?')} shares "
+                f"@ {t.get('price_per_share', '?')}"
+            )
+    if filings:
+        lines.append("\n### 8-K filings")
+        for f in filings:
+            lines.append(f"- {f.get('filing_date', '?')}: {f.get('title', '?')}")
+    return "\n".join(lines)
+
+
 def build_context(
     sql_results: list[dict],
     footnote_results: list[dict],
     search_results: list[SearchHit],
+    price_results: list[dict] | None = None,
+    insider_results: list[dict] | None = None,
 ) -> str:
     """
     Assemble the full context block from the three tool outputs. Any of the
@@ -112,6 +159,8 @@ def build_context(
         _build_facts_table(sql_results),
         _build_footnotes_block(footnote_results),
         _build_excerpts_block(search_results),
+        _build_price_block(price_results or []),
+        _build_insider_block(insider_results or []),
     ]
     body = "\n\n".join(s for s in sections[1:] if s)
     return f"# Context\n\n{body}" if body else ""

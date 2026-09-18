@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Every tool node this graph can route to. Kept as a tuple (not derived from
 # SubTask's Literal at runtime) so _route_after_plan's iteration order is
 # stable and explicit.
-_TOOL_KINDS = ("sql", "footnote", "search")
+_TOOL_KINDS = ("sql", "footnote", "search", "price", "insider")
 
 
 # =============================================================================
@@ -127,6 +127,20 @@ _NO_CONTEXT_NOTE = (
 
 async def _plan_node(state: ResearchState) -> dict:
     sub_tasks = await planner.plan(state.get("question", ""), state.get("ticker"))
+
+    # Caller-side narrowing (orchestration.state.ResearchState): an agent
+    # persona may only look at its own domain, so drop sub_tasks of other
+    # kinds and pin every search to its allowed doc_types. Done here rather
+    # than in the planner prompt so the restriction is enforced, not merely
+    # requested of the model.
+    allowed = state.get("allowed_kinds") or []
+    if allowed:
+        sub_tasks = [t for t in sub_tasks if t["kind"] in allowed]
+    doc_types = state.get("search_doc_types") or []
+    if doc_types:
+        for t in sub_tasks:
+            if t["kind"] == "search":
+                t["doc_types"] = list(doc_types)
     return {"sub_tasks": sub_tasks}
 
 
@@ -177,11 +191,37 @@ async def _search_node(state: ResearchState) -> dict:
     return {"search_results": results}
 
 
+async def _price_node(state: ResearchState) -> dict:
+    results: list[dict] = []
+    for t in state.get("sub_tasks", []):
+        if t["kind"] != "price":
+            continue
+        try:
+            results.extend(await tools.price_tool(t))
+        except Exception as e:  # noqa: BLE001 — isolate one tool's failure from the rest
+            logger.warning(f"[orchestration.graph] price_tool failed for {t}: {e}")
+    return {"price_results": results}
+
+
+async def _insider_node(state: ResearchState) -> dict:
+    results: list[dict] = []
+    for t in state.get("sub_tasks", []):
+        if t["kind"] != "insider":
+            continue
+        try:
+            results.extend(await tools.insider_tool(t))
+        except Exception as e:  # noqa: BLE001 — isolate one tool's failure from the rest
+            logger.warning(f"[orchestration.graph] insider_tool failed for {t}: {e}")
+    return {"insider_results": results}
+
+
 async def _assemble_node(state: ResearchState) -> dict:
     context = context_builder.build_context(
         state.get("sql_results", []),
         state.get("footnote_results", []),
         state.get("search_results", []),
+        price_results=state.get("price_results", []),
+        insider_results=state.get("insider_results", []),
     )
     return {"context": context}
 
@@ -223,12 +263,15 @@ def build_graph():
     g.add_node("sql", _sql_node)
     g.add_node("footnote", _footnote_node)
     g.add_node("search", _search_node)
+    g.add_node("price", _price_node)
+    g.add_node("insider", _insider_node)
     g.add_node("assemble", _assemble_node)
     g.add_node("synthesize", _synthesize_node)
 
     g.set_entry_point("plan")
     g.add_conditional_edges("plan", _route_after_plan, {
-        "sql": "sql", "footnote": "footnote", "search": "search", "skip": "assemble",
+        "sql": "sql", "footnote": "footnote", "search": "search",
+        "price": "price", "insider": "insider", "skip": "assemble",
     })
     for tool_node in _TOOL_KINDS:
         g.add_edge(tool_node, "assemble")
@@ -237,10 +280,37 @@ def build_graph():
     return g.compile()
 
 
+def build_retrieval_graph():
+    """The same plan -> tools -> assemble pipeline, STOPPING at the assembled
+    context (no synthesis node). The chat assistant uses this: it wants the
+    retrieved evidence to answer conversationally in its own voice/persona,
+    not a second model's structured verdict."""
+    g = StateGraph(ResearchState)
+
+    g.add_node("plan", _plan_node)
+    g.add_node("sql", _sql_node)
+    g.add_node("footnote", _footnote_node)
+    g.add_node("search", _search_node)
+    g.add_node("price", _price_node)
+    g.add_node("insider", _insider_node)
+    g.add_node("assemble", _assemble_node)
+
+    g.set_entry_point("plan")
+    g.add_conditional_edges("plan", _route_after_plan, {
+        "sql": "sql", "footnote": "footnote", "search": "search",
+        "price": "price", "insider": "insider", "skip": "assemble",
+    })
+    for tool_node in _TOOL_KINDS:
+        g.add_edge(tool_node, "assemble")
+    g.add_edge("assemble", END)
+    return g.compile()
+
+
 # Compiled once at import time — a LangGraph CompiledStateGraph is stateless
 # and safe to reuse across calls/requests (each .ainvoke() gets its own
 # fresh state dict), so there's no reason to rebuild it per call.
 _compiled = None
+_compiled_retrieval = None
 
 
 async def run_graph(question: str, ticker: str | None) -> ResearchState:
@@ -249,3 +319,35 @@ async def run_graph(question: str, ticker: str | None) -> ResearchState:
     if _compiled is None:
         _compiled = build_graph()
     return await _compiled.ainvoke({"question": question, "ticker": ticker})
+
+
+async def retrieve_context(
+    question: str,
+    ticker: str | None,
+    *,
+    allowed_kinds: list[str] | None = None,
+    search_doc_types: list[str] | None = None,
+) -> str:
+    """
+    Plan the question, query only the stores it actually needs, and return the
+    assembled context — the retrieval half of the pipeline, for callers that
+    write their own answer (routers/chat.py).
+
+    `allowed_kinds` / `search_doc_types` scope retrieval to one agent's domain
+    (see _plan_node). Returns "" when nothing was found; never raises — a
+    retrieval failure must degrade the answer, not break the conversation.
+    """
+    global _compiled_retrieval
+    if _compiled_retrieval is None:
+        _compiled_retrieval = build_retrieval_graph()
+    try:
+        state = await _compiled_retrieval.ainvoke({
+            "question": question,
+            "ticker": ticker,
+            "allowed_kinds": allowed_kinds or [],
+            "search_doc_types": search_doc_types or [],
+        })
+    except Exception as e:  # noqa: BLE001 — retrieval degrades, never propagates
+        logger.warning(f"[orchestration.graph] retrieval failed for {ticker!r}: {e}")
+        return ""
+    return state.get("context", "") or ""

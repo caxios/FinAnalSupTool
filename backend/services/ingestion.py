@@ -42,7 +42,7 @@ from providers.edgar_xbrl import (
     parse_period_end,
     resolve_company_identity,
 )
-from services import structured_db
+from services import doc_indexer, structured_db
 from services.storage import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -239,6 +239,12 @@ async def ingest_pdf(
     except Exception as e:
         logger.error(f"Text extraction failed for {filename}: {e}")
         sections = {}
+
+    # Make this filing's text searchable in the DB tier right away (vector +
+    # BM25), so the chat assistant can retrieve from it without a Deep
+    # Analysis run ever happening. Best-effort by contract — see doc_indexer.
+    if sections:
+        await doc_indexer.index_filing_sections(routing_ticker, period_key, sections)
 
     # ── Step 5: Store filing metadata ─────────────────────
     # Persist the detected CIK, table source, and a `sort_date` so the merged

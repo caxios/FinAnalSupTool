@@ -154,6 +154,15 @@ def index_chunk(doc_id: str, text: str, ticker: str, doc_type: str, metadata: di
         )
 
 
+def has_chunks(doc_id_prefix: str) -> bool:
+    """Whether any chunk's doc_id starts with this prefix (cheap registry check)."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM chunk_registry WHERE doc_id LIKE ? LIMIT 1", (f"{doc_id_prefix}%",)
+    ).fetchone()
+    return row is not None
+
+
 def delete_chunks(doc_id_prefix: str) -> int:
     """Delete every chunk whose doc_id starts with the given prefix (e.g. to
     re-index one period from scratch). Returns the number of chunk_fts rows deleted."""

@@ -55,7 +55,11 @@ from services.storage import (
     get_media_cache,
     get_debate_store,
 )
-from services import filing_cache, media_service, journal_analysis, review_store, research_copilot
+from orchestration import graph as orchestration_graph
+from services import (
+    doc_indexer, filing_cache, media_service, journal_analysis, review_store,
+    research_copilot,
+)
 
 router = APIRouter(tags=["chat"])
 
@@ -63,6 +67,127 @@ router = APIRouter(tags=["chat"])
 # Cap on a single agent's raw data injected into an isolated chat. Bounds a long
 # earnings transcript (~80K chars) while leaving room for the debate + question.
 _CHAT_RAW_CAP = 60_000
+
+# Which stores each persona may look at when it answers from the DB instead of
+# from a Deep Analysis run: (sub_task kinds, search doc_types). Keeps an
+# agent's domain isolation intact — the SEC Filings analyst still doesn't get
+# to answer from the earnings call — without requiring a debate to exist.
+# Empty lists mean "no restriction" (the Manager sees everything).
+_AGENT_DOMAINS: dict[str, tuple[list[str], list[str]]] = {
+    "sec_filings": (["sql", "footnote", "search"], ["sec_filing_text"]),
+    "earnings_call": (["search"], ["earnings_transcript"]),
+    "company_news": (["search"], ["news_article"]),
+    "youtube_analysis": (["search"], ["youtube_transcript"]),
+    "technical_analysis": (["price"], []),
+    "peer_comparison": (["sql", "search"], []),
+    "macro_market": (["search"], ["news_article"]),
+    "macro_history": (["search"], ["news_article"]),
+    "manager": ([], []),
+}
+
+_FETCH_HINTS: dict[str, str] = {
+    "sec_filings": "SEC 10-K / 10-Q",
+    "earnings_call": "Earnings Call Transcript",
+    "company_news": "Company News",
+    "technical_analysis": "Price & Technicals",
+    "youtube_analysis": "the YouTube Insights tab",
+}
+
+_DB_PERSONA_TEMPLATE = """\
+You are the {name}, one of the specialist analysts on a financial research
+team, talking directly to the user about {ticker}.
+
+No Deep Analysis run has been performed for {ticker}, so you have NO debate
+transcript and NO prior report of your own. What you DO have is the DATA
+below: passages and figures just retrieved from this app's own database for
+the user's question — the company data they fetched in the Data tab.
+
+Ground rules:
+- Answer ONLY from the DATA below. Never invent figures, quotes or dates, and
+  never fall back on outside knowledge about the company's actuals.
+- Stay inside your own domain ({domain}). If the question falls outside it, say
+  so and point the user to the right analyst.
+- Cite specifics (period, line item, value, source) and stay conversational —
+  this is a chat, not a report.
+- If the DATA is empty or doesn't cover the question, say so plainly and tell
+  the user to fetch "{fetch_hint}" on the Data tab. Do NOT tell them to run a
+  Deep Analysis — this conversation does not need one.
+- Values are USD millions unless labelled otherwise; EPS is per share.
+
+=== DATA (retrieved from the database for this question) ===
+{context}
+=== END DATA ===
+"""
+
+_DB_GENERAL_TEMPLATE = """\
+You are a financial analysis assistant embedded in a research tool. The user is
+asking about {ticker}. The DATA below was just retrieved from the app's own
+database for this specific question — verified financial facts from SEC XBRL,
+filing footnotes, and excerpts from filings / earnings calls / news the user
+fetched in the Data tab, plus price and insider data when relevant.
+
+Rules:
+- Base every claim on the DATA section. Never invent numbers or use outside
+  knowledge about the company's actuals.
+- Figures under "Verified Financial Facts" come straight from the database —
+  quote them as given (USD millions unless the Unit column says otherwise; EPS
+  per share). You may compute changes/growth from them.
+- Excerpts are tagged with a Doc_ID and a source type; attribute news to its
+  outlet and note it reflects that outlet's reporting, not verified fact.
+- If the DATA doesn't cover what was asked, say so plainly and name the Data
+  tab checkbox that would fetch it (SEC 10-K / 10-Q, Other SEC, Company News,
+  Earnings Call Transcript, or Price & Technicals). Never tell the user to run
+  a Deep Analysis — this assistant does not need one.
+- Answer conversationally and concretely: cite the period, line item and value.
+
+=== DATA (retrieved from the database for this question) ===
+{context}
+=== END DATA ===
+"""
+
+# Recent user turns are prepended to the planning query so a follow-up ("what
+# about the prior year?") still retrieves the right thing — the planner sees
+# one self-contained question, not the whole conversation.
+_PLANNING_HISTORY_TURNS = 2
+
+
+def _planning_query(history: list, question: str) -> str:
+    """The question as the retrieval planner should see it: the last couple of
+    USER turns for referent resolution, then the current question."""
+    prior = [
+        m.content for m in history
+        if getattr(m, "role", None) == "user" and (m.content or "").strip()
+    ][-_PLANNING_HISTORY_TURNS:]
+    if not prior:
+        return question
+    return (
+        "Earlier in this conversation: " + " | ".join(prior)
+        + f"\nCurrent question: {question}"
+    )
+
+
+async def _db_persona_prompt(
+    agent_id: str, ticker: str, question: str, history: list
+) -> str:
+    """A persona system prompt grounded in DB retrieval rather than a Deep
+    Analysis run — what an agent chat falls back to when no analysis exists."""
+    kinds, doc_types = _AGENT_DOMAINS.get(agent_id, ([], []))
+    context = await orchestration_graph.retrieve_context(
+        _planning_query(history, question), ticker,
+        allowed_kinds=kinds, search_doc_types=doc_types,
+    )
+    name = "Manager" if agent_id == "manager" else display_name(agent_id)
+    return _DB_PERSONA_TEMPLATE.format(
+        name=name,
+        ticker=ticker,
+        domain=(
+            "synthesizing across all of this company's data" if agent_id == "manager"
+            else f"{name} evidence"
+        ),
+        fetch_hint=_FETCH_HINTS.get(agent_id, "the relevant data type"),
+        context=context or "(nothing in the database matched this question yet)",
+    )
+
 
 _FIELD_CHAT_TEMPLATE = """\
 You are the {name}, one of six specialist analysts on a financial research team.
@@ -470,10 +595,22 @@ async def chat(
                 raise HTTPException(
                     status_code=400,
                     detail="A ticker is required to chat with an agent persona: "
-                           "it selects which company's analysis run to talk about.",
+                           "it selects which company's data to talk about.",
                 )
-            # raises if unavailable
-            system_prompt = _agent_chat_persona(agent_id, debate_store, ticker, store)
+            try:
+                system_prompt = _agent_chat_persona(agent_id, debate_store, ticker, store)
+            except HTTPException as e:
+                # 409 = this company has no Deep Analysis run (or this agent
+                # produced no report in it). That used to end the conversation;
+                # now it falls back to answering from the DB tier, so a ticker
+                # that was only ever fetched in the Data tab is still fully
+                # discussable. A 400 (unknown agent_id) still propagates.
+                if e.status_code != 409:
+                    raise
+                await doc_indexer.ensure_indexed(ticker, store)
+                system_prompt = await _db_persona_prompt(
+                    agent_id, ticker, question, request.history
+                )
         history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
             answer = await ask_persona(question, history, system_prompt)
@@ -481,19 +618,32 @@ async def chat(
             raise HTTPException(status_code=502, detail=str(e))
         return ChatResponse(answer=answer)
 
+    # ── DB-first grounding ────────────────────────────────────────────────
+    # Retrieve only what THIS question needs from the DB tier (structured_db
+    # facts + footnotes, hybrid search over filing text / earnings / news,
+    # price + insider rows) rather than pasting every cached document into
+    # the prompt. Works for any ticker whose data was fetched in the Data
+    # tab — no Deep Analysis run required. Falls through to the legacy
+    # in-memory/archived path below only when retrieval finds nothing.
+    if ticker:
+        await doc_indexer.ensure_indexed(ticker, store)
+        retrieved = await orchestration_graph.retrieve_context(
+            _planning_query(request.history, question), ticker
+        )
+        if retrieved.strip():
+            history = [{"role": m.role, "content": m.content} for m in request.history]
+            try:
+                answer = await ask_persona(
+                    question, history,
+                    _DB_GENERAL_TEMPLATE.format(ticker=ticker, context=retrieved),
+                )
+            except RuntimeError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            return ChatResponse(answer=answer)
+
     # Assemble the grounding context from this company's in-memory data, plus the
     # media/macro data fetched for it (so the AI sees all views for ONE company).
-    # Two independent sources are concatenated: MediaCache (session-only, from
-    # actually opening a /media/* viewer tab) and the Data tab's own disk
-    # caches (news/earnings/price/insider — persisted, populated by POST
-    # /data/fetch regardless of session or whether Deep Analysis ever ran).
-    # Without the second one, a ticker fetched only through the Data tab would
-    # have nothing to say about beyond its financials.
     media_context = media_service.build_media_context(cache, ticker)
-    if ticker:
-        persisted_context = media_service.build_persisted_data_context(ticker)
-        if persisted_context.strip():
-            media_context = f"{media_context}\n\n{persisted_context}" if media_context.strip() else persisted_context
 
     # Only the named company's filings are in scope. Without a ticker the
     # assistant is macro-only (no filing data at all).
@@ -560,9 +710,10 @@ async def chat(
     # view needs no upload).
     if not filing_meta and not archived_findings and not media_context.strip():
         return ChatResponse(
-            answer="No data yet. Upload SEC 10-K / 10-Q PDFs on the Dashboard, "
-                   "or open the Company Media / Macro Sentiment views to pull in "
-                   "news and market data — then ask me about any of it.",
+            answer="No data yet for this company. Open the Data tab, enter the "
+                   "ticker, and fetch what you need (SEC 10-K / 10-Q, Other SEC, "
+                   "Company News, Earnings Call Transcript, Price & Technicals) "
+                   "— then ask me about any of it. No Deep Analysis run required.",
         )
 
     history = [{"role": m.role, "content": m.content} for m in request.history]

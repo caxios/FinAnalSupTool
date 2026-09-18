@@ -132,6 +132,46 @@ async def footnote_tool(task: SubTask) -> list[dict]:
     )
 
 
+async def price_tool(task: SubTask) -> list[dict]:
+    """
+    The most recently cached price/technicals window for this ticker
+    (services.price_cache — written by the Data tab's "Price & Technicals"
+    fetch). Returns [] when nothing has been fetched for the ticker.
+    """
+    from services import price_cache
+
+    ticker = (task.get("ticker") or "").strip().upper()
+    if not ticker:
+        return []
+    ranges = price_cache.list_cached_ranges(ticker)
+    if not ranges:
+        return []
+    start, end = ranges[-1]
+    data = price_cache.get_price_data(ticker, start, end)
+    if not data:
+        return []
+    return [{"period_start": start, "period_end": end, **data}]
+
+
+async def insider_tool(task: SubTask) -> list[dict]:
+    """
+    Form 4 insider trades + 8-K filing rows for this ticker
+    (services.insider_cache — written by the Data tab's "Other SEC" fetch),
+    newest first and capped: this feeds a prompt, not a table view.
+    """
+    from services import insider_cache
+
+    ticker = (task.get("ticker") or "").strip().upper()
+    if not ticker:
+        return []
+    rows: list[dict] = []
+    for tr in (insider_cache.get_insider_trades(ticker) or [])[:20]:
+        rows.append({"row_type": "form4", **tr})
+    for f in (insider_cache.get_8k_filings(ticker) or [])[:10]:
+        rows.append({"row_type": "8k", **f})
+    return rows
+
+
 async def search_tool(task: SubTask) -> list[SearchHit]:
     """rag.hybrid_search.search scoped to this sub_task's ticker, with
     reranking on — this is the tool feeding the final top-5 excerpts into
@@ -141,4 +181,7 @@ async def search_tool(task: SubTask) -> list[SearchHit]:
     if not query:
         return []
     ticker = (task.get("ticker") or "").strip().upper() or None
-    return await hybrid_search.search(query, ticker=ticker, rerank=True, rerank_top_n=5)
+    return await hybrid_search.search(
+        query, ticker=ticker, doc_types=task.get("doc_types") or None,
+        rerank=True, rerank_top_n=5,
+    )
