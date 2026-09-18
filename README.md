@@ -83,6 +83,31 @@ npm run dev
 ```
 - Access the frontend in your browser at the provided localhost address (typically `http://localhost:5173`).
 
+## 📥 Downloading SEC Filings from the Terminal
+
+Save SEC filings (10-K, 10-Q, 8-K, DEF 14A, …) straight to your machine — no server needed.
+
+```bash
+cd backend
+python download_filings.py              # interactive: asks for ticker, type, period
+```
+
+Or pass everything at once — `TICKER  FILING_TYPE  START  [END]`:
+
+```bash
+python download_filings.py AAPL 10-K 2022 2025                # annual reports FY2022–FY2025
+python download_filings.py AAPL 10-Q 2024Q1 2025Q2            # quarterly reports
+python download_filings.py AAPL 10-K,10-Q 2024 2025           # several types at once
+python download_filings.py AAPL 8-K 2026-01-01 2026-09-18     # any other form, by filing date
+python download_filings.py NVDA 10-K 2025 --format pdf        # PDF instead of HTML
+python download_filings.py AAPL 10-Q 2024 2025 --dry-run      # list only, download nothing
+```
+
+- **Periods:** 10-K / 10-Q use the company's *fiscal* year (`YYYY` or `YYYYQn`). Other forms use the *filing date* (`YYYY`, `YYYYQn` or `YYYY-MM-DD`). There is no Q4 10-Q; Q4 figures are in the 10-K.
+- **Format:** `--format html` (default, fast), `pdf` (headless Chromium, slower), or `both`.
+- **Output:** `downloads/{TICKER}/{FORM}/` at the repo root. Change it with `--out`. Existing files are skipped unless `--overwrite`.
+- The `downloads/` folder is gitignored, so downloaded filings stay local.
+
 ## 📁 Project Structure
 
 ```

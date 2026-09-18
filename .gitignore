@@ -23,6 +23,8 @@ backend/news_cache/
 backend/price_cache/
 backend/insider_cache/
 backend/transcript_cache/
+# Filings saved by backend/download_filings.py
+downloads/
 # Portfolio + trading journal (durable user data, never committed)
 backend/portfolio.db
 backend/portfolio.db-wal
