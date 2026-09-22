@@ -6,7 +6,7 @@ Download SEC filings to local disk from the terminal.
     python download_filings.py AAPL 10-K 2022 2025
     python download_filings.py AAPL 10-Q 2024Q1 2025Q2
     python download_filings.py AAPL 8-K 2026-01-01 2026-09-18
-    python download_filings.py NVDA 10-K,10-Q 2024 2025 --format pdf
+    python download_filings.py NVDA 10-K,10-Q 2024 2025 --format html
     python download_filings.py            # no arguments -> asks interactively
 
 Period semantics depend on the form:
@@ -24,9 +24,10 @@ real Windows Downloads location, even if it was moved), outside the repo. Use
 --out to choose another folder. Already-downloaded files are skipped unless
 --overwrite.
 
---format html (default) saves the primary document exactly as SEC serves it —
-fast, no extra dependencies. --format pdf renders it through headless
-Chromium (Playwright), like the app's own SEC fetch; slower, needs Playwright.
+Everything is saved as PDF by default — the format other tools accept for
+upload. --format html saves the raw SEC document instead (faster, no
+Chromium), and --format both saves each filing twice. If a PDF render fails,
+the HTML is saved as a fallback so the filing isn't lost.
 """
 
 from __future__ import annotations
@@ -344,10 +345,26 @@ def download(targets: list[Target], out_dir: Path, fmt: str, overwrite: bool) ->
                     print(f"{prefix}: {size / 1024:,.0f} KB -> {path}")
                     done += 1
                 except Exception as e:  # noqa: BLE001 — one bad filing shouldn't stop the batch
-                    print(f"{prefix}: FAILED ({e})")
-                    failed += 1
                     if path.exists() and path.stat().st_size == 0:
                         path.unlink()
+                    # A PDF render can fail for reasons the raw document doesn't
+                    # (Chromium missing, a page that won't finish loading). Keep
+                    # the filing rather than losing it, and say what happened so
+                    # the file that DID land isn't mistaken for the PDF.
+                    if ext == "pdf" and fmt == "pdf":
+                        html_path = _target_path(out_dir, t, "html")
+                        try:
+                            html_path.parent.mkdir(parents=True, exist_ok=True)
+                            size = _download_html(client, t, html_path)
+                            print(f"{prefix}: PDF render failed ({e}) — saved HTML instead "
+                                  f"({size / 1024:,.0f} KB -> {html_path})")
+                            done += 1
+                            time.sleep(_REQUEST_DELAY_S)
+                            continue
+                        except Exception:  # noqa: BLE001 — report the original failure
+                            pass
+                    print(f"{prefix}: FAILED ({e})")
+                    failed += 1
                 time.sleep(_REQUEST_DELAY_S)
     return done, skipped, failed
 
@@ -375,7 +392,7 @@ def _interactive() -> argparse.Namespace:
     this_year = str(date.today().year)
     start = _ask(f"시작 기간 ({hint})", str(date.today().year - 2))
     end = _ask(f"종료 기간 ({hint})", this_year)
-    fmt = _ask("형식 (html / pdf / both)", "html").lower()
+    fmt = _ask("형식 (pdf / html / both)", "pdf").lower()
     return argparse.Namespace(
         ticker=ticker, forms=forms, start=start, end=end, format=fmt,
         out=str(_DEFAULT_OUT), overwrite=False, dry_run=False,
@@ -392,7 +409,12 @@ def main(argv: list[str] | None = None) -> int:
         help="e.g.  AAPL 10-K 2022 2025  |  AAPL 10-K, 10-Q 2024 2026  |  MSFT DEF 14A 2025. "
              "Periods: YYYY, YYYYQn, or YYYY-MM-DD (END defaults to START).",
     )
-    parser.add_argument("--format", choices=("html", "pdf", "both"), default="html")
+    parser.add_argument(
+        "--format", choices=("html", "pdf", "both"), default="pdf",
+        help="pdf (default) renders through headless Chromium — what other tools "
+             "usually accept for upload; html is the raw SEC document (faster); "
+             "both saves each filing twice.",
+    )
     parser.add_argument("--out", default=str(_DEFAULT_OUT), help=f"Output folder (default: {_DEFAULT_OUT})")
     parser.add_argument("--overwrite", action="store_true", help="Re-download files that already exist")
     parser.add_argument("--dry-run", action="store_true", help="List what would be downloaded, download nothing")
